@@ -134,7 +134,17 @@ export class RelayRoom extends DurableObject<Env> {
         // growing the DO's storage without limit. Drop when full; it self-heals
         // as the owner drains. (Replays are already rejected by the ratchet.)
         const pending = this.ctx.storage.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM q').one().n;
-        if (pending >= MAX_QUEUE) return;
+        if (pending >= MAX_QUEUE) {
+          // Honest rejection: tell the sender instead of silently dropping (which
+          // would leave a delivered-looking checkmark). Also logged for `wrangler tail`.
+          console.warn(`relay: inbox full (${pending}), rejecting send`);
+          try {
+            ws.send(JSON.stringify({ t: 'nack', mid: typeof m.mid === 'string' ? m.mid : null, reason: 'full' }));
+          } catch {
+            /* sender socket gone */
+          }
+          return;
+        }
         const inserted = this.ctx.storage.sql
           .exec<{ id: number }>('INSERT INTO q (body) VALUES (?) RETURNING id', m.b64)
           .one();

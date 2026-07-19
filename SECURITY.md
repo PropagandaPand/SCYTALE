@@ -112,9 +112,12 @@ SK  = HKDF-SHA256( 0xFF·32 || DH1||DH2||DH3||DH4 ,  info="SCYTALE_X3DH_v1" )
   leert seine Queue — nicht jeder, der bloß den Code hat.
 - **Store-and-Forward**: SQLite-Queue, Ack-basiert. Beide müssen **nicht**
   gleichzeitig online sein. **Queue gedeckelt** (`MAX_QUEUE`=1000 pro Inbox):
-  da Senden bewusst ohne Auth ist, begrenzt der Cap Flooding; bei Voll wird
-  verworfen, heilt beim Leeren. **Replays** injizieren keine Nachrichten — der
-  Double Ratchet lehnt bereits verbrauchte Message-Keys ab.
+  da Senden bewusst ohne Auth ist, begrenzt der Cap Flooding. Bei Voll wird
+  **nicht stumm verworfen**, sondern ein `nack` an den Absender zurückgegeben
+  (+ `console.warn` für `wrangler tail`) → die betroffene Nachricht wird als
+  **„nicht zugestellt"** markiert statt mit einem Haken Zustellung vorzutäuschen.
+  Heilt beim Leeren. **Replays** injizieren keine Nachrichten — der Double
+  Ratchet lehnt bereits verbrauchte Message-Keys ab.
 - **Ein-Richtungs-Onboarding**: Code weitergeben reicht; der andere schreibt
   zuerst, der Kontakt entsteht automatisch aus dem Prekey-Header.
 - Es transitiert **ausschließlich Ciphertext**.

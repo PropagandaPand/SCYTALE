@@ -250,9 +250,28 @@ export function Messenger({ dek, onLock }: Props) {
     if (relaysRef.current.has(room)) return;
     const client = new RelayClient(room, {
       onStatus: (s) => setStatuses((prev) => ({ ...prev, [contact.roomId]: s })),
+      onNack: (mid) => markFailed(mid),
     });
     relaysRef.current.set(room, client);
     client.connect();
+  }
+
+  // The relay rejected a send (recipient's mailbox full). Mark that exact bubble
+  // as failed so the checkmark never lies about delivery.
+  function markFailed(mid: string | null) {
+    setError('Nicht zugestellt — das Postfach des Empfängers ist voll.');
+    if (!mid) return;
+    for (const roomId of Object.keys(messagesRef.current)) {
+      const arr = messagesRef.current[roomId];
+      const idx = arr.findIndex((m) => m.mid === mid);
+      if (idx >= 0) {
+        arr[idx] = { ...arr[idx], failed: true };
+        void saveMessages(dek, roomId, arr);
+        commitMessages();
+        bump();
+        return;
+      }
+    }
   }
 
   async function onInbox(bytes: Bytes, ackId: number) {
@@ -456,13 +475,13 @@ export function Messenger({ dek, onLock }: Props) {
   }
 
   // ── Groups ────────────────────────────────────────────────────────
-  async function sendEnvelopeTo(contact: Contact, envelope: Bytes) {
+  async function sendEnvelopeTo(contact: Contact, envelope: Bytes, mid?: string) {
     let room = sendRoomRef.current.get(contact.roomId);
     if (!room) {
       await connectSend(contact);
       room = sendRoomRef.current.get(contact.roomId);
     }
-    (room ? relaysRef.current.get(room) : undefined)?.send(envelope);
+    (room ? relaysRef.current.get(room) : undefined)?.send(envelope, mid);
   }
 
   // A hidden pairwise contact for a group member, so we can fan messages to them.
@@ -771,8 +790,9 @@ export function Messenger({ dek, onLock }: Props) {
         room = sendRoomRef.current.get(contact.roomId);
       }
       const relay = room ? relaysRef.current.get(room) : undefined;
-      relay?.send(envelope);
-      await appendMessage(activeRoom, { mine: true, text, ts: Date.now() });
+      const mid = crypto.randomUUID();
+      relay?.send(envelope, mid);
+      await appendMessage(activeRoom, { mine: true, text, ts: Date.now(), mid });
       setMsgInput('');
       await saveContact(dek, contact);
       void ensureProfileSent(contact);
@@ -805,14 +825,15 @@ export function Messenger({ dek, onLock }: Props) {
         setError(`Zu groß (${Math.round(data.length / 1024)} KB) — inline gehen ~${Math.round(MAX_ATTACH / 1024)} KB.`);
         return;
       }
-      const localMsg: ChatMessage = { mine: true, ts: Date.now(), file: { name, mime, dataB64: bytesToB64(data) } };
+      const mid = crypto.randomUUID();
+      const localMsg: ChatMessage = { mine: true, ts: Date.now(), file: { name, mime, dataB64: bytesToB64(data) }, mid };
       if (activeGroup) {
         await groupSend({ kind: 'file', name, mime, data }, localMsg);
         return;
       }
       const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
       if (!contact) return;
-      await sendEnvelopeTo(contact, await sendFile(id, contact, name, mime, data));
+      await sendEnvelopeTo(contact, await sendFile(id, contact, name, mime, data), mid);
       await appendMessage(contact.roomId, localMsg);
       await saveContact(dek, contact);
       bump();
@@ -889,7 +910,8 @@ export function Messenger({ dek, onLock }: Props) {
       return;
     }
     const name = `sprachnachricht.${ext}`;
-    const localMsg: ChatMessage = { mine: true, ts: Date.now(), file: { name, mime, dataB64: bytesToB64(data) } };
+    const mid = crypto.randomUUID();
+    const localMsg: ChatMessage = { mine: true, ts: Date.now(), file: { name, mime, dataB64: bytesToB64(data) }, mid };
     try {
       if (activeGroup) {
         await groupSend({ kind: 'file', name, mime, data }, localMsg);
@@ -897,7 +919,7 @@ export function Messenger({ dek, onLock }: Props) {
       }
       const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
       if (!contact) return;
-      await sendEnvelopeTo(contact, await sendFile(id, contact, name, mime, data));
+      await sendEnvelopeTo(contact, await sendFile(id, contact, name, mime, data), mid);
       await appendMessage(contact.roomId, localMsg);
       await saveContact(dek, contact);
       bump();
@@ -1329,7 +1351,14 @@ export function Messenger({ dek, onLock }: Props) {
               )}
               <span className="meta">
                 {fmtClock(m.ts)}
-                {m.mine && <IconDoubleCheck size={13} />}
+                {m.mine &&
+                  (m.failed ? (
+                    <span className="msg-failed" title="Nicht zugestellt — Postfach voll">
+                      ⚠ nicht zugestellt
+                    </span>
+                  ) : (
+                    <IconDoubleCheck size={13} />
+                  ))}
               </span>
             </div>
           ))}
@@ -1424,7 +1453,14 @@ export function Messenger({ dek, onLock }: Props) {
               )}
               <span className="meta">
                 {fmtClock(m.ts)}
-                {m.mine && <IconDoubleCheck size={13} />}
+                {m.mine &&
+                  (m.failed ? (
+                    <span className="msg-failed" title="Nicht zugestellt — Postfach voll">
+                      ⚠ nicht zugestellt
+                    </span>
+                  ) : (
+                    <IconDoubleCheck size={13} />
+                  ))}
               </span>
             </div>
           ))}

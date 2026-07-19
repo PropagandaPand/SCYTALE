@@ -12,6 +12,8 @@ export interface ChatMessage {
   sender?: string; // display name of the sender, for group messages
   text?: string;
   file?: { name: string; mime: string; dataB64: string };
+  mid?: string; // client id, to match a relay nack back to this bubble
+  failed?: boolean; // relay rejected it (e.g. recipient's mailbox full)
 }
 
 const aad = (roomId: string) => utf8.encode(`scytale:messages:v1:${roomId}`);

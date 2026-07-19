@@ -24,6 +24,8 @@ export interface RelayOptions {
   onStatus?: (s: RelayStatus) => void;
   /** Owner only: a queued/live ciphertext arrived; ack it once handled. */
   onCipher?: (bytes: Uint8Array<ArrayBuffer>, ackId: number) => void;
+  /** Sender: the relay rejected a send (recipient's mailbox full). */
+  onNack?: (mid: string | null) => void;
   /** Present => authenticate as this inbox's owner. */
   auth?: { signPub: Bytes; sign: (nonce: Bytes) => Promise<Bytes> };
 }
@@ -127,6 +129,8 @@ export class RelayClient {
         clearTimeout(this.pongTimer);
         this.pongTimer = null;
       }
+    } else if (m.t === 'nack') {
+      this.opts.onNack?.(typeof m.mid === 'string' ? m.mid : null);
     } else if (m.t === 'challenge' && this.opts.auth && typeof m.nonce === 'string') {
       const sig = await this.opts.auth.sign(b64ToBytes(m.nonce));
       this.ws?.send(
@@ -141,9 +145,10 @@ export class RelayClient {
   }
 
   /** Sender: push a ciphertext to this (peer's) inbox. Queued until the socket
-   *  is open, so a message sent right after connect() isn't silently dropped. */
-  send(bytes: Bytes): void {
-    const frame = JSON.stringify({ t: 'send', b64: bytesToB64(bytes) });
+   *  is open, so a message sent right after connect() isn't silently dropped.
+   *  `mid` (optional) lets a relay nack be matched back to this message. */
+  send(bytes: Bytes, mid?: string): void {
+    const frame = JSON.stringify({ t: 'send', b64: bytesToB64(bytes), mid });
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(frame);
     else this.outbox.push(frame);
   }

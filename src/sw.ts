@@ -3,7 +3,16 @@
  * dependency-free so the app shell — our first line of defence against a
  * malicious code push — stays fully auditable. Two jobs:
  *
- *   1. Precache the app shell (offline + no silent re-fetch of JS on launch).
+ *   1. Precache the app shell for offline use, and keep it CURRENT:
+ *        - navigations → network-first (fresh index.html when online), so a
+ *          deploy is picked up on the next online launch even if the SW itself
+ *          hasn't updated yet — this is what stops iOS PWAs stranding on an old
+ *          build. Hashed JS/CSS stay cache-first (immutable).
+ *      NOTE: network-first HTML means the server controls the shell on every
+ *      online launch. That's fine while we run `autoUpdate` (the server already
+ *      pushes code silently in the testing phase). Before release — together
+ *      with switching back to `prompt` — reconsider cache-first here so there's
+ *      no silent code swap on a security tool.
  *   2. Wake on a CONTENT-FREE Web Push and show a generic "Neue Nachricht".
  *
  * The push payload never carries message content: the vault is passphrase-
@@ -46,6 +55,27 @@ sw.addEventListener('activate', (event) => {
   );
 });
 
+// Serve the freshest index.html the network can give us, but never hang: race
+// the fetch against a timeout and fall back to the cached shell. Caching HTML
+// cache-first is the "invisible update" trap that strands iOS PWAs on an old
+// build — network-first here means a new deploy is live the next time the app
+// opens online, regardless of when the service worker itself updates.
+async function freshShell(cache: Cache): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 3500);
+  try {
+    const fresh = await fetch('/index.html', { cache: 'no-store', signal: ctrl.signal });
+    clearTimeout(timer);
+    if (fresh.ok) {
+      await cache.put('/index.html', fresh.clone());
+      return fresh;
+    }
+  } catch {
+    clearTimeout(timer);
+  }
+  return (await cache.match('/index.html')) ?? Response.error();
+}
+
 sw.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET') return;
@@ -53,19 +83,22 @@ sw.addEventListener('fetch', (event) => {
   if (url.origin !== sw.location.origin) return; // never touch cross-origin
   if (url.pathname.startsWith('/api/')) return; // relay: always live network
 
-  // Cache-first app shell; SPA navigations fall back to the precached index.
+  // Navigations → network-first (with timeout + offline fallback).
+  if (req.mode === 'navigate') {
+    event.respondWith(caches.open(PRECACHE).then(freshShell));
+    return;
+  }
+
+  // Hashed static assets are immutable → cache-first; cache on first network hit
+  // so the app also works fully offline after it's been loaded once online.
   event.respondWith(
     (async () => {
       const cache = await caches.open(PRECACHE);
-      const cached = await cache.match(req.mode === 'navigate' ? '/index.html' : req);
+      const cached = await cache.match(req);
       if (cached) return cached;
-      try {
-        return await fetch(req);
-      } catch {
-        const fallback = await cache.match('/index.html');
-        if (fallback) return fallback;
-        throw new Error('offline');
-      }
+      const res = await fetch(req);
+      if (res.ok && res.type === 'basic') await cache.put(req, res.clone());
+      return res;
     })(),
   );
 });

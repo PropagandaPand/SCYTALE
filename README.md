@@ -50,7 +50,7 @@ Forward Secrecy und Post-Compromise Security.
 ## Entwicklung
 
 ```bash
-npm install --ignore-scripts   # --ignore-scripts: umgeht miniflares sharp-Build
+npm install        # .npmrc setzt ignore-scripts (umgeht miniflares sharp-Build)
 npm run dev        # Vite-Dev-Server (nur Frontend, ohne Relay)
 npm run build && npm run cf:dev  # Worker + Durable Object lokal (inkl. Relay)
 npm run deploy     # Build + wrangler deploy

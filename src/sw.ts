@@ -129,8 +129,10 @@ sw.addEventListener('push', (event) => {
     (async () => {
       const windows = await sw.clients.matchAll({ type: 'window', includeUncontrolled: true });
       if (windows.some((c) => c.visibilityState === 'visible')) return; // app already open
-      await sw.registration.showNotification('SCYTALE', {
-        body: 'Neue Nachricht',
+      // iOS already shows the app name ("SCYTALE") as the source header, so the
+      // title must NOT repeat it. Content-free by design — no sender, no text.
+      await sw.registration.showNotification('Neue Nachricht', {
+        body: 'Tippen zum Öffnen',
         icon: '/pwa-192.png',
         badge: '/pwa-192.png',
         tag: 'scytale-new-message',

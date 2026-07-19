@@ -2,7 +2,7 @@
 
 SCYTALE ist gegen **anlasslose Massenüberwachung** gebaut (Chatkontrolle /
 CSAR). Dieses Dokument ist die genaue Aufschlüsselung aller Mechanismen und
-sagt ehrlich, was geschützt ist — und was nicht. Stand: v0.11.5.
+sagt ehrlich, was geschützt ist — und was nicht. Stand: v0.11.9.
 
 **Leitprinzipien:** niemals eigene Krypto erfinden (vetted Primitiven +
 etablierte Protokolle: X3DH, Double Ratchet); der Server ist ein **dummer
@@ -116,7 +116,10 @@ SK  = HKDF-SHA256( 0xFF·32 || DH1||DH2||DH3||DH4 ,  info="SCYTALE_X3DH_v1" )
   **erst nach diesem Ack** — bis dahin *pending* (blasser Haken). Kein Ack
   innerhalb ~10 s **oder** ein `nack` (Queue voll) → **„nicht zugestellt"**. Ein
   zwischen `send()` und DO-Verarbeitung verlorener Socket erzeugt so **keinen**
-  falschen Haken mehr.
+  falschen Haken mehr. **Invariante: einmal `sent`, immer `sent`** — ein spätes
+  `nack`/Timeout kann eine bestätigte Zustellung nicht mehr zurückstufen (nur
+  `failed → sent` als Recovery ist erlaubt), damit der Haken auch in die andere
+  Richtung nicht lügt. Der Haken heißt „Relay hat's", **nicht** „gelesen".
 - **Queue gedeckelt** (`MAX_QUEUE`=1000 pro Inbox): da Senden bewusst ohne Auth
   ist, begrenzt der Cap Flooding; bei Voll `nack` (+ `console.warn` **nur mit
   Zähler, ohne Inbox-ID** — Cloudflare-Logs sollen keine Metadaten sammeln).

@@ -1583,6 +1583,68 @@ select {
   transform: translateX(18px);
 }
 
+/* ==== AVATAR CROPPER ================================================ */
+.crop-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 110;
+  background: rgba(6, 7, 9, 0.96);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  padding: 24px;
+  animation: scyfade 0.18s ease;
+}
+.crop-head {
+  color: #fff;
+  font-weight: 600;
+  font-size: 17px;
+}
+.crop-stage {
+  position: relative;
+  width: min(86vw, 52vh);
+  aspect-ratio: 1;
+  overflow: hidden;
+  border-radius: 14px;
+  background: #000;
+  touch-action: none; /* we handle pan/pinch ourselves */
+  cursor: grab;
+}
+.crop-stage:active {
+  cursor: grabbing;
+}
+.crop-img {
+  position: absolute;
+  top: 0;
+  left: 0;
+  max-width: none;
+  user-select: none;
+  -webkit-user-drag: none;
+  will-change: transform;
+}
+.crop-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  pointer-events: none;
+}
+.crop-zoom {
+  width: min(86vw, 52vh);
+  accent-color: var(--accent);
+}
+.crop-actions {
+  display: flex;
+  gap: 12px;
+  width: min(86vw, 52vh);
+}
+.crop-actions .btn {
+  flex: 1;
+}
+
 /* ==== FULL-SCREEN QR (own code, for easy scanning) ================== */
 .qr-card.tappable {
   display: block;

@@ -49,7 +49,6 @@ import {
 import { saveContact, loadContacts, removeContact } from './lib/store';
 import { loadProfile, saveProfile, type MyProfile } from './lib/profile';
 import { pushSupported, enablePush, disablePush, currentSubscription } from './lib/push';
-import { makeAvatar } from './lib/avatar';
 import { loadMessages, saveMessages, clearMessages, type ChatMessage } from './lib/messages';
 import { RelayClient, type RelayStatus } from './lib/relay';
 import { makeQr } from './lib/qr';
@@ -57,6 +56,7 @@ import { bytesToB64, b64ToBytes } from './lib/bytes';
 import { compressImage } from './lib/imagecompress';
 import { Identicon } from './Identicon';
 import { QrScanner } from './QrScanner';
+import { CropModal } from './CropModal';
 import { AudioPlayer } from './AudioPlayer';
 import {
   IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach, IconMic, IconTrash, IconDots, IconGroup,
@@ -203,6 +203,7 @@ export function Messenger({ dek, onLock }: Props) {
   const [notifOn, setNotifOn] = useState(false);
   const [notifBusy, setNotifBusy] = useState(false);
   const [qrFull, setQrFull] = useState(false); // own QR blown up full-screen for scanning
+  const [cropFile, setCropFile] = useState<File | null>(null); // avatar being cropped
 
   useEffect(() => {
     activeRoomRef.current = activeRoom;
@@ -917,21 +918,27 @@ export function Messenger({ dek, onLock }: Props) {
     }
   }
 
-  async function onPickAvatar(e: ChangeEvent<HTMLInputElement>) {
+  function onPickAvatar(e: ChangeEvent<HTMLInputElement>) {
     const input = e.target;
     const file = input.files?.[0];
     input.value = '';
     if (!file) return;
     setError('');
+    setCropFile(file); // open the cropper; saving happens in onCropDone
+  }
+
+  async function onCropDone(bytes: Uint8Array) {
     try {
-      const b64 = bytesToB64(await makeAvatar(file));
+      const b64 = bytesToB64(bytes as Uint8Array<ArrayBuffer>);
       myProfileRef.current = { ...myProfileRef.current, avatarB64: b64 };
       setMyAvatarB64(b64);
+      setCropFile(null);
       await saveProfile(dek, myProfileRef.current);
       await broadcastProfile();
       bump();
     } catch (err) {
       setError('Avatar fehlgeschlagen: ' + (err as Error).message);
+      setCropFile(null);
     }
   }
 
@@ -1601,7 +1608,10 @@ export function Messenger({ dek, onLock }: Props) {
           <div className="h">Profil</div>
         </div>
         <div className="verify-body">
-          <input ref={avatarInputRef} type="file" accept="image/*" hidden onChange={(e) => void onPickAvatar(e)} />
+          <input ref={avatarInputRef} type="file" accept="image/*" hidden onChange={onPickAvatar} />
+          {cropFile && (
+            <CropModal file={cropFile} onCancel={() => setCropFile(null)} onDone={(b) => void onCropDone(b)} />
+          )}
           <button className="profile-avatar" onClick={() => avatarInputRef.current?.click()}>
             {myAvatarB64 ? <img src={avatarSrc(myAvatarB64)} alt="Dein Avatar" /> : <span className="ph">＋</span>}
             <span className="edit-badge">

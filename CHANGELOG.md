@@ -6,6 +6,18 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Feature: Profilbild-Zuschnitt + QR-Vollbild + robusterer QR-Scan
+
+- **Crop-Auswahl**: beim Setzen des Profilbilds wählt man jetzt den Ausschnitt —
+  Foto im Kreis verschieben (Drag), zoomen (Slider/Pinch/Wheel). Ergebnis
+  256×256 JPEG (EXIF entfernt, Orientierung via `createImageBitmap` gebacken).
+- **Eigener QR im Vollbild**: antippen → großer Code auf weißem Grund
+  (`image-rendering: pixelated`), damit der Kontakt ihn leicht scannt.
+- **QR-Scanner robuster**: höhere Kameraauflösung (ideal 1920×1080) + Fallback
+  auf beliebige Kamera + `attemptBoth`-Inversion → dichte Codes werden erkannt.
+- **Push-Fehler sichtbar**: `enablePush` wirft klare Fehler (iOS-Standalone-Check,
+  Timeouts) und der Profil-View zeigt sie an — kein still ausgegrauter Toggle mehr.
+
 ### Feature: Push-Benachrichtigungen (inhaltslos, opt-in)
 
 - **Web Push**, wenn die App zu ist: der Relay-DO weckt das Gerät, sobald eine

@@ -63,9 +63,16 @@ sw.addEventListener('install', (event) => {
       } catch {
         /* offline during install — navigation will fall back to network later */
       }
-      await sw.skipWaiting();
+      // NOTE: no skipWaiting() here. In 'prompt' mode the new SW waits until the
+      // user taps "Aktualisieren", which posts SKIP_WAITING (below). Activating
+      // unconditionally here + autoUpdate caused an iOS reload loop.
     })(),
   );
+});
+
+// Activate immediately only on an explicit user request (prompt-mode update).
+sw.addEventListener('message', (event) => {
+  if ((event.data as { type?: string } | undefined)?.type === 'SKIP_WAITING') void sw.skipWaiting();
 });
 
 sw.addEventListener('activate', (event) => {

@@ -24,10 +24,12 @@ export default defineConfig({
       strategies: 'injectManifest',
       srcDir: 'src',
       filename: 'sw.ts',
-      // TESTING PHASE: autoUpdate so clients self-update while the wire protocol
-      // is still changing (a stale cached client can't talk to the new relay).
-      // Revert to 'prompt' before release (no unattended code swap).
-      registerType: 'autoUpdate',
+      // 'prompt': the new SW WAITS and only activates on an explicit user tap —
+      // no unattended reload. (autoUpdate + our skipWaiting caused a reload loop
+      // on iOS.) App CONTENT still stays fresh every load via network-first
+      // navigation, so this barely affects iteration; only the SW logic itself
+      // needs the one-tap update. Also the release-safe posture (no silent swap).
+      registerType: 'prompt',
       injectRegister: null,
       manifest: {
         name: 'SCYTALE',

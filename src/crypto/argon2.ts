@@ -27,6 +27,24 @@ export const DEFAULT_ARGON2: Argon2Params = {
 };
 
 /**
+ * Hard floor enforced in code. The vault header (which carries the params) is
+ * NOT authenticated before the DEK is unwrapped, so an attacker who can *write*
+ * the vault could otherwise set m=8 MiB, t=1 to make offline cracking cheap.
+ * We never derive with weaker parameters than this, whatever the header says —
+ * it matches the lowest value the calibrator will ever pick, so legitimate
+ * vaults are unaffected.
+ */
+const MIN_ARGON2: Argon2Params = { memorySize: 65536, iterations: 3, parallelism: 1 };
+
+function withFloor(p: Argon2Params): Argon2Params {
+  return {
+    memorySize: Math.max(p.memorySize | 0, MIN_ARGON2.memorySize),
+    iterations: Math.max(p.iterations | 0, MIN_ARGON2.iterations),
+    parallelism: Math.max(p.parallelism | 0, MIN_ARGON2.parallelism),
+  };
+}
+
+/**
  * Derive 32 raw bytes (256-bit KEK material) from a passphrase + salt.
  * The returned Uint8Array should be zeroed by the caller as soon as it has
  * been imported into a non-extractable CryptoKey.
@@ -43,12 +61,13 @@ export async function deriveKekBytes(
   };
   const argon2id = wasm.argon2id ?? wasm.default?.argon2id;
   if (!argon2id) throw new Error('hash-wasm konnte nicht geladen werden.');
+  const p = withFloor(params); // ignore any weakened header params
   const out = await argon2id({
     password: passphrase,
     salt,
-    parallelism: params.parallelism,
-    iterations: params.iterations,
-    memorySize: params.memorySize,
+    parallelism: p.parallelism,
+    iterations: p.iterations,
+    memorySize: p.memorySize,
     hashLength: 32,
     outputType: 'binary',
   });

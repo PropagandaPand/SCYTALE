@@ -37,6 +37,7 @@ interface Att {
 }
 
 const enc = new TextEncoder();
+const MAX_QUEUE = 1000; // max undelivered messages per inbox (flood guard)
 
 function b64d(s: string): Uint8Array {
   const bin = atob(s);
@@ -128,6 +129,12 @@ export class RelayRoom extends DurableObject<Env> {
       }
       case 'send': {
         if (typeof m.b64 !== 'string') return;
+        // Bounded mailbox: anyone who knows an inbox id can queue to it (no
+        // sender auth by design), so cap the backlog to stop a flood from
+        // growing the DO's storage without limit. Drop when full; it self-heals
+        // as the owner drains. (Replays are already rejected by the ratchet.)
+        const pending = this.ctx.storage.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM q').one().n;
+        if (pending >= MAX_QUEUE) return;
         const inserted = this.ctx.storage.sql
           .exec<{ id: number }>('INSERT INTO q (body) VALUES (?) RETURNING id', m.b64)
           .one();

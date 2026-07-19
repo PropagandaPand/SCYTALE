@@ -25,7 +25,9 @@ DEK --AES-256-GCM--> jeder Datensatz auf Platte
 - **Argon2id** (memory-hard, GPU-/Seitenkanal-resistent): 256 MiB, 3 Durchläufe,
   32-Byte-Ausgabe; zufälliger 16-Byte-Salt pro Tresor (im Klartext, kein
   Geheimnis). On-Device-Kalibrierung fällt auf 128/64 MiB zurück; die Parameter
-  stehen im Tresor-Header.
+  stehen im Tresor-Header. **Code-seitiger Floor** (`MIN_ARGON2` = 64 MiB / t=3):
+  der Header ist vor dem DEK-Unwrap nicht authentifiziert, also werden geschwächte
+  Parameter (m=8 MiB, t=1) **ignoriert** — nie unter dem Floor abgeleitet.
 - **KEK** nur mit `wrapKey`/`unwrapKey` importiert; Rohbytes danach mit `fill(0)`
   überschrieben.
 - **DEK**: zufälliger AES-256-GCM-Key, non-extractable. Passphrase-Wechsel =
@@ -90,7 +92,10 @@ SK  = HKDF-SHA256( 0xFF·32 || DH1||DH2||DH3||DH4 ,  info="SCYTALE_X3DH_v1" )
   Sitzung heilt nach einer Kompromittierung.
 - **Forward Secrecy**: alte Keys verworfen; ein geleakter aktueller Schlüssel
   entschlüsselt keine Vergangenheit.
-- **Out-of-Order/verloren**: übersprungene Keys zwischengelagert (`MAX_SKIP`=1000).
+- **Out-of-Order/verloren**: übersprungene Keys zwischengelagert. Doppelt
+  gedeckelt gegen DoS: **1000 pro Sprung** (`MAX_SKIP`) **und 2000 gesamt pro
+  Session** (`MAX_SKIP_SESSION`, älteste werden verworfen) — ein Strom von
+  Hoch-N-Nachrichten kann den Tresor nicht unbegrenzt wachsen lassen.
 
 ---
 
@@ -106,7 +111,10 @@ SK  = HKDF-SHA256( 0xFF·32 || DH1||DH2||DH3||DH4 ,  info="SCYTALE_X3DH_v1" )
   signiert, DO prüft `hash(signPub)==Inbox` **und** Signatur. Nur der Besitzer
   leert seine Queue — nicht jeder, der bloß den Code hat.
 - **Store-and-Forward**: SQLite-Queue, Ack-basiert. Beide müssen **nicht**
-  gleichzeitig online sein.
+  gleichzeitig online sein. **Queue gedeckelt** (`MAX_QUEUE`=1000 pro Inbox):
+  da Senden bewusst ohne Auth ist, begrenzt der Cap Flooding; bei Voll wird
+  verworfen, heilt beim Leeren. **Replays** injizieren keine Nachrichten — der
+  Double Ratchet lehnt bereits verbrauchte Message-Keys ab.
 - **Ein-Richtungs-Onboarding**: Code weitergeben reicht; der andere schreibt
   zuerst, der Kontakt entsteht automatisch aus dem Prekey-Header.
 - Es transitiert **ausschließlich Ciphertext**.
@@ -148,11 +156,14 @@ SK  = HKDF-SHA256( 0xFF·32 || DH1||DH2||DH3||DH4 ,  info="SCYTALE_X3DH_v1" )
 
 ---
 
-## Reproducible-Build-Verifikation
+## Reproducible-Build-Verifikation (für Auditoren, nicht Endnutzer)
 
-Restrisiko einer PWA: der Server könnte manipuliertes JS ausliefern. Gegenmittel
-ist **Nachprüfbarkeit** — das ausgelieferte Bundle entsteht exakt aus dem
-öffentlichen Quellcode:
+Restrisiko einer PWA: der Server könnte manipuliertes JS ausliefern.
+**Ehrliche Einordnung:** der Hash-Abgleich per DevTools ist realistisch nur für
+Auditor:innen/Entwickler:innen — kein Schutz, den ein normaler Nutzer selbst
+ausübt. Als echte Nutzer-Mitigation bräuchte es einen **unabhängigen Verifier,
+der signierte Hashes veröffentlicht** (offen, siehe Grenzen). Für Prüfer gilt:
+das ausgelieferte Bundle entsteht exakt aus dem öffentlichen Quellcode:
 
 ```bash
 git checkout <commit>
@@ -167,7 +178,7 @@ Header angezeigte **Versionsnummer** hilft beim Abgleich, welcher Build läuft.
 
 ---
 
-## Bekannte Grenzen (ehrlich)
+## Bekannte Grenzen 
 
 - **Metadaten**: der Relay sieht *welche* Inbox *wann* Ciphertext bekommt
   (Timing, Größe, Routing/conv-IDs). Inhalt und Identitäts-Klartext nie. Sealed
@@ -186,6 +197,22 @@ Header angezeigte **Versionsnummer** hilft beim Abgleich, welcher Build läuft.
 - **Bundle-Austausch (MITM)**: das Bundle enthält nur öffentliche Schlüssel, der
   Kanal muss nicht geheim sein — aber ein Vertausch wird nur durch den
   **Safety-Number-Vergleich** erkannt.
+- **Kein Recovery (bewusst)**: der Device-Key liegt in IndexedDB. Löscht der
+  Nutzer die Website-Daten (bzw. Safari räumt nach längerer Inaktivität auf),
+  ist der Tresor auf demselben Gerät **unwiederbringlich** — das ist die gewollte
+  Kehrseite von „keine Hintertür": ein exportierbares bindingSecret wäre ein
+  Wiederherstellungs- *und* Exfiltrationspfad. Ein optionaler, unter separater
+  Passphrase verschlüsselter Export bleibt eine mögliche spätere Wahl.
+- **Prekey-Downgrade**: fehlt im Bundle ein One-Time-Prekey, läuft X3DH regulär
+  auf DH1–DH3 (nur die *erste* Nachricht hat dann reduzierte Forward Secrecy —
+  wie im Signal-Standard). Ein aktiver Angreifer, der das Bundle *modifiziert*
+  (OPK strippt), wird nur durch den Safety-Number-Vergleich erkannt.
+- **Simultan-Aufbau-Tie-Break**: kryptografisch sind Initiator/Responder
+  symmetrisch (gleiches SK, gleiche Ratchet-Sicherheit) — „Gewinnen" bringt
+  keinen Vorteil außer, welche in-flight Erst-Nachricht das Rennen überlebt.
+  Grinden auf einen kleinen Schlüssel ist damit nutzlos.
+- **Sender-Rate-Limiting**: die Queue ist gedeckelt (`MAX_QUEUE`), aber ein
+  echtes Pro-Sender-Rate-Limit gegen gezieltes Fluten fehlt noch.
 
 ---
 

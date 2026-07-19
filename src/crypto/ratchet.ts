@@ -22,7 +22,8 @@ import { concatBytes, b64encode, b64decode, utf8 } from './codec';
 import type { Bytes } from './types';
 import type { KeyPair } from './identity';
 
-const MAX_SKIP = 1000;
+const MAX_SKIP = 1000; // max keys derived in a single jump (one chain)
+const MAX_SKIP_SESSION = 2000; // total skipped keys cached across the session
 const b = (x: Uint8Array): Bytes => new Uint8Array(x);
 
 const te = new TextEncoder();
@@ -211,6 +212,13 @@ async function skipMessageKeys(state: RatchetState, until: number): Promise<void
       const { ck, mk } = await kdfCk(state.CKr);
       state.CKr = ck;
       state.skipped.set(skipKey(state.DHr!, state.Nr), mk);
+      // Bound the TOTAL cache, not just a single jump: evict the oldest key
+      // (Map keeps insertion order) so a stream of high-N messages can't grow
+      // the vault without limit — a DoS Signal also caps per session.
+      if (state.skipped.size > MAX_SKIP_SESSION) {
+        const oldest = state.skipped.keys().next().value;
+        if (oldest !== undefined) state.skipped.delete(oldest);
+      }
       state.Nr += 1;
     }
   }

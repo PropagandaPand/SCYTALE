@@ -142,6 +142,16 @@ export function IconTrash({ size = 18 }: { size?: number }) {
   );
 }
 
+export function IconDots({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden="true">
+      <circle cx="9" cy="3.5" r="1.5" fill="currentColor" />
+      <circle cx="9" cy="9" r="1.5" fill="currentColor" />
+      <circle cx="9" cy="14.5" r="1.5" fill="currentColor" />
+    </svg>
+  );
+}
+
 export function IconInfo({ size = 16 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">

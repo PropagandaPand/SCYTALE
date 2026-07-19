@@ -6,6 +6,19 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Profilbilder + Kontakte/Chats löschen
+
+#### Hinzugefügt
+- **Profilbilder & Anzeigename**: Profil-Ansicht (Avatar antippen → Bild wählen,
+  center-cropped 256px JPEG, EXIF entfernt). Bild + Name werden als **E2E-
+  verschlüsselte `profile`-Nachricht** an Kontakte geschickt (neuer MessageContent-
+  Typ), nicht über den öffentlichen Code. Kontakte zeigen Avatar + Name statt
+  Identicon/Fingerprint (Priorität: lokaler Nickname > geteilter Name > Fingerprint).
+  Eigenes/Kontakt-Profil im Header/Liste/Chat. Profil-Round-Trip verifiziert.
+- **Löschen**: Kontextmenü im Chat-Header → „Chatverlauf löschen" (nur Nachrichten)
+  oder „Kontakt löschen" (Kontakt + Chat + Session, Relay getrennt), jeweils mit
+  Bestätigung. Storage-Löschung in `store.removeContact`/`messages.clearMessages`.
+
 ### Audionachrichten
 
 #### Hinzugefügt

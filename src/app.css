@@ -304,6 +304,15 @@ select {
   align-items: center;
   gap: 11px;
   min-width: 0;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  width: auto;
+  cursor: pointer;
+  color: inherit;
+  text-align: left;
+  font: inherit;
 }
 .list-brand img {
   width: 32px;
@@ -311,6 +320,9 @@ select {
   border-radius: 9px;
   flex: none;
   display: block;
+}
+.brand-avatar {
+  object-fit: cover;
 }
 .list-brand .t {
   font-weight: 600;
@@ -424,6 +436,79 @@ select {
   border-radius: var(--r-md);
   padding: 7px;
 }
+.avatar-img {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--r-lg);
+  object-fit: cover;
+  flex: none;
+  display: block;
+}
+.avatar-img.sm {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--r-md);
+}
+
+/* ---- Profile view --------------------------------------------------- */
+.profile-avatar {
+  position: relative;
+  width: 104px;
+  height: 104px;
+  margin: 0 auto 4px;
+  border: 0;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+}
+.profile-avatar img {
+  width: 104px;
+  height: 104px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+}
+.profile-avatar .ph {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 104px;
+  height: 104px;
+  border-radius: 50%;
+  background: var(--surface2);
+  color: var(--muted);
+  font-size: 40px;
+}
+.profile-avatar .edit-badge {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-ink);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--bg);
+}
+.name-input {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  color: var(--text);
+  padding: 11px 12px;
+  font: inherit;
+  font-size: 16px;
+  outline: none;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+.name-input:focus {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
 .sdot {
   position: absolute;
   right: -1px;
@@ -523,6 +608,54 @@ select {
   padding: 10px 16px 11px;
   border-bottom: 1px solid var(--border);
   flex: none;
+  position: relative;
+}
+.chat-menu-btn {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  padding: 4px;
+  cursor: pointer;
+  display: flex;
+  width: auto;
+  margin: 0;
+}
+.chat-menu {
+  position: absolute;
+  top: calc(100% - 4px);
+  right: 12px;
+  z-index: 20;
+  background: var(--elev);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+  min-width: 190px;
+  animation: scyfade 0.14s ease;
+}
+.chat-menu button {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  padding: 12px 14px;
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  margin: 0;
+  border-radius: 0;
+}
+.chat-menu button:not(:last-child) {
+  border-bottom: 1px solid var(--border);
+}
+.chat-menu button.danger {
+  color: var(--danger);
+}
+@media (hover: hover) and (pointer: fine) {
+  .chat-menu button:hover {
+    background: var(--surface2);
+  }
 }
 .chat-back {
   background: transparent;

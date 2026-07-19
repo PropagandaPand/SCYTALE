@@ -4,7 +4,7 @@
  * per room via AAD. Loaded on unlock so conversations survive lock/reload.
  */
 import { seal, open, utf8 } from '../crypto';
-import { loadRecord, saveRecord } from './db';
+import { loadRecord, saveRecord, deleteRecord } from './db';
 
 export interface ChatMessage {
   mine: boolean;
@@ -32,4 +32,8 @@ export async function saveMessages(
   messages: ChatMessage[],
 ): Promise<void> {
   await saveRecord(recordKey(roomId), await seal(dek, utf8.encode(JSON.stringify(messages)), aad(roomId)));
+}
+
+export async function clearMessages(roomId: string): Promise<void> {
+  await deleteRecord(recordKey(roomId));
 }

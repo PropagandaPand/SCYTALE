@@ -5,7 +5,7 @@
  */
 import { seal, open, utf8 } from '../crypto';
 import { serializeContact, deserializeContact, type Contact } from './session';
-import { loadRecord, saveRecord } from './db';
+import { loadRecord, saveRecord, deleteRecord } from './db';
 
 const INDEX_AAD = utf8.encode('scytale:contact-index:v1');
 const contactAad = (roomId: string) => utf8.encode(`scytale:contact:v1:${roomId}`);
@@ -27,6 +27,13 @@ export async function saveContact(dek: CryptoKey, c: Contact): Promise<void> {
     ids.push(c.roomId);
     await saveIndex(dek, ids);
   }
+}
+
+export async function removeContact(dek: CryptoKey, roomId: string): Promise<void> {
+  await deleteRecord(`contact:${roomId}`);
+  await deleteRecord(`msgs:${roomId}`);
+  const ids = (await loadIndex(dek)).filter((id) => id !== roomId);
+  await saveIndex(dek, ids);
 }
 
 export async function loadContacts(dek: CryptoKey): Promise<Contact[]> {

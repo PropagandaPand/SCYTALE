@@ -49,6 +49,10 @@ export async function saveRecord(key: string, record: SealedRecord): Promise<voi
   await (await db()).put('records', record, key);
 }
 
+export async function deleteRecord(key: string): Promise<void> {
+  await (await db()).delete('records', key);
+}
+
 // --- Device key (non-extractable CryptoKey, never leaves this device/profile) ---
 
 export async function loadDeviceKey(): Promise<CryptoKey | undefined> {

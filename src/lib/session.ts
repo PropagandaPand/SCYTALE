@@ -36,7 +36,9 @@ export interface Contact {
   peerSignPub: Bytes;
   peerDhPub: Bytes;
   peerFingerprint: string;
-  nickname?: string; // user-chosen local name for this peer
+  nickname?: string; // user-chosen local name for this peer (overrides everything)
+  peerName?: string; // display name the peer shared via their profile
+  peerAvatarB64?: string; // avatar the peer shared via their profile
   verified?: boolean; // local flag: safety number compared out-of-band
   bundle?: PreKeyBundle; // present when WE hold their code (needed to initiate)
   ratchet: RatchetState | null; // null until the session is established
@@ -107,12 +109,15 @@ export async function makeContactFromHeader(
 }
 
 /** Encrypt outgoing text into a wire envelope; establishes the session if needed. */
-/** Message payload: a plain text or a file, framed into the ratchet plaintext. */
+/** Message payload: text, a file, or a profile update — framed into the ratchet plaintext. */
 export type MessageContent =
   | { kind: 'text'; text: string }
-  | { kind: 'file'; name: string; mime: string; data: Bytes };
+  | { kind: 'file'; name: string; mime: string; data: Bytes }
+  | { kind: 'profile'; name?: string; avatar?: Bytes };
 
-// Frame: byte0 = 0 (text) | 1 (file). File: [nameLen(2)][name][mimeLen(2)][mime][data]
+// Frame: byte0 = 0 (text) | 1 (file) | 2 (profile).
+//   file:    [nameLen(2)][name][mimeLen(2)][mime][data]
+//   profile: [nameLen(2)][name][avatarLen(4)][avatar]
 function frameContent(c: MessageContent): Bytes {
   if (c.kind === 'text') {
     const t = utf8.encode(c.text);
@@ -121,27 +126,55 @@ function frameContent(c: MessageContent): Bytes {
     out.set(t, 1);
     return out;
   }
-  const name = utf8.encode(c.name);
-  const mime = utf8.encode(c.mime);
-  const out = new Uint8Array(1 + 2 + name.length + 2 + mime.length + c.data.length);
+  if (c.kind === 'file') {
+    const name = utf8.encode(c.name);
+    const mime = utf8.encode(c.mime);
+    const out = new Uint8Array(1 + 2 + name.length + 2 + mime.length + c.data.length);
+    const dv = new DataView(out.buffer);
+    let o = 0;
+    out[o++] = 1;
+    dv.setUint16(o, name.length);
+    o += 2;
+    out.set(name, o);
+    o += name.length;
+    dv.setUint16(o, mime.length);
+    o += 2;
+    out.set(mime, o);
+    o += mime.length;
+    out.set(c.data, o);
+    return out;
+  }
+  const name = utf8.encode(c.name ?? '');
+  const avatar = c.avatar ?? new Uint8Array(0);
+  const out = new Uint8Array(1 + 2 + name.length + 4 + avatar.length);
   const dv = new DataView(out.buffer);
   let o = 0;
-  out[o++] = 1;
+  out[o++] = 2;
   dv.setUint16(o, name.length);
   o += 2;
   out.set(name, o);
   o += name.length;
-  dv.setUint16(o, mime.length);
-  o += 2;
-  out.set(mime, o);
-  o += mime.length;
-  out.set(c.data, o);
+  dv.setUint32(o, avatar.length);
+  o += 4;
+  out.set(avatar, o);
   return out;
 }
 
 function unframeContent(bytes: Bytes): MessageContent {
   if (bytes[0] === 0) return { kind: 'text', text: utf8.decode(bytes.slice(1)) };
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+
+  if (bytes[0] === 2) {
+    let o = 1;
+    const nameLen = dv.getUint16(o);
+    o += 2;
+    const name = utf8.decode(bytes.slice(o, o + nameLen));
+    o += nameLen;
+    const avLen = dv.getUint32(o);
+    o += 4;
+    return { kind: 'profile', name: name || undefined, avatar: avLen > 0 ? bytes.slice(o, o + avLen) : undefined };
+  }
+
   let o = 1;
   const nameLen = dv.getUint16(o);
   o += 2;
@@ -189,6 +222,15 @@ export async function sendFile(
   return sendContent(me, contact, { kind: 'file', name, mime, data });
 }
 
+export async function sendProfile(
+  me: IdentityKeys,
+  contact: Contact,
+  name: string | undefined,
+  avatar: Bytes | undefined,
+): Promise<Bytes> {
+  return sendContent(me, contact, { kind: 'profile', name, avatar });
+}
+
 /** Decrypt an incoming envelope; establishes the responder session on first contact. */
 export async function receiveMessage(
   me: IdentityKeys,
@@ -230,6 +272,8 @@ interface ContactWire {
   peerDhPub: string;
   peerFingerprint: string;
   nickname: string | null;
+  peerName: string | null;
+  peerAvatarB64: string | null;
   verified: boolean;
   bundle: string | null; // bundle token (null if we only hold their identity)
   ratchet: string | null; // base64 of serializeState output
@@ -252,6 +296,8 @@ export async function serializeContact(c: Contact): Promise<Bytes> {
     peerDhPub: await b64(c.peerDhPub),
     peerFingerprint: c.peerFingerprint,
     nickname: c.nickname ?? null,
+    peerName: c.peerName ?? null,
+    peerAvatarB64: c.peerAvatarB64 ?? null,
     verified: c.verified ?? false,
     bundle: c.bundle ? await encodeBundle(c.bundle) : null,
     ratchet: c.ratchet ? await b64(await serializeState(c.ratchet)) : null,
@@ -268,6 +314,8 @@ export async function deserializeContact(bytes: Bytes): Promise<Contact> {
     peerDhPub: await unb64(wire.peerDhPub),
     peerFingerprint: wire.peerFingerprint,
     nickname: wire.nickname ?? undefined,
+    peerName: wire.peerName ?? undefined,
+    peerAvatarB64: wire.peerAvatarB64 ?? undefined,
     verified: wire.verified ?? false,
     bundle: wire.bundle ? await decodeBundle(wire.bundle) : undefined,
     ratchet: wire.ratchet ? await deserializeState(await unb64(wire.ratchet)) : null,

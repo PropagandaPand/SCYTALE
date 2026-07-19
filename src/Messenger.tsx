@@ -22,14 +22,17 @@ import {
   makeContactFromHeader,
   sendMessage,
   sendFile,
+  sendProfile,
   receiveEnvelope,
   inboxRoom,
   type Contact,
   type MessageContent,
   type PreKeyLookup,
 } from './lib/session';
-import { saveContact, loadContacts } from './lib/store';
-import { loadMessages, saveMessages, type ChatMessage } from './lib/messages';
+import { saveContact, loadContacts, removeContact } from './lib/store';
+import { loadProfile, saveProfile, type MyProfile } from './lib/profile';
+import { makeAvatar } from './lib/avatar';
+import { loadMessages, saveMessages, clearMessages, type ChatMessage } from './lib/messages';
 import { RelayClient, type RelayStatus } from './lib/relay';
 import { makeQr } from './lib/qr';
 import { bytesToB64, b64ToBytes } from './lib/bytes';
@@ -38,7 +41,7 @@ import { Identicon } from './Identicon';
 import { QrScanner } from './QrScanner';
 import { AudioPlayer } from './AudioPlayer';
 import {
-  IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach, IconMic, IconTrash,
+  IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach, IconMic, IconTrash, IconDots,
 } from './icons';
 
 const MAX_ATTACH = 600 * 1024; // inline cap — keeps the WS frame under Cloudflare's ~1 MiB limit
@@ -55,12 +58,15 @@ function pickAudioMime(): string {
 const fmtRec = (s: number) => `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`;
 
 function incomingMessage(content: MessageContent): ChatMessage {
-  if (content.kind === 'text') return { mine: false, text: content.text, ts: Date.now() };
-  return {
-    mine: false,
-    ts: Date.now(),
-    file: { name: content.name, mime: content.mime, dataB64: bytesToB64(content.data) },
-  };
+  if (content.kind === 'file') {
+    return {
+      mine: false,
+      ts: Date.now(),
+      file: { name: content.name, mime: content.mime, dataB64: bytesToB64(content.data) },
+    };
+  }
+  // text (profile is handled separately and never reaches here)
+  return { mine: false, text: content.kind === 'text' ? content.text : '', ts: Date.now() };
 }
 
 function downloadFile(f: { name: string; mime: string; dataB64: string }) {
@@ -80,10 +86,12 @@ interface Props {
   onLock: () => void;
 }
 
-type View = 'list' | 'chat' | 'add' | 'verify';
+type View = 'list' | 'chat' | 'add' | 'verify' | 'profile';
 
 const shortFp = (fp: string) => (fp ? fp.split(' ').slice(0, 3).join(' ') + ' …' : '…');
-const displayName = (c: Contact) => c.nickname?.trim() || shortFp(c.peerFingerprint);
+const displayName = (c: Contact) =>
+  c.nickname?.trim() || c.peerName?.trim() || shortFp(c.peerFingerprint);
+const avatarSrc = (b64: string) => `data:image/jpeg;base64,${b64}`;
 
 function extractToken(input: string): string {
   const m = input.match(/[#?&]add=([^&\s]+)/);
@@ -125,6 +133,9 @@ export function Messenger({ dek, onLock }: Props) {
   const recStreamRef = useRef<MediaStream | null>(null);
   const recTimerRef = useRef<number | null>(null);
   const sendOnStopRef = useRef(true);
+  const avatarInputRef = useRef<HTMLInputElement>(null);
+  const myProfileRef = useRef<MyProfile>({});
+  const profileSentRef = useRef<Set<string>>(new Set());
   const viewRef = useRef<View>('list');
   const activeRoomRef = useRef<string | null>(null);
   const initedRef = useRef(false);
@@ -144,8 +155,11 @@ export function Messenger({ dek, onLock }: Props) {
   const [renaming, setRenaming] = useState(false);
   const [renameInput, setRenameInput] = useState('');
   const [scanning, setScanning] = useState(false);
+  const [chatMenu, setChatMenu] = useState(false);
   const [recording, setRecording] = useState(false);
   const [recSeconds, setRecSeconds] = useState(0);
+  const [myAvatarB64, setMyAvatarB64] = useState('');
+  const [profileName, setProfileName] = useState('');
   const [safetyNumber, setSafetyNumber] = useState('');
   const [safetyQr, setSafetyQr] = useState('');
 
@@ -224,12 +238,18 @@ export function Messenger({ dek, onLock }: Props) {
 
       const wasNew = contact.ratchet === null;
       const content = await receiveEnvelope(id, contact, env, lookup);
-      await appendMessage(contact.roomId, incomingMessage(content));
-      if (!(viewRef.current === 'chat' && activeRoomRef.current === contact.roomId)) {
-        unreadRef.current[contact.roomId] = (unreadRef.current[contact.roomId] ?? 0) + 1;
+      if (content.kind === 'profile') {
+        contact.peerName = content.name;
+        contact.peerAvatarB64 = content.avatar ? bytesToB64(content.avatar) : undefined;
+      } else {
+        await appendMessage(contact.roomId, incomingMessage(content));
+        if (!(viewRef.current === 'chat' && activeRoomRef.current === contact.roomId)) {
+          unreadRef.current[contact.roomId] = (unreadRef.current[contact.roomId] ?? 0) + 1;
+        }
       }
       await saveContact(dek, contact);
       if (wasNew && prekeysRef.current) await savePreKeys(dek, prekeysRef.current);
+      void ensureProfileSent(contact);
       bump();
     } catch {
       // Decrypt failure (e.g. a duplicate re-delivery) — drop it, don't spam UI.
@@ -278,6 +298,11 @@ export function Messenger({ dek, onLock }: Props) {
       };
       setFingerprint(await fingerprintOf(id));
 
+      const prof = await loadProfile(dek);
+      myProfileRef.current = prof;
+      setMyAvatarB64(prof.avatarB64 ?? '');
+      setProfileName(prof.name ?? '');
+
       const token = await encodeBundle(currentBundle(id, pre));
       const link = `${location.origin}/#add=${token}`;
       setShareLink(link);
@@ -315,7 +340,37 @@ export function Messenger({ dek, onLock }: Props) {
 
   useEffect(() => {
     setRenaming(false);
+    setChatMenu(false);
   }, [activeRoom]);
+
+  async function deleteContactAction(roomId: string) {
+    setChatMenu(false);
+    const sendRoom = sendRoomRef.current.get(roomId);
+    if (sendRoom) {
+      relaysRef.current.get(sendRoom)?.close();
+      relaysRef.current.delete(sendRoom);
+      sendRoomRef.current.delete(roomId);
+    }
+    contactsRef.current = contactsRef.current.filter((c) => c.roomId !== roomId);
+    delete messagesRef.current[roomId];
+    delete unreadRef.current[roomId];
+    profileSentRef.current.delete(roomId);
+    await removeContact(dek, roomId);
+    if (activeRoom === roomId) {
+      setActiveRoom(null);
+      setView('list');
+    }
+    commitMessages();
+    bump();
+  }
+
+  async function clearChatAction(roomId: string) {
+    setChatMenu(false);
+    messagesRef.current[roomId] = [];
+    await clearMessages(roomId);
+    commitMessages();
+    bump();
+  }
 
   function openChat(roomId: string) {
     setError('');
@@ -361,6 +416,7 @@ export function Messenger({ dek, onLock }: Props) {
       await appendMessage(activeRoom, { mine: true, text, ts: Date.now() });
       setMsgInput('');
       await saveContact(dek, contact);
+      void ensureProfileSent(contact);
       bump();
     } catch (e) {
       setError('Senden fehlgeschlagen: ' + (e as Error).message);
@@ -501,6 +557,56 @@ export function Messenger({ dek, onLock }: Props) {
     }
   }
 
+  async function ensureProfileSent(contact: Contact) {
+    const id = identityRef.current;
+    const p = myProfileRef.current;
+    if (!id || !contact.ratchet || profileSentRef.current.has(contact.roomId)) return;
+    if (!p.name && !p.avatarB64) return;
+    try {
+      const envelope = await sendProfile(id, contact, p.name, p.avatarB64 ? b64ToBytes(p.avatarB64) : undefined);
+      let room = sendRoomRef.current.get(contact.roomId);
+      if (!room) {
+        await connectSend(contact);
+        room = sendRoomRef.current.get(contact.roomId);
+      }
+      (room ? relaysRef.current.get(room) : undefined)?.send(envelope);
+      profileSentRef.current.add(contact.roomId);
+      await saveContact(dek, contact);
+    } catch {
+      /* retry next session */
+    }
+  }
+
+  async function broadcastProfile() {
+    profileSentRef.current.clear();
+    for (const c of contactsRef.current) if (c.ratchet) await ensureProfileSent(c);
+  }
+
+  async function onPickAvatar(e: ChangeEvent<HTMLInputElement>) {
+    const input = e.target;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    setError('');
+    try {
+      const b64 = bytesToB64(await makeAvatar(file));
+      myProfileRef.current = { ...myProfileRef.current, avatarB64: b64 };
+      setMyAvatarB64(b64);
+      await saveProfile(dek, myProfileRef.current);
+      await broadcastProfile();
+      bump();
+    } catch (err) {
+      setError('Avatar fehlgeschlagen: ' + (err as Error).message);
+    }
+  }
+
+  async function saveProfileMeta() {
+    myProfileRef.current = { ...myProfileRef.current, name: profileName.trim() || undefined };
+    await saveProfile(dek, myProfileRef.current);
+    await broadcastProfile();
+    setView('list');
+  }
+
   async function copyLink() {
     try {
       await navigator.clipboard.writeText(shareLink);
@@ -540,13 +646,17 @@ export function Messenger({ dek, onLock }: Props) {
         <div className="list">
           <div className="list-top">
             <div className="list-head">
-              <div className="list-brand">
-                <img src="/scytale-icon.svg" alt="" />
+              <button className="list-brand" onClick={() => setView('profile')} title="Profil">
+                {myAvatarB64 ? (
+                  <img className="brand-avatar" src={avatarSrc(myAvatarB64)} alt="Profil" />
+                ) : (
+                  <img src="/scytale-icon.svg" alt="" />
+                )}
                 <div>
                   <div className="t">SCYTALE</div>
                   <div className="fp">{shortFp(fingerprint)}</div>
                 </div>
-              </div>
+              </button>
               <div className="icon-btns">
                 <button className="icon-btn" title="Teilen / Kontakt" onClick={() => { setError(''); setView('add'); }}>
                   <IconPlus />
@@ -581,9 +691,13 @@ export function Messenger({ dek, onLock }: Props) {
                 return (
                   <button key={c.roomId} className="conv-row" onClick={() => openChat(c.roomId)}>
                     <div className="avatar-wrap">
-                      <div className="avatar">
-                        <Identicon seed={c.roomId} />
-                      </div>
+                      {c.peerAvatarB64 ? (
+                        <img className="avatar-img" src={avatarSrc(c.peerAvatarB64)} alt="" />
+                      ) : (
+                        <div className="avatar">
+                          <Identicon seed={c.roomId} />
+                        </div>
+                      )}
                       <span className={`sdot ${st(c.roomId)}`} />
                     </div>
                     <div className="conv-main">
@@ -623,9 +737,13 @@ export function Messenger({ dek, onLock }: Props) {
           <button className="chat-back" onClick={() => setView('list')}>
             <IconBack />
           </button>
-          <div className="avatar sm">
-            <Identicon seed={activeContact.roomId} />
-          </div>
+          {activeContact.peerAvatarB64 ? (
+            <img className="avatar-img sm" src={avatarSrc(activeContact.peerAvatarB64)} alt="" />
+          ) : (
+            <div className="avatar sm">
+              <Identicon seed={activeContact.roomId} />
+            </div>
+          )}
           {renaming ? (
             <div className="rename-row">
               <input
@@ -655,6 +773,30 @@ export function Messenger({ dek, onLock }: Props) {
             </div>
           )}
           <span className={`sdot ${st(activeContact.roomId)}`} style={{ position: 'static', border: 0, width: 9, height: 9 }} />
+          <button className="chat-menu-btn" onClick={() => setChatMenu((v) => !v)} aria-label="Menü">
+            <IconDots />
+          </button>
+          {chatMenu && (
+            <div className="chat-menu">
+              <button
+                onClick={() => {
+                  setChatMenu(false);
+                  if (confirm('Chatverlauf wirklich löschen?')) void clearChatAction(activeContact.roomId);
+                }}
+              >
+                Chatverlauf löschen
+              </button>
+              <button
+                className="danger"
+                onClick={() => {
+                  setChatMenu(false);
+                  if (confirm('Kontakt und Chat wirklich löschen?')) void deleteContactAction(activeContact.roomId);
+                }}
+              >
+                Kontakt löschen
+              </button>
+            </div>
+          )}
         </div>
 
         <div id="msgs" className="msgs">
@@ -850,6 +992,51 @@ export function Messenger({ dek, onLock }: Props) {
             </button>
           )}
           <p className="verify-foot">Stimmen die Zahlen überein, ist die Leitung frei von Man-in-the-Middle.</p>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Profile ───────────────────────────────────────────────────────
+  if (view === 'profile') {
+    return (
+      <div className="subview">
+        <div className="subhead">
+          <button className="back" onClick={() => setView('list')}>
+            <IconBack />
+          </button>
+          <div className="h">Profil</div>
+        </div>
+        <div className="verify-body">
+          <input ref={avatarInputRef} type="file" accept="image/*" hidden onChange={(e) => void onPickAvatar(e)} />
+          <button className="profile-avatar" onClick={() => avatarInputRef.current?.click()}>
+            {myAvatarB64 ? <img src={avatarSrc(myAvatarB64)} alt="Dein Avatar" /> : <span className="ph">＋</span>}
+            <span className="edit-badge">
+              <IconCamera size={14} />
+            </span>
+          </button>
+          <p className="share-hint">Antippen, um dein Bild zu ändern.</p>
+          <div style={{ textAlign: 'left', marginTop: 6 }}>
+            <div className="field-lbl">Anzeigename</div>
+            <input
+              className="name-input"
+              value={profileName}
+              placeholder="Wie du angezeigt wirst"
+              onChange={(e) => setProfileName(e.target.value)}
+            />
+          </div>
+          <button className="btn btn-primary" style={{ marginTop: 18 }} onClick={() => void saveProfileMeta()}>
+            Speichern &amp; teilen
+          </button>
+          <div className="info-note" style={{ textAlign: 'left' }}>
+            <span className="g">
+              <IconInfo />
+            </span>
+            <p>
+              Bild und Name werden <b>Ende-zu-Ende verschlüsselt</b> an deine Kontakte geschickt — nicht über
+              den öffentlichen Code.
+            </p>
+          </div>
         </div>
       </div>
     );

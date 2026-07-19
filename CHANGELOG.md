@@ -6,6 +6,16 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Fix: Gruppennachrichten an noch nicht verbundene Empfänger
+
+- **Wurzel**: `RelayClient.send()` verwarf Frames, wenn der WebSocket noch nicht
+  `OPEN` war. Bei Gruppen wird direkt nach `connectSend` (Socket verbindet noch)
+  gesendet → Einladung/Nachricht an neue Mitglieder fiel ins Leere. Jetzt werden
+  ausgehende Sends **gepuffert und beim `open` (auch nach Reconnect) geflusht**.
+- **Absicherung**: Gruppennachrichten für eine noch unbekannte Gruppe (Einladung
+  noch nicht verarbeitet) werden nun **gepuffert** und ausgespielt, sobald die
+  Einladung eintrifft — statt verworfen zu werden.
+
 ### Gruppen v2 — Mitglieder-Verwaltung
 
 #### Hinzugefügt

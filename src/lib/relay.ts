@@ -22,6 +22,7 @@ export interface RelayOptions {
 export class RelayClient {
   private ws: WebSocket | null = null;
   private closedByUs = false;
+  private outbox: string[] = [];
   status: RelayStatus = 'closed';
 
   constructor(
@@ -39,6 +40,10 @@ export class RelayClient {
     ws.onopen = () => {
       this.setStatus('open');
       if (this.opts.auth) ws.send(JSON.stringify({ t: 'hello' }));
+      // Flush anything queued while we were connecting / reconnecting.
+      const pending = this.outbox;
+      this.outbox = [];
+      for (const frame of pending) ws.send(frame);
     };
     ws.onmessage = (ev) => void this.onMessage(ev);
     ws.onclose = () => {
@@ -67,11 +72,12 @@ export class RelayClient {
     }
   }
 
-  /** Sender: push a ciphertext to this (peer's) inbox. */
+  /** Sender: push a ciphertext to this (peer's) inbox. Queued until the socket
+   *  is open, so a message sent right after connect() isn't silently dropped. */
   send(bytes: Bytes): void {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ t: 'send', b64: bytesToB64(bytes) }));
-    }
+    const frame = JSON.stringify({ t: 'send', b64: bytesToB64(bytes) });
+    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(frame);
+    else this.outbox.push(frame);
   }
 
   /** Owner: confirm a delivered message so the DO drops it from the queue. */

@@ -166,6 +166,7 @@ export function Messenger({ dek, onLock }: Props) {
   const myProfileRef = useRef<MyProfile>({});
   const profileSentRef = useRef<Set<string>>(new Set());
   const groupsRef = useRef<Group[]>([]);
+  const pendingGroupMsgsRef = useRef<Map<string, ChatMessage[]>>(new Map());
   const viewRef = useRef<View>('list');
   const activeRoomRef = useRef<string | null>(null);
   const activeGroupRef = useRef<string | null>(null);
@@ -548,13 +549,19 @@ export function Messenger({ dek, onLock }: Props) {
     inner: MessageContent,
     contact: Contact,
   ) {
-    const g = groupsRef.current.find((x) => x.id === groupId);
-    if (!g) return;
     const sender = senderName || contact.peerName || shortFp(contact.peerFingerprint);
     const msg: ChatMessage =
       inner.kind === 'file'
         ? { mine: false, ts: Date.now(), sender, file: { name: inner.name, mime: inner.mime, dataB64: bytesToB64(inner.data) } }
         : { mine: false, ts: Date.now(), sender, text: inner.kind === 'text' ? inner.text : '' };
+    const g = groupsRef.current.find((x) => x.id === groupId);
+    if (!g) {
+      // Message arrived before the group invite — hold it until we join.
+      const buf = pendingGroupMsgsRef.current.get(groupId) ?? [];
+      buf.push(msg);
+      pendingGroupMsgsRef.current.set(groupId, buf);
+      return;
+    }
     await appendMessage(g.id, msg);
     if (!(viewRef.current === 'chat' && activeGroupRef.current === g.id)) {
       unreadRef.current[g.id] = (unreadRef.current[g.id] ?? 0) + 1;
@@ -568,6 +575,17 @@ export function Messenger({ dek, onLock }: Props) {
     messagesRef.current[g.id] = had ?? [];
     await saveGroup(dek, g);
     for (const m of g.members) await ensureMemberContact(m);
+
+    // Flush any messages that arrived before this invite.
+    const pending = pendingGroupMsgsRef.current.get(g.id);
+    if (pending?.length) {
+      pendingGroupMsgsRef.current.delete(g.id);
+      for (const msg of pending) await appendMessage(g.id, msg);
+      if (!(viewRef.current === 'chat' && activeGroupRef.current === g.id)) {
+        unreadRef.current[g.id] = (unreadRef.current[g.id] ?? 0) + pending.length;
+      }
+    }
+    bump();
   }
 
   async function updateGroup(group: Group, sync: boolean) {

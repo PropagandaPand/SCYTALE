@@ -61,6 +61,15 @@ gegated:
   er kann Device-Certs seiner Epoch für noch nicht rotierte Kontakte ausstellen.
   **Alte Backups sind bei Rotation zu vernichten** (der Rotations-Flow weist
   explizit darauf hin).
+- **Ratchet-State-Fork (Migration ≠ simultan):** das Backup enthält Double-
+  Ratchet-Sessions. Läuft das Quellgerät nach dem Restore **weiter** und senden
+  **beide** an denselben Kontakt, teilen sie einen Ratchet-Stand → gleiche
+  Message-Nummern für verschiedene Nachrichten → der Empfänger verwirft sie, die
+  Session stirbt (heilt nur per neuem X3DH). Ebenso setzt ein **alter** Restore
+  Chain-Zähler zurück und macht laufende Sessions unbrauchbar. Migration (ein
+  aktives Gerät) ist sicher; das erzwingt aber bislang nur ein **UI-Hinweis**,
+  keine kryptografische Sperre — echtes simultanes Multi-Device braucht
+  Per-Device-Sessions (Stufe 3).
 
 **Brute-Force-Lockout:** nach 5 Fehlversuchen eskalierende Sperre
 (30 s · 2^(n−5), gedeckelt bei 300 s), in IndexedDB persistiert.

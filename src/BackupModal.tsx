@@ -76,6 +76,11 @@ export function BackupModal({
               ⚠ Ein Backup enthält deine <b>Identität und Schlüssel</b>. Es verlässt bewusst die Geräte-Bindung —
               bewahre Datei und Passphrase <b>getrennt</b> und sicher auf.
             </p>
+            <p className="backup-warn">
+              Nach dem Wiederherstellen auf einem anderen Gerät: <b>dieses hier nicht weiterbenutzen</b>. Von
+              beiden Geräten an denselben Kontakt zu senden zerlegt eure Chats (gemeinsamer Ratchet-Stand) —
+              echtes Parallel-Multi-Device kommt erst mit Stufe 3.
+            </p>
             <label className="backup-field">
               <span>Tresor-Passphrase (zur Bestätigung)</span>
               <input type="password" value={vaultPass} autoComplete="off" onChange={(e) => setVaultPass(e.target.value)} />
@@ -93,6 +98,10 @@ export function BackupModal({
           <>
             <p className="backup-warn">
               Wiederherstellen <b>überschreibt</b> die Identität und alle Daten auf diesem Gerät.
+            </p>
+            <p className="backup-warn">
+              Ein <b>älteres</b> Backup kann bestehende Sessions unbrauchbar machen (zurückgesetzte Zähler → der
+              Empfänger lehnt sie ab). Betroffene Kontakte müssen dann per Code <b>neu verbunden</b> werden.
             </p>
             <label className="backup-field">
               <span>Backup-Datei</span>

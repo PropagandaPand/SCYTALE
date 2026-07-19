@@ -22,6 +22,15 @@ export interface VaultHeader {
   salt: Uint8Array<ArrayBuffer>;
   wrapIv: Uint8Array<ArrayBuffer>;
   wrappedDek: Uint8Array<ArrayBuffer>;
+  /**
+   * Optional device binding: a random secret, encrypted under the device key,
+   * whose plaintext is mixed into the passphrase before Argon2id. Without the
+   * device key the vault cannot be unlocked even with the correct passphrase.
+   */
+  deviceWrap?: {
+    iv: Uint8Array<ArrayBuffer>;
+    ciphertext: Uint8Array<ArrayBuffer>;
+  };
 }
 
 export class WrongPassphraseError extends Error {

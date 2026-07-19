@@ -37,7 +37,12 @@ export async function deriveKekBytes(
   params: Argon2Params = DEFAULT_ARGON2,
 ): Promise<Uint8Array<ArrayBuffer>> {
   // Lazy-load hash-wasm — only needed at vault create/unlock, not on first paint.
-  const { argon2id } = await import('hash-wasm');
+  // Tolerate both ESM-named and CJS-default interop shapes.
+  const wasm = (await import('hash-wasm')) as typeof import('hash-wasm') & {
+    default?: typeof import('hash-wasm');
+  };
+  const argon2id = wasm.argon2id ?? wasm.default?.argon2id;
+  if (!argon2id) throw new Error('hash-wasm konnte nicht geladen werden.');
   const out = await argon2id({
     password: passphrase,
     salt,

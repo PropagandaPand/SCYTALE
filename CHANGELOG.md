@@ -6,6 +6,23 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Krypto-Härtung: Device-Binding + Lockout + Self-Test
+
+Inspiriert von der At-Rest-Krypto des AZIS-Projekts, neu in SCYTALEs Architektur.
+
+#### Hinzugefügt
+- **Device-Binding**: ein **non-extractable** AES-256-GCM-Gerätekey (IndexedDB)
+  verschlüsselt ein zufälliges `bindingSecret`, dessen Klartext vor Argon2id in
+  die Passphrase gemischt wird. Ein exfiltrierter Tresor (kopierte IndexedDB,
+  Geräte-Image) ist **ohne den Gerätekey nicht entsperrbar** — auch mit korrekter
+  Passphrase. Verifiziert gegen echten Vault-Code.
+- **Brute-Force-Lockout**: 5 Fehlversuche → eskalierender Cooldown (30 s → 300 s),
+  persistent in IndexedDB, mit Countdown im Lockscreen.
+- **Runtime-Self-Test**: AES-256-GCM-Roundtrip beim Start; schlägt er fehl →
+  `CRYPT ERROR` und Login-Block.
+- Vault-Header um optionales `deviceWrap` erweitert; `vault.ts` bleibt pure
+  Krypto (Node-testbar), Binding/Lockout leben in `lib/vaultService.ts`.
+
 ### Onboarding-UX: QR-Code + Deep-Link + kompaktes Token
 
 #### Geändert

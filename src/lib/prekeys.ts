@@ -7,6 +7,7 @@ import {
   generateSignedPreKey,
   generateOneTimePreKeys,
   buildBundle,
+  verify,
   b64encode,
   b64decode,
   seal,
@@ -90,7 +91,16 @@ async function deserialize(bytes: Bytes): Promise<PreKeyState> {
 
 export async function loadOrCreatePreKeys(dek: CryptoKey, identity: IdentityKeys): Promise<PreKeyState> {
   const rec = await loadRecord(KEY);
-  if (rec) return deserialize(await open(dek, rec, AAD));
+  if (rec) {
+    const st = await deserialize(await open(dek, rec, AAD));
+    // The signed prekey must verify against the CURRENT device sign key. If the
+    // identity was regenerated (e.g. the multi-device format break), a stale
+    // prekey signed by the old key would fail X3DH ("Signed-Prekey-Signatur
+    // ungültig") — detect that and regenerate instead.
+    if (await verify(st.signedPreKey.keyPair.publicKey, st.signedPreKey.signature, identity.sign.publicKey)) {
+      return st;
+    }
+  }
 
   const signedPreKey = await generateSignedPreKey(identity, 1);
   const oneTimePreKeys = await generateOneTimePreKeys(1, OPK_BATCH);

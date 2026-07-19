@@ -61,6 +61,16 @@ body {
   font-family: var(--font-sans);
   min-height: 100dvh;
   -webkit-font-smoothing: antialiased;
+  /* No double-tap-to-zoom / 300ms delay; pinch-zoom stays available. */
+  touch-action: manipulation;
+}
+
+/* iOS zooms into inputs whose font-size is < 16px on focus and never zooms
+   back out. Keep every focusable field at >= 16px to stop that. */
+input,
+textarea,
+select {
+  font-size: 16px;
 }
 
 #app {
@@ -565,7 +575,7 @@ body {
   color: var(--text);
   padding: 7px 10px;
   font: inherit;
-  font-size: 14px;
+  font-size: 16px;
   outline: none;
 }
 .rename-row .btn {
@@ -667,7 +677,7 @@ body {
   border: 0;
   outline: none;
   color: var(--text);
-  font-size: 14.5px;
+  font-size: 16px;
   font-family: var(--font-sans);
 }
 .send-btn {
@@ -815,7 +825,7 @@ body {
   padding: 14px;
   min-height: 74px;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 16px;
   color: var(--text);
   line-height: 1.5;
   resize: vertical;

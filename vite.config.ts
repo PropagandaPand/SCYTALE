@@ -1,11 +1,11 @@
 import { defineConfig } from 'vite';
-import { svelte } from '@sveltejs/vite-plugin-svelte';
+import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [
-    svelte(),
+    react(),
     VitePWA({
       registerType: 'autoUpdate',
       injectRegister: 'auto',
@@ -25,10 +25,10 @@ export default defineConfig({
       },
       workbox: {
         // Precache the app shell so the installed PWA does NOT re-fetch JS on
-        // every launch — this is our first line of defence against a malicious
-        // code-delivery push. (Reproducible builds come later.)
+        // every launch — our first line of defence against a malicious code push.
         globPatterns: ['**/*.{js,css,html,svg,woff2}'],
         navigateFallback: '/index.html',
+        maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
       },
       devOptions: { enabled: false },
     }),

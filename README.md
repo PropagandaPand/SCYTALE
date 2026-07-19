@@ -31,7 +31,7 @@ Forward Secrecy und Post-Compromise Security.
 
 ## Stack
 
-- **Frontend:** Vite + Svelte 5 + TypeScript, als installierbare PWA
+- **Frontend:** Vite + React 19 + TypeScript, als installierbare PWA
 - **Krypto:** `hash-wasm` (Argon2id) + WebCrypto (AES-256-GCM)
 - **Backend:** Cloudflare Worker + **Durable Object** (WebSocket-Relay,
   Hibernation API) + D1 (Mailbox, später)

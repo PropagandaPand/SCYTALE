@@ -6,6 +6,16 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### UI-Migration: Svelte → React
+
+#### Geändert
+- View-Layer von Svelte 5 auf **React 19** umgestellt (`App.tsx`,
+  `Messenger.tsx`, `main.tsx`); `@vitejs/plugin-react` statt Svelte-Plugin,
+  Typecheck via `tsc --noEmit` statt `svelte-check`.
+- **Die gesamte Krypto- und Lib-Schicht (`src/crypto/`, `src/lib/`) blieb
+  unverändert** — framework-agnostisches TypeScript. Alle Krypto-/Plumbing-Tests
+  weiterhin gültig.
+
 ### Etappe 5 — Relay + Chat-UI
 
 #### Hinzugefügt

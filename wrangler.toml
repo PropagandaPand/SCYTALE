@@ -2,6 +2,13 @@ name = "scytale"
 main = "worker/index.ts"
 compatibility_date = "2025-06-01"
 
+# Web Push (VAPID). These are PUBLIC and safe to commit. The matching private
+# key is set separately as the secret VAPID_JWK (never in the repo):
+#   npx wrangler secret put VAPID_JWK
+[vars]
+VAPID_PUBLIC = "BCvQuiivhlyNteecWKop_2Jh-cPdK_V8UeiSwgyt8_yPzbduj6dQf6fAJkqOTaVZXMaIsUCb0l8VLLJV8aVuzAo"
+VAPID_SUBJECT = "https://scytale.illogical.workers.dev"
+
 # Serve the built PWA (dist/) directly from the Worker. Non-asset routes fall
 # through to the Worker's fetch handler (which owns /api/relay).
 [assets]

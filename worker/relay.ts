@@ -23,6 +23,11 @@ import { DurableObject } from 'cloudflare:workers';
 export interface Env {
   RELAY: DurableObjectNamespace<RelayRoom>;
   ASSETS: Fetcher;
+  // Web Push (VAPID). PUBLIC + SUBJECT are plain vars; JWK is a secret holding
+  // the EC P-256 private key as a JWK JSON string. Absent => push disabled.
+  VAPID_PUBLIC?: string;
+  VAPID_SUBJECT?: string;
+  VAPID_JWK?: string;
 }
 
 interface Att {
@@ -44,6 +49,9 @@ function b64e(b: Uint8Array): string {
   for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
   return btoa(s);
 }
+function b64url(b: Uint8Array): string {
+  return b64e(b).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
 function hex(b: Uint8Array): string {
   let s = '';
   for (const x of b) s += x.toString(16).padStart(2, '0');
@@ -54,6 +62,8 @@ export class RelayRoom extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS q (id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT)');
+    // Push subscriptions for this inbox's owner (only ever written after auth).
+    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS subs (endpoint TEXT PRIMARY KEY, sub TEXT)');
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -121,9 +131,11 @@ export class RelayRoom extends DurableObject<Env> {
         const inserted = this.ctx.storage.sql
           .exec<{ id: number }>('INSERT INTO q (body) VALUES (?) RETURNING id', m.b64)
           .one();
+        let ownerOnline = false;
         for (const peer of this.ctx.getWebSockets()) {
           const a = (peer.deserializeAttachment() ?? {}) as Att;
           if (a.owner) {
+            ownerOnline = true;
             try {
               peer.send(JSON.stringify({ t: 'msg', id: inserted.id, b64: m.b64 }));
             } catch {
@@ -131,11 +143,81 @@ export class RelayRoom extends DurableObject<Env> {
             }
           }
         }
+        // Owner not connected => wake their device with a content-free push.
+        if (!ownerOnline) this.ctx.waitUntil(this.notifyOwner());
         return;
       }
       case 'ack': {
         if (typeof m.id === 'number') this.ctx.storage.sql.exec('DELETE FROM q WHERE id = ?', m.id);
         return;
+      }
+      case 'subscribe': {
+        // Only an authenticated owner may register a push endpoint for this inbox.
+        if (!att.owner || typeof m.sub !== 'object' || m.sub === null) return;
+        const sub = m.sub as { endpoint?: unknown };
+        if (typeof sub.endpoint !== 'string') return;
+        this.ctx.storage.sql.exec(
+          'INSERT OR REPLACE INTO subs (endpoint, sub) VALUES (?, ?)',
+          sub.endpoint,
+          JSON.stringify(m.sub),
+        );
+        return;
+      }
+      case 'unsubscribe': {
+        if (!att.owner || typeof m.endpoint !== 'string') return;
+        this.ctx.storage.sql.exec('DELETE FROM subs WHERE endpoint = ?', m.endpoint);
+        return;
+      }
+    }
+  }
+
+  /** Send a content-free VAPID Web Push to every registered subscription. The
+   *  payload is empty by design — a bare wake-up that leaks no message content.
+   *  Stale endpoints (404/410) are pruned. */
+  private async notifyOwner(): Promise<void> {
+    const env = this.env;
+    if (!env.VAPID_JWK || !env.VAPID_PUBLIC || !env.VAPID_SUBJECT) return;
+    const rows = [...this.ctx.storage.sql.exec<{ endpoint: string }>('SELECT endpoint FROM subs')];
+    if (rows.length === 0) return;
+
+    let key: CryptoKey;
+    try {
+      key = await crypto.subtle.importKey(
+        'jwk',
+        JSON.parse(env.VAPID_JWK),
+        { name: 'ECDSA', namedCurve: 'P-256' },
+        false,
+        ['sign'],
+      );
+    } catch {
+      return; // misconfigured secret — fail silently, never break delivery
+    }
+
+    for (const { endpoint } of rows) {
+      try {
+        const aud = new URL(endpoint).origin;
+        const header = b64url(enc.encode(JSON.stringify({ typ: 'JWT', alg: 'ES256' })));
+        const payload = b64url(
+          enc.encode(JSON.stringify({ aud, exp: Math.floor(Date.now() / 1000) + 43200, sub: env.VAPID_SUBJECT })),
+        );
+        const signingInput = `${header}.${payload}`;
+        const sig = new Uint8Array(
+          await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, enc.encode(signingInput)),
+        );
+        const jwt = `${signingInput}.${b64url(sig)}`;
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            Authorization: `vapid t=${jwt}, k=${env.VAPID_PUBLIC}`,
+            TTL: '2419200',
+            Urgency: 'high',
+          },
+        });
+        if (res.status === 404 || res.status === 410) {
+          this.ctx.storage.sql.exec('DELETE FROM subs WHERE endpoint = ?', endpoint);
+        }
+      } catch {
+        /* one bad endpoint must not stop the rest */
       }
     }
   }

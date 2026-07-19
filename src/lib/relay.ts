@@ -13,6 +13,7 @@
  */
 import { bytesToB64, b64ToBytes } from './bytes';
 import type { Bytes } from '../crypto';
+import type { PushSub } from './push';
 
 export type RelayStatus = 'connecting' | 'open' | 'closed';
 
@@ -33,6 +34,7 @@ export class RelayClient {
   private outbox: string[] = [];
   private heartbeat: ReturnType<typeof setInterval> | null = null;
   private pongTimer: ReturnType<typeof setTimeout> | null = null;
+  private pushSub: PushSub | null = null; // owner inbox: re-registered after each auth
   status: RelayStatus = 'closed';
 
   constructor(
@@ -130,6 +132,9 @@ export class RelayClient {
       this.ws?.send(
         JSON.stringify({ t: 'auth', signPub: bytesToB64(this.opts.auth.signPub), sig: bytesToB64(sig) }),
       );
+      // Re-register our push subscription now that this socket is authed as owner
+      // (the DO only accepts it from an authenticated owner). Ordered after auth.
+      if (this.pushSub) this.ws?.send(JSON.stringify({ t: 'subscribe', sub: this.pushSub }));
     } else if (m.t === 'msg' && typeof m.b64 === 'string' && typeof m.id === 'number') {
       this.opts.onCipher?.(b64ToBytes(m.b64), m.id);
     }
@@ -141,6 +146,23 @@ export class RelayClient {
     const frame = JSON.stringify({ t: 'send', b64: bytesToB64(bytes) });
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(frame);
     else this.outbox.push(frame);
+  }
+
+  /** Owner: register (or clear) the Web Push subscription for this inbox. Sent
+   *  after auth on (re)connect; if already open we push it immediately too. */
+  setPush(sub: PushSub | null): void {
+    this.pushSub = sub;
+    if (sub && this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ t: 'subscribe', sub }));
+    }
+  }
+
+  /** Owner: tell the DO to forget a push endpoint (user disabled notifications). */
+  unsubscribePush(endpoint: string): void {
+    this.pushSub = null;
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ t: 'unsubscribe', endpoint }));
+    }
   }
 
   /** Owner: confirm a delivered message so the DO drops it from the queue. */

@@ -48,6 +48,7 @@ import {
 } from './lib/groups';
 import { saveContact, loadContacts, removeContact } from './lib/store';
 import { loadProfile, saveProfile, type MyProfile } from './lib/profile';
+import { pushSupported, enablePush, disablePush, currentSubscription } from './lib/push';
 import { makeAvatar } from './lib/avatar';
 import { loadMessages, saveMessages, clearMessages, type ChatMessage } from './lib/messages';
 import { RelayClient, type RelayStatus } from './lib/relay';
@@ -199,6 +200,8 @@ export function Messenger({ dek, onLock }: Props) {
   const [safetyNumber, setSafetyNumber] = useState('');
   const [safetyQr, setSafetyQr] = useState('');
   const [zoomImg, setZoomImg] = useState<string | null>(null); // full-screen image viewer
+  const [notifOn, setNotifOn] = useState(false);
+  const [notifBusy, setNotifBusy] = useState(false);
 
   useEffect(() => {
     activeRoomRef.current = activeRoom;
@@ -357,6 +360,17 @@ export function Messenger({ dek, onLock }: Props) {
       makeQr(link).then(setQrDataUrl).catch(() => undefined);
 
       connectInbox(await inboxRoom(id.sign.publicKey));
+      // Restore an existing push subscription so the DO keeps waking this device.
+      if (pushSupported()) {
+        currentSubscription()
+          .then((sub) => {
+            if (sub) {
+              inboxClientRef.current?.setPush(sub);
+              setNotifOn(true);
+            }
+          })
+          .catch(() => undefined);
+      }
 
       const cs = await loadContacts(dek);
       contactsRef.current = cs;
@@ -879,6 +893,31 @@ export function Messenger({ dek, onLock }: Props) {
   async function broadcastProfile() {
     profileSentRef.current.clear();
     for (const c of contactsRef.current) if (c.ratchet) await ensureProfileSent(c);
+  }
+
+  async function togglePush() {
+    if (notifBusy) return;
+    setNotifBusy(true);
+    setError('');
+    try {
+      if (notifOn) {
+        const endpoint = await disablePush();
+        if (endpoint) inboxClientRef.current?.unsubscribePush(endpoint);
+        setNotifOn(false);
+      } else {
+        const sub = await enablePush();
+        if (sub) {
+          inboxClientRef.current?.setPush(sub);
+          setNotifOn(true);
+        } else {
+          setError('Benachrichtigungen wurden nicht erlaubt (oder das Gerät unterstützt sie nicht).');
+        }
+      }
+    } catch (e) {
+      setError('Benachrichtigungen fehlgeschlagen: ' + (e as Error).message);
+    } finally {
+      setNotifBusy(false);
+    }
   }
 
   async function onPickAvatar(e: ChangeEvent<HTMLInputElement>) {
@@ -1574,6 +1613,25 @@ export function Messenger({ dek, onLock }: Props) {
           <button className="btn btn-primary" style={{ marginTop: 18 }} onClick={() => void saveProfileMeta()}>
             Speichern &amp; teilen
           </button>
+
+          {pushSupported() && (
+            <button
+              className={`notif-row${notifOn ? ' on' : ''}`}
+              onClick={() => void togglePush()}
+              disabled={notifBusy}
+            >
+              <div className="notif-txt">
+                <span className="notif-title">Benachrichtigungen</span>
+                <span className="notif-sub">
+                  {notifOn ? 'aktiv — du wirst bei neuen Nachrichten geweckt' : 'bei neuen Nachrichten wecken lassen'}
+                </span>
+              </div>
+              <span className={`switch${notifOn ? ' on' : ''}`}>
+                <span className="knob" />
+              </span>
+            </button>
+          )}
+
           <div className="info-note" style={{ textAlign: 'left' }}>
             <span className="g">
               <IconInfo />
@@ -1583,6 +1641,17 @@ export function Messenger({ dek, onLock }: Props) {
               den öffentlichen Code.
             </p>
           </div>
+          {notifOn && (
+            <div className="info-note" style={{ textAlign: 'left' }}>
+              <span className="g">
+                <IconLock size={13} />
+              </span>
+              <p>
+                Push-Nachrichten sind <b>inhaltslos</b> — sie enthalten nur ein Wecksignal, keinen Absender und
+                keinen Text. Erst beim Öffnen der App wird entschlüsselt.
+              </p>
+            </div>
+          )}
         </div>
       </div>
     );

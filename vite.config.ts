@@ -19,6 +19,11 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
+      // Custom hand-written service worker (src/sw.ts) so we can add a push
+      // handler; injectManifest bakes the precache list into our own SW code.
+      strategies: 'injectManifest',
+      srcDir: 'src',
+      filename: 'sw.ts',
       // TESTING PHASE: autoUpdate so clients self-update while the wire protocol
       // is still changing (a stale cached client can't talk to the new relay).
       // Revert to 'prompt' before release (no unattended code swap).
@@ -38,11 +43,10 @@ export default defineConfig({
           { src: '/pwa-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
         ],
       },
-      workbox: {
+      injectManifest: {
         // Precache the app shell so the installed PWA does NOT re-fetch JS on
         // every launch — our first line of defence against a malicious code push.
-        globPatterns: ['**/*.{js,css,html,svg,woff2}'],
-        navigateFallback: '/index.html',
+        globPatterns: ['**/*.{js,css,html,svg,woff2,png}'],
         maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
       },
       devOptions: { enabled: false },

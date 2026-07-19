@@ -6,6 +6,22 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Feature: Push-Benachrichtigungen (inhaltslos, opt-in)
+
+- **Web Push**, wenn die App zu ist: der Relay-DO weckt das Gerät, sobald eine
+  Nachricht ankommt und der Owner nicht verbunden ist.
+- **Datensparsam by design**: der Push enthält **keinen** Inhalt, Absender oder
+  Text — nur ein Wecksignal. Der Service Worker kann gar nicht entschlüsseln
+  (Vault gesperrt, keine Schlüssel im SW) und zeigt generisch „Neue Nachricht".
+- **Opt-in** über einen Schalter im Profil; Abo wird über den
+  **authentifizierten** Owner-Socket registriert (nur der Inbox-Besitzer kann es
+  setzen). VAPID/ES256-Signierung im Worker (WebCrypto), verifiziert per Test.
+- Service Worker auf `injectManifest` umgestellt — **handgeschrieben und
+  abhängigkeitsfrei** (auditierbare Precache-Logik + Push-Handler).
+- iOS: funktioniert nur als installierte PWA (iOS 16.4+).
+- **Setup nötig**: Secret `VAPID_JWK` im Cloudflare-Worker setzen (siehe README/
+  Commit), sonst werden keine Pushes gesendet (Abos werden trotzdem gespeichert).
+
 ### Feature: Versionsanzeige im Header
 
 - Neben „SCYTALE" wird die **SemVer-Version** (`v0.9.0`) angezeigt, zur

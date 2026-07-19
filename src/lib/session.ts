@@ -27,6 +27,7 @@ import {
   type PreKeyBundle,
   type RatchetState,
   type InitialMessageHeader,
+  type Envelope,
   type Bytes,
 } from '../crypto';
 
@@ -37,7 +38,7 @@ export interface Contact {
   peerFingerprint: string;
   nickname?: string; // user-chosen local name for this peer
   verified?: boolean; // local flag: safety number compared out-of-band
-  bundle: PreKeyBundle; // needed to run X3DH as initiator
+  bundle?: PreKeyBundle; // present when WE hold their code (needed to initiate)
   ratchet: RatchetState | null; // null until the session is established
   pendingHeader: InitialMessageHeader | null; // initiator attaches until first reply arrives
 }
@@ -62,6 +63,14 @@ export async function computeRoomId(a: Bytes, b: Bytes): Promise<string> {
   return s.to_hex(s.crypto_generichash(16, concatBytes(x, y), null));
 }
 
+/** Our inbox room: derived from our OWN identity, so we can listen without
+ *  knowing anyone else. Whoever holds our code can send here. */
+export async function inboxRoom(dhPub: Bytes): Promise<string> {
+  const s = await getSodium();
+  return s.to_hex(s.crypto_generichash(16, concatBytes(utf8.encode('scytale-inbox:'), dhPub), null));
+}
+
+/** Initiator side: we hold their code (bundle). */
 export async function makeContact(myDhPub: Bytes, bundle: PreKeyBundle): Promise<Contact> {
   return {
     roomId: await computeRoomId(myDhPub, bundle.identityDhPub),
@@ -74,9 +83,29 @@ export async function makeContact(myDhPub: Bytes, bundle: PreKeyBundle): Promise
   };
 }
 
+/** Responder side: a stranger who holds OUR code just messaged us. We learn
+ *  their identity from the prekey header — no bundle of theirs required. */
+export async function makeContactFromHeader(
+  myDhPub: Bytes,
+  header: InitialMessageHeader,
+): Promise<Contact> {
+  return {
+    roomId: await computeRoomId(myDhPub, header.identityDhPub),
+    peerSignPub: header.identitySignPub,
+    peerDhPub: header.identityDhPub,
+    peerFingerprint: await identityFingerprint(header.identitySignPub, header.identityDhPub),
+    bundle: undefined,
+    ratchet: null,
+    pendingHeader: null,
+  };
+}
+
 /** Encrypt outgoing text into a wire envelope; establishes the session if needed. */
 export async function sendMessage(me: IdentityKeys, contact: Contact, text: string): Promise<Bytes> {
   if (!contact.ratchet) {
+    if (!contact.bundle) {
+      throw new Error('Für den ersten Schritt braucht ihr den Code dieses Kontakts.');
+    }
     const { header, session } = await initiateX3DH(me, contact.bundle);
     contact.ratchet = await initRatchetInitiator(
       session.sharedSecret,
@@ -86,9 +115,10 @@ export async function sendMessage(me: IdentityKeys, contact: Contact, text: stri
     contact.pendingHeader = header;
   }
   const message = await ratchetEncrypt(contact.ratchet, utf8.encode(text));
+  const conv = contact.roomId;
   const envelope = contact.pendingHeader
-    ? ({ type: 'prekey', x3dh: contact.pendingHeader, message } as const)
-    : ({ type: 'msg', message } as const);
+    ? ({ type: 'prekey', conv, x3dh: contact.pendingHeader, message } as const)
+    : ({ type: 'msg', conv, message } as const);
   return encodeEnvelope(envelope);
 }
 
@@ -99,8 +129,15 @@ export async function receiveMessage(
   bytes: Bytes,
   lookup: PreKeyLookup,
 ): Promise<string> {
-  const envelope = await decodeEnvelope(bytes);
+  return receiveEnvelope(me, contact, await decodeEnvelope(bytes), lookup);
+}
 
+export async function receiveEnvelope(
+  me: IdentityKeys,
+  contact: Contact,
+  envelope: Envelope,
+  lookup: PreKeyLookup,
+): Promise<string> {
   if (!contact.ratchet) {
     if (envelope.type !== 'prekey') {
       throw new Error('Erste Nachricht ohne X3DH-Header — Session kann nicht aufgebaut werden.');
@@ -127,7 +164,7 @@ interface ContactWire {
   peerFingerprint: string;
   nickname: string | null;
   verified: boolean;
-  bundle: string; // bundle token
+  bundle: string | null; // bundle token (null if we only hold their identity)
   ratchet: string | null; // base64 of serializeState output
   pendingHeader: unknown | null;
 }
@@ -149,7 +186,7 @@ export async function serializeContact(c: Contact): Promise<Bytes> {
     peerFingerprint: c.peerFingerprint,
     nickname: c.nickname ?? null,
     verified: c.verified ?? false,
-    bundle: await encodeBundle(c.bundle),
+    bundle: c.bundle ? await encodeBundle(c.bundle) : null,
     ratchet: c.ratchet ? await b64(await serializeState(c.ratchet)) : null,
     pendingHeader: c.pendingHeader ? await encodeInitialHeader(c.pendingHeader) : null,
   };
@@ -165,7 +202,7 @@ export async function deserializeContact(bytes: Bytes): Promise<Contact> {
     peerFingerprint: wire.peerFingerprint,
     nickname: wire.nickname ?? undefined,
     verified: wire.verified ?? false,
-    bundle: await decodeBundle(wire.bundle),
+    bundle: wire.bundle ? await decodeBundle(wire.bundle) : undefined,
     ratchet: wire.ratchet ? await deserializeState(await unb64(wire.ratchet)) : null,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     pendingHeader: wire.pendingHeader ? await decodeInitialHeader(wire.pendingHeader as any) : null,

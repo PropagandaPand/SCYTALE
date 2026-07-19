@@ -6,6 +6,23 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Einseitiges Onboarding (Inbox-Modell)
+
+Bisher mussten **beide** ihren Code austauschen, damit Nachrichten durchgehen.
+Jetzt reicht es, wenn eine Person den Code der anderen hat.
+
+#### Geändert
+- **Transport auf Inbox-Modell umgestellt**: statt eines gemeinsamen Raums
+  `hash(beide Keys)` lauscht jeder auf seiner eigenen Inbox `hash(eigener Key)`
+  (allein berechenbar). Wer schreiben will, sendet an die Inbox des Empfängers.
+- Die erste (prekey-)Nachricht trägt die Absender-Identität + eine `conv`-Routing-ID.
+  Der Empfänger **legt den Kontakt automatisch an** (`makeContactFromHeader`) und
+  kann antworten — **ohne je den Code des Absenders gehabt zu haben**.
+- `Contact.bundle` jetzt optional (Responder-Seite hat keins); `sendMessage` bindet
+  `conv` ein und blockt „zuerst schreiben ohne Code" sauber ab.
+- Verifiziert gegen echten Code: B hält A's Code, schreibt zuerst → A empfängt &
+  antwortet, mehrere Round-Trips inkl. Persistenz-Reload der bundle-losen Seite.
+
 ### App-Icon: SVG + optimierte Install-Icons
 
 #### Hinzugefügt

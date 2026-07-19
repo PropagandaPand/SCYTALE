@@ -64,23 +64,23 @@ export async function decodeInitialHeader(o: InitialHeaderWire): Promise<Initial
 }
 
 export type Envelope =
-  | { type: 'prekey'; x3dh: InitialMessageHeader; message: RatchetMessage }
-  | { type: 'msg'; message: RatchetMessage };
+  | { type: 'prekey'; conv: string; x3dh: InitialMessageHeader; message: RatchetMessage }
+  | { type: 'msg'; conv: string; message: RatchetMessage };
 
 export async function encodeEnvelope(e: Envelope): Promise<Bytes> {
   const o =
     e.type === 'prekey'
-      ? { t: 'prekey', x: await encodeInitialHeader(e.x3dh), m: await encMsg(e.message) }
-      : { t: 'msg', m: await encMsg(e.message) };
+      ? { t: 'prekey', c: e.conv, x: await encodeInitialHeader(e.x3dh), m: await encMsg(e.message) }
+      : { t: 'msg', c: e.conv, m: await encMsg(e.message) };
   return utf8.encode(JSON.stringify(o));
 }
 
 export async function decodeEnvelope(bytes: Bytes): Promise<Envelope> {
   const o = JSON.parse(utf8.decode(bytes));
   if (o.t === 'prekey') {
-    return { type: 'prekey', x3dh: await decodeInitialHeader(o.x), message: await decMsg(o.m) };
+    return { type: 'prekey', conv: o.c, x3dh: await decodeInitialHeader(o.x), message: await decMsg(o.m) };
   }
-  return { type: 'msg', message: await decMsg(o.m) };
+  return { type: 'msg', conv: o.c, message: await decMsg(o.m) };
 }
 
 // --- Prekey bundle token: compact binary pack, base64url (short, URL-safe) ---

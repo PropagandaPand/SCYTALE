@@ -49,8 +49,11 @@ Stimmen die Hashes, entspricht der laufende Code dem geprüften Quellcode.
 
 ## Bekannte Grenzen (ehrlich)
 
-- **Metadaten**: der Relay sieht *wer-mit-wem-wann* (Raum-Zugehörigkeit,
-  Zeitpunkte). Inhalt nie. Sealed Sender ist geplant; Traffic-Analyse bleibt hart.
+- **Metadaten**: der Relay sieht *wer-mit-wem-wann* (Inbox-Zugehörigkeit,
+  conv-IDs, Zeitpunkte). Inhalt nie. Das Inbox-Modell (jeder lauscht auf
+  `hash(eigener Key)`, Absender senden dorthin) macht einseitiges Onboarding
+  möglich, legt dem Relay aber die Routing-Metadaten offen. Sealed Sender ist
+  geplant; Traffic-Analyse bleibt hart.
 - **Code-Delivery-Vertrauen**: siehe oben — mitigiert, nicht eliminiert.
 - **Endpoint**: gegen ein kompromittiertes Gerät (Malware, Client-Side-Scanning
   im OS) hilft keine E2E-Verschlüsselung. Genau das ist der Kern der Kritik an

@@ -8,11 +8,20 @@ import {
   consumeOneTimePreKey,
   type PreKeyState,
 } from './lib/prekeys';
-import { encodeBundle, decodeBundle, pairwiseSafetyNumber, type Bytes, type IdentityKeys } from './crypto';
+import {
+  encodeBundle,
+  decodeBundle,
+  decodeEnvelope,
+  pairwiseSafetyNumber,
+  type Bytes,
+  type IdentityKeys,
+} from './crypto';
 import {
   makeContact,
+  makeContactFromHeader,
   sendMessage,
-  receiveMessage,
+  receiveEnvelope,
+  inboxRoom,
   type Contact,
   type PreKeyLookup,
 } from './lib/session';
@@ -64,6 +73,7 @@ export function Messenger({ dek, onLock }: Props) {
   const contactsRef = useRef<Contact[]>([]);
   const messagesRef = useRef<Record<string, ChatMessage[]>>({});
   const unreadRef = useRef<Record<string, number>>({});
+  const sendRoomRef = useRef<Map<string, string>>(new Map());
   const viewRef = useRef<View>('list');
   const activeRoomRef = useRef<string | null>(null);
   const initedRef = useRef(false);
@@ -100,28 +110,58 @@ export function Messenger({ dek, onLock }: Props) {
     await saveMessages(dek, roomId, messagesRef.current[roomId]);
   }
 
-  function connectRelay(c: Contact) {
-    if (relaysRef.current.has(c.roomId)) return;
-    const client = new RelayClient(
-      c.roomId,
-      (bytes) => void onCipher(c.roomId, bytes),
-      (s) => setStatuses((prev) => ({ ...prev, [c.roomId]: s })),
-    );
-    relaysRef.current.set(c.roomId, client);
+  // Listen on our own inbox — derived from our identity, so no peer needed.
+  function connectInbox(room: string) {
+    if (relaysRef.current.has(room)) return;
+    const client = new RelayClient(room, (bytes) => void onInbox(bytes), () => {});
+    relaysRef.current.set(room, client);
     client.connect();
   }
 
-  async function onCipher(roomId: string, bytes: Bytes) {
-    const contact = contactsRef.current.find((c) => c.roomId === roomId);
+  // A send channel to a contact's inbox (they hold no code of ours to reach us
+  // here; we reach them). Its status is the reachability dot for that contact.
+  async function connectSend(contact: Contact) {
+    const room = await inboxRoom(contact.peerDhPub);
+    sendRoomRef.current.set(contact.roomId, room);
+    if (relaysRef.current.has(room)) return;
+    const client = new RelayClient(
+      room,
+      () => {}, // send-only; inbound arrives on our own inbox
+      (s) => setStatuses((prev) => ({ ...prev, [contact.roomId]: s })),
+    );
+    relaysRef.current.set(room, client);
+    client.connect();
+  }
+
+  async function onInbox(bytes: Bytes) {
     const id = identityRef.current;
     const lookup = lookupRef.current;
-    if (!contact || !id || !lookup) return;
+    if (!id || !lookup) return;
+
+    let env;
+    try {
+      env = await decodeEnvelope(bytes);
+    } catch {
+      return;
+    }
+
+    let contact = contactsRef.current.find((c) => c.roomId === env.conv);
+    if (!contact) {
+      // First contact from someone who holds our code — auto-create it.
+      if (env.type !== 'prekey') return;
+      contact = await makeContactFromHeader(id.dh.publicKey, env.x3dh);
+      contactsRef.current = [...contactsRef.current, contact];
+      messagesRef.current[contact.roomId] = [];
+      await connectSend(contact);
+      await saveContact(dek, contact);
+    }
+
     try {
       const wasNew = contact.ratchet === null;
-      const text = await receiveMessage(id, contact, bytes, lookup);
-      await appendMessage(roomId, { mine: false, text, ts: Date.now() });
-      if (!(viewRef.current === 'chat' && activeRoomRef.current === roomId)) {
-        unreadRef.current[roomId] = (unreadRef.current[roomId] ?? 0) + 1;
+      const text = await receiveEnvelope(id, contact, env, lookup);
+      await appendMessage(contact.roomId, { mine: false, text, ts: Date.now() });
+      if (!(viewRef.current === 'chat' && activeRoomRef.current === contact.roomId)) {
+        unreadRef.current[contact.roomId] = (unreadRef.current[contact.roomId] ?? 0) + 1;
       }
       await saveContact(dek, contact);
       if (wasNew && prekeysRef.current) await savePreKeys(dek, prekeysRef.current);
@@ -147,7 +187,7 @@ export function Messenger({ dek, onLock }: Props) {
       messagesRef.current[contact.roomId] = [];
       commitMessages();
       await saveContact(dek, contact);
-      connectRelay(contact);
+      await connectSend(contact);
       setAddInput('');
       openChat(contact.roomId);
     } catch (e) {
@@ -175,11 +215,13 @@ export function Messenger({ dek, onLock }: Props) {
       setShareLink(link);
       makeQr(link).then(setQrDataUrl).catch(() => undefined);
 
+      connectInbox(await inboxRoom(id.dh.publicKey));
+
       const cs = await loadContacts(dek);
       contactsRef.current = cs;
       for (const c of cs) {
         messagesRef.current[c.roomId] = await loadMessages(dek, c.roomId);
-        connectRelay(c);
+        await connectSend(c);
       }
       commitMessages();
       bump();
@@ -238,11 +280,16 @@ export function Messenger({ dek, onLock }: Props) {
     const id = identityRef.current;
     if (!text || !activeRoom || !id) return;
     const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
-    const relay = relaysRef.current.get(activeRoom);
-    if (!contact || !relay) return;
+    if (!contact) return;
     try {
       const envelope = await sendMessage(id, contact, text);
-      relay.send(envelope);
+      let room = sendRoomRef.current.get(contact.roomId);
+      if (!room) {
+        await connectSend(contact);
+        room = sendRoomRef.current.get(contact.roomId);
+      }
+      const relay = room ? relaysRef.current.get(room) : undefined;
+      relay?.send(envelope);
       await appendMessage(activeRoom, { mine: true, text, ts: Date.now() });
       setMsgInput('');
       await saveContact(dek, contact);

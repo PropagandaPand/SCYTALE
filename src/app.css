@@ -59,7 +59,9 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-sans);
-  min-height: 100dvh;
+  height: 100dvh;
+  overflow: hidden;
+  overscroll-behavior: none;
   -webkit-font-smoothing: antialiased;
   /* No double-tap-to-zoom / 300ms delay; pinch-zoom stays available. */
   touch-action: manipulation;
@@ -73,10 +75,13 @@ select {
   font-size: 16px;
 }
 
+/* App shell: fixed viewport height, never scrolls itself — each view manages
+   its own internal scroll (header/composer stay fixed, the middle scrolls). */
 #app {
   max-width: 460px;
   margin: 0 auto;
-  min-height: 100dvh;
+  height: 100dvh;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   position: relative;
@@ -156,6 +161,7 @@ select {
 /* ==== LOCK ============================================================ */
 .lock {
   flex: 1;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -375,6 +381,7 @@ select {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .conv-row {
   display: flex;
@@ -587,6 +594,7 @@ select {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 16px;
   display: flex;
   flex-direction: column;
@@ -762,6 +770,7 @@ select {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   animation: scyfade 0.3s ease;
 }
 .subhead {

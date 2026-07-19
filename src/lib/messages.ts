@@ -12,8 +12,11 @@ export interface ChatMessage {
   sender?: string; // display name of the sender, for group messages
   text?: string;
   file?: { name: string; mime: string; dataB64: string };
-  mid?: string; // client id, to match a relay nack back to this bubble
-  failed?: boolean; // relay rejected it (e.g. recipient's mailbox full)
+  mid?: string; // client id, to match a relay ack/nack back to this bubble
+  // Delivery to the relay (not read-receipt): pending until the DO confirms the
+  // SQLite insert, then 'sent'; 'failed' on nack (mailbox full) or ack timeout.
+  // Undefined on old/received messages → rendered as delivered.
+  status?: 'pending' | 'sent' | 'failed';
 }
 
 const aad = (roomId: string) => utf8.encode(`scytale:messages:v1:${roomId}`);

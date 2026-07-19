@@ -148,6 +148,14 @@ export class RelayRoom extends DurableObject<Env> {
         const inserted = this.ctx.storage.sql
           .exec<{ id: number }>('INSERT INTO q (body) VALUES (?) RETURNING id', m.b64)
           .one();
+        // Positive delivery ack: the message is durably in the mailbox. The
+        // sender only shows a checkmark once this arrives — a lost socket
+        // between send() and here yields NO ack, so no false checkmark.
+        try {
+          ws.send(JSON.stringify({ t: 'sent', mid: typeof m.mid === 'string' ? m.mid : null }));
+        } catch {
+          /* sender socket gone */
+        }
         let ownerOnline = false;
         for (const peer of this.ctx.getWebSockets()) {
           const a = (peer.deserializeAttachment() ?? {}) as Att;

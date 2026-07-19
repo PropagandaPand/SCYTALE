@@ -1528,6 +1528,11 @@ select {
   font-weight: 600;
   white-space: nowrap;
 }
+.msg-check {
+  display: inline-flex;
+  align-items: center;
+  transition: opacity 0.2s ease;
+}
 
 /* ==== NOTIFICATIONS TOGGLE ========================================== */
 .notif-row {

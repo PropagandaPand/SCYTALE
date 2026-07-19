@@ -24,6 +24,8 @@ export interface RelayOptions {
   onStatus?: (s: RelayStatus) => void;
   /** Owner only: a queued/live ciphertext arrived; ack it once handled. */
   onCipher?: (bytes: Uint8Array<ArrayBuffer>, ackId: number) => void;
+  /** Sender: the relay durably queued a send (delivery to the mailbox). */
+  onAck?: (mid: string | null) => void;
   /** Sender: the relay rejected a send (recipient's mailbox full). */
   onNack?: (mid: string | null) => void;
   /** Present => authenticate as this inbox's owner. */
@@ -129,6 +131,8 @@ export class RelayClient {
         clearTimeout(this.pongTimer);
         this.pongTimer = null;
       }
+    } else if (m.t === 'sent') {
+      this.opts.onAck?.(typeof m.mid === 'string' ? m.mid : null);
     } else if (m.t === 'nack') {
       this.opts.onNack?.(typeof m.mid === 'string' ? m.mid : null);
     } else if (m.t === 'challenge' && this.opts.auth && typeof m.nonce === 'string') {

@@ -110,12 +110,16 @@ SK  = HKDF-SHA256( 0xFF·32 || DH1||DH2||DH3||DH4 ,  info="SCYTALE_X3DH_v1" )
 - **Owner-Auth per Ed25519-Challenge-Response**: DO schickt Nonce, Besitzer
   signiert, DO prüft `hash(signPub)==Inbox` **und** Signatur. Nur der Besitzer
   leert seine Queue — nicht jeder, der bloß den Code hat.
-- **Store-and-Forward**: SQLite-Queue, Ack-basiert. Beide müssen **nicht**
-  gleichzeitig online sein. **Queue gedeckelt** (`MAX_QUEUE`=1000 pro Inbox):
-  da Senden bewusst ohne Auth ist, begrenzt der Cap Flooding. Bei Voll wird
-  **nicht stumm verworfen**, sondern ein `nack` an den Absender zurückgegeben
-  (+ `console.warn` für `wrangler tail`) → die betroffene Nachricht wird als
-  **„nicht zugestellt"** markiert statt mit einem Haken Zustellung vorzutäuschen.
+- **Store-and-Forward mit ehrlicher Zustell-Quittung**: SQLite-Queue. Beide
+  müssen **nicht** gleichzeitig online sein. Jeder Send trägt eine `mid`; der DO
+  antwortet nach dem Insert mit `{t:'sent', mid}`. Der Absender zeigt den Haken
+  **erst nach diesem Ack** — bis dahin *pending* (blasser Haken). Kein Ack
+  innerhalb ~10 s **oder** ein `nack` (Queue voll) → **„nicht zugestellt"**. Ein
+  zwischen `send()` und DO-Verarbeitung verlorener Socket erzeugt so **keinen**
+  falschen Haken mehr.
+- **Queue gedeckelt** (`MAX_QUEUE`=1000 pro Inbox): da Senden bewusst ohne Auth
+  ist, begrenzt der Cap Flooding; bei Voll `nack` (+ `console.warn` **nur mit
+  Zähler, ohne Inbox-ID** — Cloudflare-Logs sollen keine Metadaten sammeln).
   Heilt beim Leeren. **Replays** injizieren keine Nachrichten — der Double
   Ratchet lehnt bereits verbrauchte Message-Keys ab.
 - **Ein-Richtungs-Onboarding**: Code weitergeben reicht; der andere schreibt

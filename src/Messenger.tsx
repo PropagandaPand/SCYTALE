@@ -207,6 +207,7 @@ export function Messenger({ dek, onLock }: Props) {
   const [swipeDx, setSwipeDx] = useState(0); // edge-swipe-back drag distance
   const [swiping, setSwiping] = useState(false);
   const swipeStart = useRef<{ x: number; y: number } | null>(null);
+  const ackTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
   useEffect(() => {
     activeRoomRef.current = activeRoom;
@@ -250,22 +251,43 @@ export function Messenger({ dek, onLock }: Props) {
     if (relaysRef.current.has(room)) return;
     const client = new RelayClient(room, {
       onStatus: (s) => setStatuses((prev) => ({ ...prev, [contact.roomId]: s })),
-      onNack: (mid) => markFailed(mid),
+      onAck: (mid) => markStatus(mid, 'sent'),
+      onNack: (mid) => markStatus(mid, 'failed', 'Nicht zugestellt — das Postfach des Empfängers ist voll.'),
     });
     relaysRef.current.set(room, client);
     client.connect();
   }
 
-  // The relay rejected a send (recipient's mailbox full). Mark that exact bubble
-  // as failed so the checkmark never lies about delivery.
-  function markFailed(mid: string | null) {
-    setError('Nicht zugestellt — das Postfach des Empfängers ist voll.');
+  // Delivery tracking. A 1:1 message is 'pending' until the relay acks the insert
+  // ('sent'); a nack or an ack timeout flips it to 'failed'. So the checkmark
+  // never claims delivery the relay didn't confirm.
+  function clearAckTimer(mid: string) {
+    const t = ackTimers.current.get(mid);
+    if (t) {
+      clearTimeout(t);
+      ackTimers.current.delete(mid);
+    }
+  }
+  function startAckTimer(mid: string) {
+    clearAckTimer(mid);
+    ackTimers.current.set(
+      mid,
+      setTimeout(() => {
+        ackTimers.current.delete(mid);
+        markStatus(mid, 'failed', 'Keine Bestätigung vom Relay — noch nicht zugestellt (evtl. offline).');
+      }, 10_000),
+    );
+  }
+  function markStatus(mid: string | null, status: 'sent' | 'failed', errorMsg?: string) {
+    if (status === 'failed' && errorMsg) setError(errorMsg);
     if (!mid) return;
+    clearAckTimer(mid);
     for (const roomId of Object.keys(messagesRef.current)) {
       const arr = messagesRef.current[roomId];
       const idx = arr.findIndex((m) => m.mid === mid);
       if (idx >= 0) {
-        arr[idx] = { ...arr[idx], failed: true };
+        if (arr[idx].status === status) return;
+        arr[idx] = { ...arr[idx], status };
         void saveMessages(dek, roomId, arr);
         commitMessages();
         bump();
@@ -431,6 +453,8 @@ export function Messenger({ dek, onLock }: Props) {
       window.removeEventListener('pageshow', onForeground);
       for (const r of relaysRef.current.values()) r.close();
       relaysRef.current.clear();
+      for (const t of ackTimers.current.values()) clearTimeout(t);
+      ackTimers.current.clear();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -792,7 +816,8 @@ export function Messenger({ dek, onLock }: Props) {
       const relay = room ? relaysRef.current.get(room) : undefined;
       const mid = crypto.randomUUID();
       relay?.send(envelope, mid);
-      await appendMessage(activeRoom, { mine: true, text, ts: Date.now(), mid });
+      await appendMessage(activeRoom, { mine: true, text, ts: Date.now(), mid, status: 'pending' });
+      startAckTimer(mid);
       setMsgInput('');
       await saveContact(dek, contact);
       void ensureProfileSent(contact);
@@ -834,7 +859,8 @@ export function Messenger({ dek, onLock }: Props) {
       const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
       if (!contact) return;
       await sendEnvelopeTo(contact, await sendFile(id, contact, name, mime, data), mid);
-      await appendMessage(contact.roomId, localMsg);
+      await appendMessage(contact.roomId, { ...localMsg, status: 'pending' });
+      startAckTimer(mid);
       await saveContact(dek, contact);
       bump();
     } catch (err) {
@@ -920,7 +946,8 @@ export function Messenger({ dek, onLock }: Props) {
       const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
       if (!contact) return;
       await sendEnvelopeTo(contact, await sendFile(id, contact, name, mime, data), mid);
-      await appendMessage(contact.roomId, localMsg);
+      await appendMessage(contact.roomId, { ...localMsg, status: 'pending' });
+      startAckTimer(mid);
       await saveContact(dek, contact);
       bump();
     } catch (e) {
@@ -1352,12 +1379,14 @@ export function Messenger({ dek, onLock }: Props) {
               <span className="meta">
                 {fmtClock(m.ts)}
                 {m.mine &&
-                  (m.failed ? (
-                    <span className="msg-failed" title="Nicht zugestellt — Postfach voll">
+                  (m.status === 'failed' ? (
+                    <span className="msg-failed" title="Nicht zugestellt">
                       ⚠ nicht zugestellt
                     </span>
                   ) : (
-                    <IconDoubleCheck size={13} />
+                    <span className="msg-check" style={{ opacity: m.status === 'pending' ? 0.35 : 1 }}>
+                      <IconDoubleCheck size={13} />
+                    </span>
                   ))}
               </span>
             </div>
@@ -1454,12 +1483,14 @@ export function Messenger({ dek, onLock }: Props) {
               <span className="meta">
                 {fmtClock(m.ts)}
                 {m.mine &&
-                  (m.failed ? (
-                    <span className="msg-failed" title="Nicht zugestellt — Postfach voll">
+                  (m.status === 'failed' ? (
+                    <span className="msg-failed" title="Nicht zugestellt">
                       ⚠ nicht zugestellt
                     </span>
                   ) : (
-                    <IconDoubleCheck size={13} />
+                    <span className="msg-check" style={{ opacity: m.status === 'pending' ? 0.35 : 1 }}>
+                      <IconDoubleCheck size={13} />
+                    </span>
                   ))}
               </span>
             </div>

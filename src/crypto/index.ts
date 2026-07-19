@@ -12,3 +12,4 @@ export * from './wire';
 export * from './seal';
 export * from './sas';
 export * from './master';
+export * from './devicelist';

@@ -13,6 +13,7 @@ import {
   decodeBundle,
   decodeEnvelope,
   pairwiseSafetyNumber,
+  identityFingerprint,
   sign,
   type Bytes,
   type IdentityKeys,
@@ -23,12 +24,26 @@ import {
   sendMessage,
   sendFile,
   sendProfile,
+  sendGroupMessage,
+  sendGroupInvite,
   receiveEnvelope,
   inboxRoom,
+  computeRoomId,
   type Contact,
   type MessageContent,
+  type GroupInvite,
   type PreKeyLookup,
 } from './lib/session';
+import {
+  randomGroupId,
+  toInvite,
+  fromInvite,
+  saveGroup,
+  loadGroups,
+  removeGroup,
+  type Group,
+  type GroupMember,
+} from './lib/groups';
 import { saveContact, loadContacts, removeContact } from './lib/store';
 import { loadProfile, saveProfile, type MyProfile } from './lib/profile';
 import { makeAvatar } from './lib/avatar';
@@ -41,7 +56,7 @@ import { Identicon } from './Identicon';
 import { QrScanner } from './QrScanner';
 import { AudioPlayer } from './AudioPlayer';
 import {
-  IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach, IconMic, IconTrash, IconDots,
+  IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach, IconMic, IconTrash, IconDots, IconGroup,
 } from './icons';
 
 const MAX_ATTACH = 600 * 1024; // inline cap — keeps the WS frame under Cloudflare's ~1 MiB limit
@@ -56,6 +71,12 @@ function pickAudioMime(): string {
 }
 
 const fmtRec = (s: number) => `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`;
+
+function eqBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
 
 function incomingMessage(content: MessageContent): ChatMessage {
   if (content.kind === 'file') {
@@ -86,7 +107,7 @@ interface Props {
   onLock: () => void;
 }
 
-type View = 'list' | 'chat' | 'add' | 'verify' | 'profile';
+type View = 'list' | 'chat' | 'add' | 'verify' | 'profile' | 'newgroup';
 
 const shortFp = (fp: string) => (fp ? fp.split(' ').slice(0, 3).join(' ') + ' …' : '…');
 const displayName = (c: Contact) =>
@@ -136,8 +157,10 @@ export function Messenger({ dek, onLock }: Props) {
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const myProfileRef = useRef<MyProfile>({});
   const profileSentRef = useRef<Set<string>>(new Set());
+  const groupsRef = useRef<Group[]>([]);
   const viewRef = useRef<View>('list');
   const activeRoomRef = useRef<string | null>(null);
+  const activeGroupRef = useRef<string | null>(null);
   const initedRef = useRef(false);
 
   const [, bump] = useReducer((x: number) => x + 1, 0);
@@ -160,6 +183,9 @@ export function Messenger({ dek, onLock }: Props) {
   const [recSeconds, setRecSeconds] = useState(0);
   const [myAvatarB64, setMyAvatarB64] = useState('');
   const [profileName, setProfileName] = useState('');
+  const [activeGroup, setActiveGroup] = useState<string | null>(null);
+  const [groupNameInput, setGroupNameInput] = useState('');
+  const [groupSel, setGroupSel] = useState<Set<string>>(new Set());
   const [safetyNumber, setSafetyNumber] = useState('');
   const [safetyQr, setSafetyQr] = useState('');
 
@@ -169,6 +195,9 @@ export function Messenger({ dek, onLock }: Props) {
   useEffect(() => {
     viewRef.current = view;
   }, [view]);
+  useEffect(() => {
+    activeGroupRef.current = activeGroup;
+  }, [activeGroup]);
 
   const commitMessages = () => setMessages({ ...messagesRef.current });
 
@@ -241,6 +270,10 @@ export function Messenger({ dek, onLock }: Props) {
       if (content.kind === 'profile') {
         contact.peerName = content.name;
         contact.peerAvatarB64 = content.avatar ? bytesToB64(content.avatar) : undefined;
+      } else if (content.kind === 'ginvite') {
+        await applyGroupInvite(content.group);
+      } else if (content.kind === 'group') {
+        await applyGroupMessage(content.groupId, content.senderName, content.inner, contact);
       } else {
         await appendMessage(contact.roomId, incomingMessage(content));
         if (!(viewRef.current === 'chat' && activeRoomRef.current === contact.roomId)) {
@@ -316,6 +349,9 @@ export function Messenger({ dek, onLock }: Props) {
         messagesRef.current[c.roomId] = await loadMessages(dek, c.roomId);
         await connectSend(c);
       }
+      const gs = await loadGroups(dek);
+      groupsRef.current = gs;
+      for (const g of gs) messagesRef.current[g.id] = await loadMessages(dek, g.id);
       commitMessages();
       bump();
 
@@ -341,7 +377,7 @@ export function Messenger({ dek, onLock }: Props) {
   useEffect(() => {
     setRenaming(false);
     setChatMenu(false);
-  }, [activeRoom]);
+  }, [activeRoom, activeGroup]);
 
   async function deleteContactAction(roomId: string) {
     setChatMenu(false);
@@ -372,8 +408,157 @@ export function Messenger({ dek, onLock }: Props) {
     bump();
   }
 
+  // ── Groups ────────────────────────────────────────────────────────
+  async function sendEnvelopeTo(contact: Contact, envelope: Bytes) {
+    let room = sendRoomRef.current.get(contact.roomId);
+    if (!room) {
+      await connectSend(contact);
+      room = sendRoomRef.current.get(contact.roomId);
+    }
+    (room ? relaysRef.current.get(room) : undefined)?.send(envelope);
+  }
+
+  // A hidden pairwise contact for a group member, so we can fan messages to them.
+  async function ensureMemberContact(m: GroupMember): Promise<Contact | null> {
+    const id = identityRef.current;
+    if (!id) return null;
+    const roomId = await computeRoomId(id.dh.publicKey, m.dhPub);
+    const existing = contactsRef.current.find((c) => c.roomId === roomId);
+    if (existing) return existing;
+    const contact: Contact = {
+      roomId,
+      peerSignPub: m.signPub,
+      peerDhPub: m.dhPub,
+      peerFingerprint: await identityFingerprint(m.signPub, m.dhPub),
+      peerName: m.name,
+      bundle: m.bundle,
+      hidden: true,
+      ratchet: null,
+      pendingHeader: null,
+    };
+    contactsRef.current = [...contactsRef.current, contact];
+    await connectSend(contact);
+    await saveContact(dek, contact);
+    return contact;
+  }
+
+  async function sendGroupInvites(group: Group) {
+    const id = identityRef.current;
+    const pre = prekeysRef.current;
+    if (!id || !pre) return;
+    const me: GroupMember = {
+      signPub: id.sign.publicKey,
+      dhPub: id.dh.publicKey,
+      bundle: currentBundle(id, pre),
+      name: myProfileRef.current.name,
+    };
+    for (const m of group.members) {
+      const contact = await ensureMemberContact(m);
+      if (!contact) continue;
+      const roster = [me, ...group.members.filter((x) => !eqBytes(x.dhPub, m.dhPub))];
+      const invite: GroupInvite = await toInvite({ ...group, members: roster });
+      try {
+        await sendEnvelopeTo(contact, await sendGroupInvite(id, contact, invite));
+      } catch {
+        /* retry when they come online */
+      }
+    }
+  }
+
+  async function createGroup() {
+    const id = identityRef.current;
+    const pre = prekeysRef.current;
+    if (!id || !pre) return;
+    const members: GroupMember[] = [];
+    for (const c of contactsRef.current) {
+      if (!groupSel.has(c.roomId) || !c.bundle) continue;
+      members.push({ signPub: c.peerSignPub, dhPub: c.peerDhPub, bundle: c.bundle, name: displayName(c) });
+    }
+    if (members.length === 0) {
+      setError('Wähle mindestens einen Kontakt.');
+      return;
+    }
+    const group: Group = { id: randomGroupId(), name: groupNameInput.trim() || 'Gruppe', members, createdAt: Date.now() };
+    groupsRef.current = [group, ...groupsRef.current];
+    messagesRef.current[group.id] = [];
+    await saveGroup(dek, group);
+    await sendGroupInvites(group);
+    setGroupSel(new Set());
+    setGroupNameInput('');
+    openGroup(group.id);
+  }
+
+  function openGroup(gid: string) {
+    setError('');
+    setActiveGroup(gid);
+    setActiveRoom(null);
+    activeRoomRef.current = null;
+    unreadRef.current[gid] = 0;
+    setView('chat');
+    bump();
+  }
+
+  async function groupSend(inner: MessageContent, localMsg: ChatMessage) {
+    const id = identityRef.current;
+    const g = groupsRef.current.find((x) => x.id === activeGroup);
+    if (!id || !g) return;
+    try {
+      for (const m of g.members) {
+        const contact = await ensureMemberContact(m);
+        if (!contact) continue;
+        await sendEnvelopeTo(contact, await sendGroupMessage(id, contact, g.id, myProfileRef.current.name, inner));
+      }
+      await appendMessage(g.id, localMsg);
+      bump();
+    } catch (e) {
+      setError('Senden fehlgeschlagen: ' + (e as Error).message);
+    }
+  }
+
+  async function deleteGroupAction(gid: string) {
+    setChatMenu(false);
+    groupsRef.current = groupsRef.current.filter((g) => g.id !== gid);
+    delete messagesRef.current[gid];
+    delete unreadRef.current[gid];
+    await removeGroup(dek, gid);
+    if (activeGroup === gid) {
+      setActiveGroup(null);
+      setView('list');
+    }
+    commitMessages();
+    bump();
+  }
+
+  async function applyGroupMessage(
+    groupId: string,
+    senderName: string | undefined,
+    inner: MessageContent,
+    contact: Contact,
+  ) {
+    const g = groupsRef.current.find((x) => x.id === groupId);
+    if (!g) return;
+    const sender = senderName || contact.peerName || shortFp(contact.peerFingerprint);
+    const msg: ChatMessage =
+      inner.kind === 'file'
+        ? { mine: false, ts: Date.now(), sender, file: { name: inner.name, mime: inner.mime, dataB64: bytesToB64(inner.data) } }
+        : { mine: false, ts: Date.now(), sender, text: inner.kind === 'text' ? inner.text : '' };
+    await appendMessage(g.id, msg);
+    if (!(viewRef.current === 'chat' && activeGroupRef.current === g.id)) {
+      unreadRef.current[g.id] = (unreadRef.current[g.id] ?? 0) + 1;
+    }
+  }
+
+  async function applyGroupInvite(invite: GroupInvite) {
+    const g = await fromInvite(invite);
+    groupsRef.current = [g, ...groupsRef.current.filter((x) => x.id !== g.id)];
+    messagesRef.current[g.id] ??= [];
+    await saveGroup(dek, g);
+    for (const m of g.members) await ensureMemberContact(m);
+  }
+
   function openChat(roomId: string) {
     setError('');
+    setActiveGroup(null);
     setActiveRoom(roomId);
     activeRoomRef.current = roomId;
     unreadRef.current[roomId] = 0;
@@ -401,7 +586,13 @@ export function Messenger({ dek, onLock }: Props) {
     setError('');
     const text = msgInput.trim();
     const id = identityRef.current;
-    if (!text || !activeRoom || !id) return;
+    if (!text || !id) return;
+    if (activeGroup) {
+      setMsgInput('');
+      await groupSend({ kind: 'text', text }, { mine: true, text, ts: Date.now() });
+      return;
+    }
+    if (!activeRoom) return;
     const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
     if (!contact) return;
     try {
@@ -428,9 +619,7 @@ export function Messenger({ dek, onLock }: Props) {
     const file = input.files?.[0];
     input.value = '';
     const id = identityRef.current;
-    if (!file || !activeRoom || !id) return;
-    const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
-    if (!contact) return;
+    if (!file || !id || (!activeRoom && !activeGroup)) return;
     setError('');
     try {
       let data: Uint8Array<ArrayBuffer>;
@@ -448,18 +637,15 @@ export function Messenger({ dek, onLock }: Props) {
         setError(`Zu groß (${Math.round(data.length / 1024)} KB) — inline gehen ~${Math.round(MAX_ATTACH / 1024)} KB.`);
         return;
       }
-      const envelope = await sendFile(id, contact, name, mime, data);
-      let room = sendRoomRef.current.get(contact.roomId);
-      if (!room) {
-        await connectSend(contact);
-        room = sendRoomRef.current.get(contact.roomId);
+      const localMsg: ChatMessage = { mine: true, ts: Date.now(), file: { name, mime, dataB64: bytesToB64(data) } };
+      if (activeGroup) {
+        await groupSend({ kind: 'file', name, mime, data }, localMsg);
+        return;
       }
-      (room ? relaysRef.current.get(room) : undefined)?.send(envelope);
-      await appendMessage(contact.roomId, {
-        mine: true,
-        ts: Date.now(),
-        file: { name, mime, dataB64: bytesToB64(data) },
-      });
+      const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
+      if (!contact) return;
+      await sendEnvelopeTo(contact, await sendFile(id, contact, name, mime, data));
+      await appendMessage(contact.roomId, localMsg);
       await saveContact(dek, contact);
       bump();
     } catch (err) {
@@ -525,9 +711,7 @@ export function Messenger({ dek, onLock }: Props) {
     cleanupRecording();
     if (!send || chunks.length === 0) return;
     const id = identityRef.current;
-    if (!id || !activeRoom) return;
-    const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
-    if (!contact) return;
+    if (!id || (!activeRoom && !activeGroup)) return;
 
     const mime = rawMime.startsWith('audio/') ? rawMime.split(';')[0] : 'audio/webm';
     const ext = mime.includes('mp4') ? 'm4a' : mime.includes('ogg') ? 'ogg' : 'webm';
@@ -537,19 +721,16 @@ export function Messenger({ dek, onLock }: Props) {
       return;
     }
     const name = `sprachnachricht.${ext}`;
+    const localMsg: ChatMessage = { mine: true, ts: Date.now(), file: { name, mime, dataB64: bytesToB64(data) } };
     try {
-      const envelope = await sendFile(id, contact, name, mime, data);
-      let room = sendRoomRef.current.get(contact.roomId);
-      if (!room) {
-        await connectSend(contact);
-        room = sendRoomRef.current.get(contact.roomId);
+      if (activeGroup) {
+        await groupSend({ kind: 'file', name, mime, data }, localMsg);
+        return;
       }
-      (room ? relaysRef.current.get(room) : undefined)?.send(envelope);
-      await appendMessage(contact.roomId, {
-        mine: true,
-        ts: Date.now(),
-        file: { name, mime, dataB64: bytesToB64(data) },
-      });
+      const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
+      if (!contact) return;
+      await sendEnvelopeTo(contact, await sendFile(id, contact, name, mime, data));
+      await appendMessage(contact.roomId, localMsg);
       await saveContact(dek, contact);
       bump();
     } catch (e) {
@@ -636,8 +817,52 @@ export function Messenger({ dek, onLock }: Props) {
   }
 
   const contacts = contactsRef.current;
+  const visibleContacts = contacts.filter((c) => !c.hidden);
+  const groups = groupsRef.current;
   const activeContact = contacts.find((c) => c.roomId === activeRoom) ?? null;
+  const activeGroupData = groups.find((g) => g.id === activeGroup) ?? null;
   const st = (roomId: string) => statuses[roomId] ?? 'closed';
+  const lastPreview = (m?: ChatMessage) =>
+    m ? m.text || (m.file ? '📎 Anhang' : '') : '';
+
+  const composerEl = recording ? (
+    <div className="composer recording">
+      <button className="attach-btn danger" onClick={cancelRecording} aria-label="Abbrechen">
+        <IconTrash />
+      </button>
+      <div className="rec-indicator">
+        <span className="rec-dot" />
+        Aufnahme… {fmtRec(recSeconds)}
+      </div>
+      <button className="send-btn" onClick={stopAndSend} aria-label="Senden">
+        <IconSend />
+      </button>
+    </div>
+  ) : (
+    <div className="composer">
+      <input ref={fileInputRef} type="file" hidden onChange={(e) => void onPickFile(e)} />
+      <button className="attach-btn" title="Anhang" onClick={() => fileInputRef.current?.click()}>
+        <IconAttach />
+      </button>
+      <div className="composer-pill">
+        <input
+          value={msgInput}
+          placeholder="Verschlüsselte Nachricht…"
+          onChange={(e) => setMsgInput(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && void onSend()}
+        />
+      </div>
+      {msgInput.trim() ? (
+        <button className="send-btn" onClick={() => void onSend()} aria-label="Senden">
+          <IconSend />
+        </button>
+      ) : (
+        <button className="send-btn mic" onClick={() => void startRecording()} aria-label="Sprachnachricht">
+          <IconMic />
+        </button>
+      )}
+    </div>
+  );
 
   // ── Contact list ──────────────────────────────────────────────────
   if (view === 'list') {
@@ -658,6 +883,18 @@ export function Messenger({ dek, onLock }: Props) {
                 </div>
               </button>
               <div className="icon-btns">
+                <button
+                  className="icon-btn"
+                  title="Neue Gruppe"
+                  onClick={() => {
+                    setError('');
+                    setGroupSel(new Set());
+                    setGroupNameInput('');
+                    setView('newgroup');
+                  }}
+                >
+                  <IconGroup />
+                </button>
                 <button className="icon-btn" title="Teilen / Kontakt" onClick={() => { setError(''); setView('add'); }}>
                   <IconPlus />
                 </button>
@@ -680,46 +917,75 @@ export function Messenger({ dek, onLock }: Props) {
           </div>
 
           <div className="conv-scroll">
-            {contacts.length === 0 ? (
+            {groups.length === 0 && visibleContacts.length === 0 ? (
               <div className="list-empty">
-                Noch keine Kontakte.<br />Tippe oben auf <b>+</b>, um dich zu teilen oder jemanden hinzuzufügen.
+                Noch keine Chats.<br />Oben: <b>+</b> für Kontakte, das Gruppen-Symbol für eine Gruppe.
               </div>
             ) : (
-              contacts.map((c) => {
-                const last = messagesRef.current[c.roomId]?.at(-1);
-                const unread = unreadRef.current[c.roomId] ?? 0;
-                return (
-                  <button key={c.roomId} className="conv-row" onClick={() => openChat(c.roomId)}>
-                    <div className="avatar-wrap">
-                      {c.peerAvatarB64 ? (
-                        <img className="avatar-img" src={avatarSrc(c.peerAvatarB64)} alt="" />
-                      ) : (
-                        <div className="avatar">
-                          <Identicon seed={c.roomId} />
+              <>
+                {groups.map((g) => {
+                  const last = messagesRef.current[g.id]?.at(-1);
+                  const unread = unreadRef.current[g.id] ?? 0;
+                  return (
+                    <button key={g.id} className="conv-row" onClick={() => openGroup(g.id)}>
+                      <div className="avatar-wrap">
+                        <div className="avatar group">
+                          <IconGroup size={22} />
                         </div>
-                      )}
-                      <span className={`sdot ${st(c.roomId)}`} />
-                    </div>
-                    <div className="conv-main">
-                      <div className="conv-line1">
-                        <span className="conv-name">{displayName(c)}</span>
-                        {c.verified && (
-                          <span className="verified-badge">
-                            <IconShield size={14} filled />
+                      </div>
+                      <div className="conv-main">
+                        <div className="conv-line1">
+                          <span className="conv-name">{g.name}</span>
+                          <span className="conv-ts">{fmtListTs(last?.ts)}</span>
+                        </div>
+                        <div className="conv-line2">
+                          <span className="conv-last">
+                            {last
+                              ? (last.mine ? '' : last.sender ? `${last.sender}: ` : '') + lastPreview(last)
+                              : `${g.members.length + 1} Mitglieder`}
                           </span>
+                          {unread > 0 && <span className="unread">{unread}</span>}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+                {visibleContacts.map((c) => {
+                  const last = messagesRef.current[c.roomId]?.at(-1);
+                  const unread = unreadRef.current[c.roomId] ?? 0;
+                  return (
+                    <button key={c.roomId} className="conv-row" onClick={() => openChat(c.roomId)}>
+                      <div className="avatar-wrap">
+                        {c.peerAvatarB64 ? (
+                          <img className="avatar-img" src={avatarSrc(c.peerAvatarB64)} alt="" />
+                        ) : (
+                          <div className="avatar">
+                            <Identicon seed={c.roomId} />
+                          </div>
                         )}
-                        <span className="conv-ts">{fmtListTs(last?.ts)}</span>
+                        <span className={`sdot ${st(c.roomId)}`} />
                       </div>
-                      <div className="conv-line2">
-                        <span className="conv-last">
-                          {last ? last.text : c.ratchet ? 'Verbunden' : 'Neu — sag Hallo'}
-                        </span>
-                        {unread > 0 && <span className="unread">{unread}</span>}
+                      <div className="conv-main">
+                        <div className="conv-line1">
+                          <span className="conv-name">{displayName(c)}</span>
+                          {c.verified && (
+                            <span className="verified-badge">
+                              <IconShield size={14} filled />
+                            </span>
+                          )}
+                          <span className="conv-ts">{fmtListTs(last?.ts)}</span>
+                        </div>
+                        <div className="conv-line2">
+                          <span className="conv-last">
+                            {last ? lastPreview(last) : c.ratchet ? 'Verbunden' : 'Neu — sag Hallo'}
+                          </span>
+                          {unread > 0 && <span className="unread">{unread}</span>}
+                        </div>
                       </div>
-                    </div>
-                  </button>
-                );
-              })
+                    </button>
+                  );
+                })}
+              </>
             )}
           </div>
         </div>
@@ -839,44 +1105,88 @@ export function Messenger({ dek, onLock }: Props) {
 
         {error && <div className="err-note">{error}</div>}
 
-        {recording ? (
-          <div className="composer recording">
-            <button className="attach-btn danger" onClick={cancelRecording} aria-label="Abbrechen">
-              <IconTrash />
-            </button>
-            <div className="rec-indicator">
-              <span className="rec-dot" />
-              Aufnahme… {fmtRec(recSeconds)}
-            </div>
-            <button className="send-btn" onClick={stopAndSend} aria-label="Senden">
-              <IconSend />
-            </button>
+        {composerEl}
+      </div>
+    );
+  }
+
+  // ── Group chat ────────────────────────────────────────────────────
+  if (view === 'chat' && activeGroupData) {
+    const msgs = messages[activeGroupData.id] ?? [];
+    return (
+      <div className="chat">
+        <div className="chat-top">
+          <button className="chat-back" onClick={() => { setActiveGroup(null); setView('list'); }}>
+            <IconBack />
+          </button>
+          <div className="avatar sm group">
+            <IconGroup size={18} />
           </div>
-        ) : (
-          <div className="composer">
-            <input ref={fileInputRef} type="file" hidden onChange={(e) => void onPickFile(e)} />
-            <button className="attach-btn" title="Anhang" onClick={() => fileInputRef.current?.click()}>
-              <IconAttach />
-            </button>
-            <div className="composer-pill">
-              <input
-                value={msgInput}
-                placeholder="Verschlüsselte Nachricht…"
-                onChange={(e) => setMsgInput(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && void onSend()}
-              />
-            </div>
-            {msgInput.trim() ? (
-              <button className="send-btn" onClick={() => void onSend()} aria-label="Senden">
-                <IconSend />
-              </button>
-            ) : (
-              <button className="send-btn mic" onClick={() => void startRecording()} aria-label="Sprachnachricht">
-                <IconMic />
-              </button>
-            )}
+          <div className="chat-peer">
+            <div className="n">{activeGroupData.name}</div>
+            <span className="peer-fp">{activeGroupData.members.length + 1} Mitglieder</span>
           </div>
-        )}
+          <button className="chat-menu-btn" onClick={() => setChatMenu((v) => !v)} aria-label="Menü">
+            <IconDots />
+          </button>
+          {chatMenu && (
+            <div className="chat-menu">
+              <button
+                onClick={() => {
+                  setChatMenu(false);
+                  if (confirm('Chatverlauf wirklich löschen?')) void clearChatAction(activeGroupData.id);
+                }}
+              >
+                Chatverlauf löschen
+              </button>
+              <button
+                className="danger"
+                onClick={() => {
+                  setChatMenu(false);
+                  if (confirm('Gruppe wirklich löschen?')) void deleteGroupAction(activeGroupData.id);
+                }}
+              >
+                Gruppe löschen
+              </button>
+            </div>
+          )}
+        </div>
+        <div id="msgs" className="msgs">
+          <div className="enc-pill">
+            <span className="g">
+              <IconLock size={10} />
+            </span>
+            Verschlüsselt · Ende-zu-Ende
+          </div>
+          {msgs.map((m, i) => (
+            <div
+              key={`${m.ts}-${i}`}
+              className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file?.mime.startsWith('image/') ? ' has-file' : ''}`}
+            >
+              {!m.mine && m.sender && <div className="bubble-sender">{m.sender}</div>}
+              {m.file ? (
+                m.file.mime.startsWith('image/') ? (
+                  <img className="bubble-img" src={`data:${m.file.mime};base64,${m.file.dataB64}`} alt={m.file.name} />
+                ) : m.file.mime.startsWith('audio/') ? (
+                  <AudioPlayer dataB64={m.file.dataB64} mime={m.file.mime} />
+                ) : (
+                  <button className="file-chip" onClick={() => downloadFile(m.file!)}>
+                    <IconAttach size={16} />
+                    <span className="fn">{m.file.name}</span>
+                  </button>
+                )
+              ) : (
+                m.text
+              )}
+              <span className="meta">
+                {fmtClock(m.ts)}
+                {m.mine && <IconDoubleCheck size={13} />}
+              </span>
+            </div>
+          ))}
+        </div>
+        {error && <div className="err-note">{error}</div>}
+        {composerEl}
       </div>
     );
   }
@@ -1037,6 +1347,75 @@ export function Messenger({ dek, onLock }: Props) {
               den öffentlichen Code.
             </p>
           </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── New group ─────────────────────────────────────────────────────
+  if (view === 'newgroup') {
+    const selectable = visibleContacts.filter((c) => c.bundle);
+    return (
+      <div className="subview">
+        <div className="subhead">
+          <button className="back" onClick={() => setView('list')}>
+            <IconBack />
+          </button>
+          <div className="h">Neue Gruppe</div>
+        </div>
+        <div className="subbody">
+          <div className="field-lbl">Gruppenname</div>
+          <input
+            className="name-input"
+            value={groupNameInput}
+            placeholder="z. B. Redaktion"
+            onChange={(e) => setGroupNameInput(e.target.value)}
+          />
+          <div className="sect-lbl" style={{ marginTop: 18 }}>
+            Mitglieder wählen
+          </div>
+          {selectable.length === 0 ? (
+            <p className="share-hint" style={{ textAlign: 'left' }}>
+              Du brauchst zuerst Kontakte (über deren Code), um sie in eine Gruppe zu holen.
+            </p>
+          ) : (
+            <div className="card pad16">
+              {selectable.map((c) => {
+                const on = groupSel.has(c.roomId);
+                return (
+                  <button
+                    key={c.roomId}
+                    className={`member-row${on ? ' on' : ''}`}
+                    onClick={() => {
+                      const s = new Set(groupSel);
+                      if (on) s.delete(c.roomId);
+                      else s.add(c.roomId);
+                      setGroupSel(s);
+                    }}
+                  >
+                    {c.peerAvatarB64 ? (
+                      <img className="avatar-img sm" src={avatarSrc(c.peerAvatarB64)} alt="" />
+                    ) : (
+                      <div className="avatar sm">
+                        <Identicon seed={c.roomId} />
+                      </div>
+                    )}
+                    <span className="conv-name">{displayName(c)}</span>
+                    <span className={`check${on ? ' on' : ''}`}>{on ? '✓' : ''}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {error && <div className="err-note">{error}</div>}
+          <button
+            className="btn btn-primary"
+            style={{ marginTop: 18 }}
+            disabled={groupSel.size === 0}
+            onClick={() => void createGroup()}
+          >
+            Gruppe erstellen ({groupSel.size})
+          </button>
         </div>
       </div>
     );

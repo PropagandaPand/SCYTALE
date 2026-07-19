@@ -6,6 +6,27 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Gruppen (MVP)
+
+#### Hinzugefügt
+- **Gruppenchats** via **Pairwise Fan-out**: eine Gruppennachricht wird an jedes
+  Mitglied einzeln über die 1:1-Double-Ratchet-Session verschickt — voll E2E, der
+  Relay sieht nur Ciphertext. Text/Bilder/Dateien/Audio laufen mit (inneres
+  Content-Framing wird gewrappt).
+- **Roster-Verteilung**: der Ersteller schickt jedem Mitglied E2E die Mitgliederliste
+  inkl. aller Bundles, sodass jeder jeden erreichen kann. Neue `MessageContent`-Typen
+  `group`/`ginvite`; `lib/groups.ts` (Datenmodell + Speicher), `Contact.hidden` für
+  Gruppen-only-Kontakte.
+- **UI**: Gruppe erstellen (Name + Kontaktauswahl), Gruppen in der Chatliste,
+  Gruppenchat mit Absendernamen, Gruppe löschen. Fan-out nutzt die Store-and-
+  Forward-Mailbox → Offline-Mitglieder bekommen Nachrichten nach.
+- Verifiziert: Gruppen-Nachricht (verschachtelter Text/Datei) + Roster-Einladung
+  Round-Trip gegen echten Code.
+
+#### Grenzen (v1)
+- O(N)-Fan-out pro Nachricht; keine nachträgliche Mitglieder-Verwaltung / kein
+  Re-Keying; nur Kontakte mit Bundle können hinzugefügt werden.
+
 ### Profilbilder + Kontakte/Chats löschen
 
 #### Hinzugefügt

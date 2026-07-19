@@ -152,6 +152,16 @@ export function IconDots({ size = 18 }: { size?: number }) {
   );
 }
 
+export function IconGroup({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 20 18" aria-hidden="true">
+      <circle cx="7" cy="6" r="3.2" fill="none" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M1.5 16c0-3 2.5-5 5.5-5s5.5 2 5.5 5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      <path d="M14 3.5a3 3 0 0 1 0 5.6M15 11c2.4.3 4 2.2 4 5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export function IconInfo({ size = 16 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">

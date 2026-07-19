@@ -30,6 +30,7 @@ import {
   type Envelope,
   type Bytes,
 } from '../crypto';
+import { bytesToB64, b64ToBytes } from './bytes';
 
 export interface Contact {
   roomId: string;
@@ -40,6 +41,7 @@ export interface Contact {
   peerName?: string; // display name the peer shared via their profile
   peerAvatarB64?: string; // avatar the peer shared via their profile
   verified?: boolean; // local flag: safety number compared out-of-band
+  hidden?: boolean; // group-member-only contact — kept out of the 1:1 list
   bundle?: PreKeyBundle; // present when WE hold their code (needed to initiate)
   ratchet: RatchetState | null; // null until the session is established
   pendingHeader: InitialMessageHeader | null; // initiator attaches until first reply arrives
@@ -109,11 +111,27 @@ export async function makeContactFromHeader(
 }
 
 /** Encrypt outgoing text into a wire envelope; establishes the session if needed. */
-/** Message payload: text, a file, or a profile update — framed into the ratchet plaintext. */
+/** A group's roster, shared E2E so every member can reach every other member. */
+export interface GroupInvite {
+  id: string;
+  name: string;
+  members: { signPub: string; dhPub: string; bundle: string | null; name: string | null }[];
+}
+
+/** Message payload framed into the ratchet plaintext. */
 export type MessageContent =
   | { kind: 'text'; text: string }
   | { kind: 'file'; name: string; mime: string; data: Bytes }
-  | { kind: 'profile'; name?: string; avatar?: Bytes };
+  | { kind: 'profile'; name?: string; avatar?: Bytes }
+  | { kind: 'group'; groupId: string; senderName?: string; inner: MessageContent }
+  | { kind: 'ginvite'; group: GroupInvite };
+
+function prefixed(type: number, body: Uint8Array): Bytes {
+  const out = new Uint8Array(1 + body.length);
+  out[0] = type;
+  out.set(body, 1);
+  return out;
+}
 
 // Frame: byte0 = 0 (text) | 1 (file) | 2 (profile).
 //   file:    [nameLen(2)][name][mimeLen(2)][mime][data]
@@ -144,20 +162,28 @@ function frameContent(c: MessageContent): Bytes {
     out.set(c.data, o);
     return out;
   }
-  const name = utf8.encode(c.name ?? '');
-  const avatar = c.avatar ?? new Uint8Array(0);
-  const out = new Uint8Array(1 + 2 + name.length + 4 + avatar.length);
-  const dv = new DataView(out.buffer);
-  let o = 0;
-  out[o++] = 2;
-  dv.setUint16(o, name.length);
-  o += 2;
-  out.set(name, o);
-  o += name.length;
-  dv.setUint32(o, avatar.length);
-  o += 4;
-  out.set(avatar, o);
-  return out;
+  if (c.kind === 'profile') {
+    const name = utf8.encode(c.name ?? '');
+    const avatar = c.avatar ?? new Uint8Array(0);
+    const out = new Uint8Array(1 + 2 + name.length + 4 + avatar.length);
+    const dv = new DataView(out.buffer);
+    let o = 0;
+    out[o++] = 2;
+    dv.setUint16(o, name.length);
+    o += 2;
+    out.set(name, o);
+    o += name.length;
+    dv.setUint32(o, avatar.length);
+    o += 4;
+    out.set(avatar, o);
+    return out;
+  }
+  if (c.kind === 'group') {
+    const json = JSON.stringify({ g: c.groupId, s: c.senderName ?? '', i: bytesToB64(frameContent(c.inner)) });
+    return prefixed(3, utf8.encode(json));
+  }
+  // ginvite
+  return prefixed(4, utf8.encode(JSON.stringify(c.group)));
 }
 
 function unframeContent(bytes: Bytes): MessageContent {
@@ -173,6 +199,13 @@ function unframeContent(bytes: Bytes): MessageContent {
     const avLen = dv.getUint32(o);
     o += 4;
     return { kind: 'profile', name: name || undefined, avatar: avLen > 0 ? bytes.slice(o, o + avLen) : undefined };
+  }
+  if (bytes[0] === 3) {
+    const j = JSON.parse(utf8.decode(bytes.slice(1)));
+    return { kind: 'group', groupId: j.g, senderName: j.s || undefined, inner: unframeContent(b64ToBytes(j.i)) };
+  }
+  if (bytes[0] === 4) {
+    return { kind: 'ginvite', group: JSON.parse(utf8.decode(bytes.slice(1))) as GroupInvite };
   }
 
   let o = 1;
@@ -231,6 +264,20 @@ export async function sendProfile(
   return sendContent(me, contact, { kind: 'profile', name, avatar });
 }
 
+export async function sendGroupMessage(
+  me: IdentityKeys,
+  contact: Contact,
+  groupId: string,
+  senderName: string | undefined,
+  inner: MessageContent,
+): Promise<Bytes> {
+  return sendContent(me, contact, { kind: 'group', groupId, senderName, inner });
+}
+
+export async function sendGroupInvite(me: IdentityKeys, contact: Contact, group: GroupInvite): Promise<Bytes> {
+  return sendContent(me, contact, { kind: 'ginvite', group });
+}
+
 /** Decrypt an incoming envelope; establishes the responder session on first contact. */
 export async function receiveMessage(
   me: IdentityKeys,
@@ -275,6 +322,7 @@ interface ContactWire {
   peerName: string | null;
   peerAvatarB64: string | null;
   verified: boolean;
+  hidden: boolean;
   bundle: string | null; // bundle token (null if we only hold their identity)
   ratchet: string | null; // base64 of serializeState output
   pendingHeader: unknown | null;
@@ -299,6 +347,7 @@ export async function serializeContact(c: Contact): Promise<Bytes> {
     peerName: c.peerName ?? null,
     peerAvatarB64: c.peerAvatarB64 ?? null,
     verified: c.verified ?? false,
+    hidden: c.hidden ?? false,
     bundle: c.bundle ? await encodeBundle(c.bundle) : null,
     ratchet: c.ratchet ? await b64(await serializeState(c.ratchet)) : null,
     pendingHeader: c.pendingHeader ? await encodeInitialHeader(c.pendingHeader) : null,
@@ -317,6 +366,7 @@ export async function deserializeContact(bytes: Bytes): Promise<Contact> {
     peerName: wire.peerName ?? undefined,
     peerAvatarB64: wire.peerAvatarB64 ?? undefined,
     verified: wire.verified ?? false,
+    hidden: wire.hidden || undefined,
     bundle: wire.bundle ? await decodeBundle(wire.bundle) : undefined,
     ratchet: wire.ratchet ? await deserializeState(await unb64(wire.ratchet)) : null,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

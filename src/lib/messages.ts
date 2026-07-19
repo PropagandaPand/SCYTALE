@@ -9,6 +9,7 @@ import { loadRecord, saveRecord, deleteRecord } from './db';
 export interface ChatMessage {
   mine: boolean;
   ts: number;
+  sender?: string; // display name of the sender, for group messages
   text?: string;
   file?: { name: string; mime: string; dataB64: string };
 }

@@ -35,8 +35,8 @@ function applySecurityHeaders(headers: Headers): void {
   headers.set('X-Frame-Options', 'DENY');
   headers.set('Cross-Origin-Opener-Policy', 'same-origin');
   headers.set('Cross-Origin-Resource-Policy', 'same-origin');
-  // Camera allowed for the in-app QR scanner (same-origin only); everything else off.
-  headers.set('Permissions-Policy', 'camera=(self), geolocation=(), microphone=(), payment=(), usb=()');
+  // Camera (QR scanner) + microphone (voice messages), same-origin only; rest off.
+  headers.set('Permissions-Policy', 'camera=(self), microphone=(self), geolocation=(), payment=(), usb=()');
   headers.set('Strict-Transport-Security', 'max-age=63072000; includeSubDomains');
 }
 

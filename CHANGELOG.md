@@ -6,6 +6,21 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Audionachrichten
+
+#### Hinzugefügt
+- **Sprachnachrichten**: Mikrofon-Button im Composer → Aufnahme (MediaRecorder,
+  bestes verfügbares Format: mp4/aac oder webm/opus) → Stop/Senden oder Abbrechen,
+  mit Timer + Auto-Stop bei 3 min. Verschickt als Audio-Anhang durch dieselbe
+  E2E-Pipeline; Inline-Player (`AudioPlayer.tsx`) mit Play/Pause, Fortschritt,
+  Dauer (inkl. Opus-Duration-Infinity-Workaround).
+- **Permissions-Policy**: `microphone=(self)` ergänzt (nur same-origin).
+
+#### Grenzen
+- Volle Cross-Codec-Wiedergabe ist nicht garantiert (iOS nimmt mp4/aac auf,
+  Android Chrome webm/opus — Safari dekodiert kein Opus). Transcoding wäre ein
+  späteres Thema.
+
 ### Offline-Zustellung (Store-and-Forward-Mailbox)
 
 Bisher mussten beide gleichzeitig online sein — sonst war die Nachricht weg.

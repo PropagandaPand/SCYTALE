@@ -36,11 +36,23 @@ import { bytesToB64, b64ToBytes } from './lib/bytes';
 import { compressImage } from './lib/imagecompress';
 import { Identicon } from './Identicon';
 import { QrScanner } from './QrScanner';
+import { AudioPlayer } from './AudioPlayer';
 import {
-  IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach,
+  IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach, IconMic, IconTrash,
 } from './icons';
 
 const MAX_ATTACH = 600 * 1024; // inline cap — keeps the WS frame under Cloudflare's ~1 MiB limit
+const MAX_REC_SECONDS = 180;
+
+function pickAudioMime(): string {
+  const cands = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
+  for (const c of cands) {
+    if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported?.(c)) return c;
+  }
+  return '';
+}
+
+const fmtRec = (s: number) => `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`;
 
 function incomingMessage(content: MessageContent): ChatMessage {
   if (content.kind === 'text') return { mine: false, text: content.text, ts: Date.now() };
@@ -108,6 +120,11 @@ export function Messenger({ dek, onLock }: Props) {
   const inboxClientRef = useRef<RelayClient | null>(null);
   const seenIdsRef = useRef<Set<number>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recChunksRef = useRef<Blob[]>([]);
+  const recStreamRef = useRef<MediaStream | null>(null);
+  const recTimerRef = useRef<number | null>(null);
+  const sendOnStopRef = useRef(true);
   const viewRef = useRef<View>('list');
   const activeRoomRef = useRef<string | null>(null);
   const initedRef = useRef(false);
@@ -127,6 +144,8 @@ export function Messenger({ dek, onLock }: Props) {
   const [renaming, setRenaming] = useState(false);
   const [renameInput, setRenameInput] = useState('');
   const [scanning, setScanning] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [recSeconds, setRecSeconds] = useState(0);
   const [safetyNumber, setSafetyNumber] = useState('');
   const [safetyQr, setSafetyQr] = useState('');
 
@@ -392,6 +411,96 @@ export function Messenger({ dek, onLock }: Props) {
     }
   }
 
+  function cleanupRecording() {
+    if (recTimerRef.current) {
+      clearInterval(recTimerRef.current);
+      recTimerRef.current = null;
+    }
+    recStreamRef.current?.getTracks().forEach((t) => t.stop());
+    recStreamRef.current = null;
+    mediaRecorderRef.current = null;
+    setRecording(false);
+    setRecSeconds(0);
+  }
+
+  async function startRecording() {
+    if (!activeRoom) return;
+    setError('');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recStreamRef.current = stream;
+      const mime = pickAudioMime();
+      const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      recChunksRef.current = [];
+      sendOnStopRef.current = true;
+      rec.ondataavailable = (e) => {
+        if (e.data.size) recChunksRef.current.push(e.data);
+      };
+      rec.onstop = () => void finishRecording(rec.mimeType || mime || 'audio/webm');
+      mediaRecorderRef.current = rec;
+      rec.start();
+      setRecording(true);
+      setRecSeconds(0);
+      recTimerRef.current = window.setInterval(() => {
+        setRecSeconds((s) => {
+          if (s + 1 >= MAX_REC_SECONDS) stopAndSend();
+          return s + 1;
+        });
+      }, 1000);
+    } catch (e) {
+      setError('Mikrofon nicht verfügbar: ' + (e as Error).message);
+      cleanupRecording();
+    }
+  }
+
+  function stopAndSend() {
+    sendOnStopRef.current = true;
+    mediaRecorderRef.current?.stop();
+  }
+
+  function cancelRecording() {
+    sendOnStopRef.current = false;
+    mediaRecorderRef.current?.stop();
+  }
+
+  async function finishRecording(rawMime: string) {
+    const chunks = recChunksRef.current;
+    const send = sendOnStopRef.current;
+    cleanupRecording();
+    if (!send || chunks.length === 0) return;
+    const id = identityRef.current;
+    if (!id || !activeRoom) return;
+    const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
+    if (!contact) return;
+
+    const mime = rawMime.startsWith('audio/') ? rawMime.split(';')[0] : 'audio/webm';
+    const ext = mime.includes('mp4') ? 'm4a' : mime.includes('ogg') ? 'ogg' : 'webm';
+    const data = new Uint8Array(await new Blob(chunks, { type: mime }).arrayBuffer());
+    if (data.length > MAX_ATTACH) {
+      setError(`Aufnahme zu groß (${Math.round(data.length / 1024)} KB).`);
+      return;
+    }
+    const name = `sprachnachricht.${ext}`;
+    try {
+      const envelope = await sendFile(id, contact, name, mime, data);
+      let room = sendRoomRef.current.get(contact.roomId);
+      if (!room) {
+        await connectSend(contact);
+        room = sendRoomRef.current.get(contact.roomId);
+      }
+      (room ? relaysRef.current.get(room) : undefined)?.send(envelope);
+      await appendMessage(contact.roomId, {
+        mine: true,
+        ts: Date.now(),
+        file: { name, mime, dataB64: bytesToB64(data) },
+      });
+      await saveContact(dek, contact);
+      bump();
+    } catch (e) {
+      setError('Senden fehlgeschlagen: ' + (e as Error).message);
+    }
+  }
+
   async function copyLink() {
     try {
       await navigator.clipboard.writeText(shareLink);
@@ -558,7 +667,7 @@ export function Messenger({ dek, onLock }: Props) {
           {msgs.map((m, i) => (
             <div
               key={`${m.ts}-${i}`}
-              className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file ? ' has-file' : ''}`}
+              className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file?.mime.startsWith('image/') ? ' has-file' : ''}`}
             >
               {m.file ? (
                 m.file.mime.startsWith('image/') ? (
@@ -567,6 +676,8 @@ export function Messenger({ dek, onLock }: Props) {
                     src={`data:${m.file.mime};base64,${m.file.dataB64}`}
                     alt={m.file.name}
                   />
+                ) : m.file.mime.startsWith('audio/') ? (
+                  <AudioPlayer src={`data:${m.file.mime};base64,${m.file.dataB64}`} />
                 ) : (
                   <button className="file-chip" onClick={() => downloadFile(m.file!)}>
                     <IconAttach size={16} />
@@ -586,23 +697,44 @@ export function Messenger({ dek, onLock }: Props) {
 
         {error && <div className="err-note">{error}</div>}
 
-        <div className="composer">
-          <input ref={fileInputRef} type="file" hidden onChange={(e) => void onPickFile(e)} />
-          <button className="attach-btn" title="Anhang" onClick={() => fileInputRef.current?.click()}>
-            <IconAttach />
-          </button>
-          <div className="composer-pill">
-            <input
-              value={msgInput}
-              placeholder="Verschlüsselte Nachricht…"
-              onChange={(e) => setMsgInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && void onSend()}
-            />
+        {recording ? (
+          <div className="composer recording">
+            <button className="attach-btn danger" onClick={cancelRecording} aria-label="Abbrechen">
+              <IconTrash />
+            </button>
+            <div className="rec-indicator">
+              <span className="rec-dot" />
+              Aufnahme… {fmtRec(recSeconds)}
+            </div>
+            <button className="send-btn" onClick={stopAndSend} aria-label="Senden">
+              <IconSend />
+            </button>
           </div>
-          <button className="send-btn" onClick={() => void onSend()}>
-            <IconSend />
-          </button>
-        </div>
+        ) : (
+          <div className="composer">
+            <input ref={fileInputRef} type="file" hidden onChange={(e) => void onPickFile(e)} />
+            <button className="attach-btn" title="Anhang" onClick={() => fileInputRef.current?.click()}>
+              <IconAttach />
+            </button>
+            <div className="composer-pill">
+              <input
+                value={msgInput}
+                placeholder="Verschlüsselte Nachricht…"
+                onChange={(e) => setMsgInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && void onSend()}
+              />
+            </div>
+            {msgInput.trim() ? (
+              <button className="send-btn" onClick={() => void onSend()} aria-label="Senden">
+                <IconSend />
+              </button>
+            ) : (
+              <button className="send-btn mic" onClick={() => void startRecording()} aria-label="Sprachnachricht">
+                <IconMic />
+              </button>
+            )}
+          </div>
+        )}
       </div>
     );
   }

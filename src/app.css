@@ -765,6 +765,89 @@ select {
   text-align: left;
 }
 
+/* ---- Voice messages ------------------------------------------------- */
+.send-btn.mic {
+  background: var(--surface);
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+@media (hover: hover) and (pointer: fine) {
+  .send-btn.mic:hover {
+    color: var(--text);
+  }
+}
+.attach-btn.danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+}
+.composer.recording {
+  justify-content: space-between;
+}
+.rec-indicator {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 14px;
+}
+.rec-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--danger);
+  flex: none;
+  animation: scypulse 1.2s ease infinite;
+}
+.audio {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 190px;
+}
+.audio-play {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 0;
+  cursor: pointer;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  margin: 0;
+}
+.bubble.mine .audio-play {
+  background: rgba(255, 255, 255, 0.22);
+  color: var(--mine-ink);
+}
+.bubble.theirs .audio-play {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.audio-bar {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: color-mix(in srgb, currentColor 22%, transparent);
+  overflow: hidden;
+}
+.audio-fill {
+  height: 100%;
+  background: currentColor;
+  opacity: 0.75;
+}
+.audio-dur {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  opacity: 0.7;
+  flex: none;
+  min-width: 30px;
+  text-align: right;
+}
+
 /* ==== SUBVIEWS (share / verify) ====================================== */
 .subview {
   flex: 1;

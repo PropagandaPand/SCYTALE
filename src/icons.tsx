@@ -108,6 +108,40 @@ export function IconAttach({ size = 20 }: { size?: number }) {
   );
 }
 
+export function IconMic({ size = 20 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 20 20" aria-hidden="true">
+      <rect x="7" y="2" width="6" height="10" rx="3" fill="currentColor" />
+      <path d="M4.5 9a5.5 5.5 0 0 0 11 0M10 14.5V18M7 18h6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export function IconPlay({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M4 3v10l9-5-9-5Z" fill="currentColor" />
+    </svg>
+  );
+}
+
+export function IconPause({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
+      <rect x="4" y="3" width="3" height="10" rx="1" fill="currentColor" />
+      <rect x="9" y="3" width="3" height="10" rx="1" fill="currentColor" />
+    </svg>
+  );
+}
+
+export function IconTrash({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden="true">
+      <path d="M3 5h12M7 5V3.5h4V5M4.5 5l.7 9.5A1 1 0 0 0 6.2 15.5h5.6a1 1 0 0 0 1-1L13.5 5M7.5 8v4.5M10.5 8v4.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 export function IconInfo({ size = 16 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">

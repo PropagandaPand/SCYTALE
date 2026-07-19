@@ -8,6 +8,7 @@
  *   - 'msg': an ordinary Double Ratchet message.
  */
 import { b64encode, b64decode, utf8 } from './codec';
+import { getSodium } from './sodium';
 import type { InitialMessageHeader } from './x3dh';
 import type { RatchetHeader, RatchetMessage } from './ratchet';
 import type { PreKeyBundle } from './prekeys';
@@ -82,41 +83,71 @@ export async function decodeEnvelope(bytes: Bytes): Promise<Envelope> {
   return { type: 'msg', message: await decMsg(o.m) };
 }
 
-// --- Prekey bundle token (single base64 string, for copy-paste exchange) ---
+// --- Prekey bundle token: compact binary pack, base64url (short, URL-safe) ---
+//
+// Fixed layout (all keys are fixed length):
+//   version(1) | idSignPub(32) | idDhPub(32) | spkId(4) | spkPub(32)
+//     | spkSig(64) | hasOpk(1) | [opkId(4) | opkPub(32)]
+// ~202 bytes -> ~270 base64url chars, roughly half the old JSON token.
 
-interface BundleWire {
-  isp: string;
-  idp: string;
-  spk: { id: number; pub: string; sig: string };
-  opk: { id: number; pub: string } | null;
-}
+const BUNDLE_VERSION = 1;
 
 export async function encodeBundle(bundle: PreKeyBundle): Promise<string> {
-  const wire: BundleWire = {
-    isp: await b64encode(bundle.identitySignPub),
-    idp: await b64encode(bundle.identityDhPub),
-    spk: {
-      id: bundle.signedPreKey.id,
-      pub: await b64encode(bundle.signedPreKey.pub),
-      sig: await b64encode(bundle.signedPreKey.signature),
-    },
-    opk: bundle.oneTimePreKey
-      ? { id: bundle.oneTimePreKey.id, pub: await b64encode(bundle.oneTimePreKey.pub) }
-      : null,
-  };
-  return b64encode(utf8.encode(JSON.stringify(wire)));
+  const s = await getSodium();
+  const hasOpk = bundle.oneTimePreKey ? 1 : 0;
+  const size = 1 + 32 + 32 + 4 + 32 + 64 + 1 + (hasOpk ? 36 : 0);
+  const buf = new Uint8Array(size);
+  const view = new DataView(buf.buffer);
+  let o = 0;
+  buf[o++] = BUNDLE_VERSION;
+  buf.set(bundle.identitySignPub, o);
+  o += 32;
+  buf.set(bundle.identityDhPub, o);
+  o += 32;
+  view.setUint32(o, bundle.signedPreKey.id, false);
+  o += 4;
+  buf.set(bundle.signedPreKey.pub, o);
+  o += 32;
+  buf.set(bundle.signedPreKey.signature, o);
+  o += 64;
+  buf[o++] = hasOpk;
+  if (bundle.oneTimePreKey) {
+    view.setUint32(o, bundle.oneTimePreKey.id, false);
+    o += 4;
+    buf.set(bundle.oneTimePreKey.pub, o);
+    o += 32;
+  }
+  return s.to_base64(buf, s.base64_variants.URLSAFE_NO_PADDING);
 }
 
 export async function decodeBundle(token: string): Promise<PreKeyBundle> {
-  const wire = JSON.parse(utf8.decode(await b64decode(token.trim()))) as BundleWire;
+  const s = await getSodium();
+  const buf = new Uint8Array(s.from_base64(token.trim(), s.base64_variants.URLSAFE_NO_PADDING));
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  let o = 0;
+  if (buf[o++] !== BUNDLE_VERSION) throw new Error('Unbekanntes Bundle-Format.');
+  const take = (n: number): Bytes => {
+    const r = buf.slice(o, o + n);
+    o += n;
+    return r;
+  };
+  const identitySignPub = take(32);
+  const identityDhPub = take(32);
+  const spkId = view.getUint32(o, false);
+  o += 4;
+  const spkPub = take(32);
+  const spkSig = take(64);
+  const hasOpk = buf[o++];
+  let oneTimePreKey: { id: number; pub: Bytes } | undefined;
+  if (hasOpk) {
+    const opkId = view.getUint32(o, false);
+    o += 4;
+    oneTimePreKey = { id: opkId, pub: take(32) };
+  }
   return {
-    identitySignPub: await b64decode(wire.isp),
-    identityDhPub: await b64decode(wire.idp),
-    signedPreKey: {
-      id: wire.spk.id,
-      pub: await b64decode(wire.spk.pub),
-      signature: await b64decode(wire.spk.sig),
-    },
-    oneTimePreKey: wire.opk ? { id: wire.opk.id, pub: await b64decode(wire.opk.pub) } : undefined,
+    identitySignPub,
+    identityDhPub,
+    signedPreKey: { id: spkId, pub: spkPub, signature: spkSig },
+    oneTimePreKey,
   };
 }

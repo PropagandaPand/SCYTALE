@@ -18,6 +18,7 @@ import {
 } from './lib/session';
 import { saveContact, loadContacts } from './lib/store';
 import { RelayClient, type RelayStatus } from './lib/relay';
+import { makeQr } from './lib/qr';
 
 interface Props {
   dek: CryptoKey;
@@ -32,8 +33,13 @@ interface ChatMessage {
 
 const shortFp = (fp: string) => (fp ? fp.split(' ').slice(0, 3).join(' ') + ' …' : '…');
 
+// Accept either a raw bundle token or a full deep-link containing #add=<token>.
+function extractToken(input: string): string {
+  const m = input.match(/[#?&]add=([^&\s]+)/);
+  return (m ? m[1] : input).trim();
+}
+
 export function Messenger({ dek, onLock }: Props) {
-  // Mutable, non-render state.
   const identityRef = useRef<IdentityKeys | null>(null);
   const prekeysRef = useRef<PreKeyState | null>(null);
   const lookupRef = useRef<PreKeyLookup | null>(null);
@@ -41,17 +47,18 @@ export function Messenger({ dek, onLock }: Props) {
   const contactsRef = useRef<Contact[]>([]);
   const initedRef = useRef(false);
 
-  // Render-driving state.
   const [, bump] = useReducer((x: number) => x + 1, 0);
   const [fingerprint, setFingerprint] = useState('');
-  const [bundleToken, setBundleToken] = useState('');
+  const [shareLink, setShareLink] = useState('');
+  const [qrDataUrl, setQrDataUrl] = useState('');
   const [activeRoom, setActiveRoom] = useState<string | null>(null);
   const [messages, setMessages] = useState<Record<string, ChatMessage[]>>({});
   const [statuses, setStatuses] = useState<Record<string, RelayStatus>>({});
-  const [showBundle, setShowBundle] = useState(false);
+  const [showShare, setShowShare] = useState(false);
   const [addInput, setAddInput] = useState('');
   const [msgInput, setMsgInput] = useState('');
   const [error, setError] = useState('');
+  const [copied, setCopied] = useState(false);
 
   function connectRelay(c: Contact) {
     if (relaysRef.current.has(c.roomId)) return;
@@ -84,6 +91,31 @@ export function Messenger({ dek, onLock }: Props) {
     }
   }
 
+  async function addBundle(rawInput: string) {
+    setError('');
+    const id = identityRef.current;
+    const token = extractToken(rawInput);
+    if (!id || !token) return;
+    try {
+      const bundle = await decodeBundle(token);
+      const contact = await makeContact(id.dh.publicKey, bundle);
+      if (contactsRef.current.some((c) => c.roomId === contact.roomId)) {
+        setActiveRoom(contact.roomId);
+        setError('Kontakt existiert bereits.');
+        return;
+      }
+      contactsRef.current = [...contactsRef.current, contact];
+      setMessages((prev) => ({ ...prev, [contact.roomId]: [] }));
+      await saveContact(dek, contact);
+      connectRelay(contact);
+      setActiveRoom(contact.roomId);
+      setAddInput('');
+      bump();
+    } catch (e) {
+      setError('Ungültiges Bundle: ' + (e as Error).message);
+    }
+  }
+
   useEffect(() => {
     if (initedRef.current) return;
     initedRef.current = true;
@@ -98,7 +130,11 @@ export function Messenger({ dek, onLock }: Props) {
           i == null ? undefined : consumeOneTimePreKey(pre, i)?.keyPair.privateKey,
       };
       setFingerprint(await fingerprintOf(id));
-      setBundleToken(await encodeBundle(currentBundle(id, pre)));
+
+      const token = await encodeBundle(currentBundle(id, pre));
+      const link = `${location.origin}/#add=${token}`;
+      setShareLink(link);
+      makeQr(link).then(setQrDataUrl).catch(() => undefined);
 
       const cs = await loadContacts(dek);
       contactsRef.current = cs;
@@ -109,6 +145,13 @@ export function Messenger({ dek, onLock }: Props) {
       }
       setMessages(msgInit);
       bump();
+
+      // Auto-import a contact from a deep-link (#add=<token>), then clean the URL.
+      const hashMatch = location.hash.match(/[#&]add=([^&]+)/);
+      if (hashMatch) {
+        history.replaceState(null, '', location.pathname + location.search);
+        await addBundle(decodeURIComponent(hashMatch[1]));
+      }
     })();
 
     return () => {
@@ -122,30 +165,6 @@ export function Messenger({ dek, onLock }: Props) {
     const el = document.getElementById('msglist');
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, activeRoom]);
-
-  async function onAddContact() {
-    setError('');
-    const id = identityRef.current;
-    if (!id) return;
-    try {
-      const bundle = await decodeBundle(addInput);
-      const contact = await makeContact(id.dh.publicKey, bundle);
-      if (contactsRef.current.some((c) => c.roomId === contact.roomId)) {
-        setError('Kontakt existiert bereits.');
-        setActiveRoom(contact.roomId);
-        return;
-      }
-      contactsRef.current = [...contactsRef.current, contact];
-      setMessages((prev) => ({ ...prev, [contact.roomId]: [] }));
-      await saveContact(dek, contact);
-      connectRelay(contact);
-      setActiveRoom(contact.roomId);
-      setAddInput('');
-      bump();
-    } catch (e) {
-      setError('Ungültiges Bundle: ' + (e as Error).message);
-    }
-  }
 
   async function onSend() {
     setError('');
@@ -170,9 +189,11 @@ export function Messenger({ dek, onLock }: Props) {
     }
   }
 
-  async function copyBundle() {
+  async function copyLink() {
     try {
-      await navigator.clipboard.writeText(bundleToken);
+      await navigator.clipboard.writeText(shareLink);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
     } catch {
       /* clipboard may be blocked; the textarea is selectable anyway */
     }
@@ -198,27 +219,34 @@ export function Messenger({ dek, onLock }: Props) {
       {!activeContact ? (
         <>
           <div className="panel">
-            <button className="ghost" onClick={() => setShowBundle((v) => !v)}>
-              {showBundle ? 'Mein Bundle verbergen' : 'Mein Bundle zeigen (zum Teilen)'}
+            <button className="ghost" onClick={() => setShowShare((v) => !v)}>
+              {showShare ? 'Meinen Link verbergen' : 'Mich teilen (QR / Link)'}
             </button>
-            {showBundle && (
+            {showShare && (
               <>
-                <textarea readOnly rows={4} className="token" value={bundleToken} />
-                <button onClick={copyBundle}>Kopieren</button>
+                <p className="hint">
+                  Lass dein Gegenüber den QR mit der Handy-Kamera scannen — oder schick den Link.
+                  Ein Tap fügt dich hinzu.
+                </p>
+                {qrDataUrl && (
+                  <img className="qr" src={qrDataUrl} alt="QR-Code deines Kontakt-Links" />
+                )}
+                <textarea readOnly rows={3} className="token" value={shareLink} />
+                <button onClick={copyLink}>{copied ? 'Kopiert ✓' : 'Link kopieren'}</button>
               </>
             )}
           </div>
 
           <div className="panel">
-            <div className="field-label">Kontakt hinzufügen (Bundle einfügen)</div>
+            <div className="field-label">Kontakt hinzufügen (Link oder Bundle einfügen)</div>
             <textarea
-              rows={4}
+              rows={3}
               className="token"
-              placeholder="Bundle-Token des Kontakts…"
+              placeholder="Link oder Bundle-Token des Kontakts…"
               value={addInput}
               onChange={(e) => setAddInput(e.target.value)}
             />
-            <button onClick={onAddContact}>Hinzufügen</button>
+            <button onClick={() => void addBundle(addInput)}>Hinzufügen</button>
           </div>
 
           {contacts.length > 0 && (

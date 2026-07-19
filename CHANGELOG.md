@@ -6,6 +6,20 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Onboarding-UX: QR-Code + Deep-Link + kompaktes Token
+
+#### Geändert
+- **Bundle-Token** von doppeltem Base64-JSON auf **kompakten Binär-Pack**
+  (base64url) umgestellt → ~540 → **270 Zeichen**, URL-safe.
+
+#### Hinzugefügt
+- **Deep-Link** `…/#add=<token>`: ein Tap öffnet die App und importiert den
+  Kontakt automatisch (Fragment wird nach dem Import aus der URL entfernt).
+- **QR-Code** des Kontakt-Links (`qrcode`, lazy-geladen, als `data:`-Bild) —
+  das Gegenüber scannt mit der normalen Handy-Kamera; SCYTALE braucht dafür
+  keine Kamera-Berechtigung.
+- „Kontakt hinzufügen" akzeptiert jetzt **Link *oder* rohes Token**.
+
 ### Etappe 6 — PWA-Härtung
 
 #### Hinzugefügt

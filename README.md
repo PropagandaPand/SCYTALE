@@ -61,10 +61,15 @@ npm run deploy     # Build + wrangler deploy
 1. `npm run build && npm run cf:dev` starten → zwei Browser-Fenster auf die
    lokale Worker-URL öffnen (oder die App deployen und auf zwei Geräten öffnen).
 2. In jedem Fenster einen Tresor anlegen (eigene Passphrase).
-3. In Fenster A **„Mein Bundle zeigen"** → Token kopieren → in Fenster B unter
-   **„Kontakt hinzufügen"** einfügen. Umgekehrt genauso (beide importieren sich).
+3. In Fenster A **„Mich teilen (QR / Link)"** → den **QR mit der Handy-Kamera
+   scannen** lassen oder den **Link schicken** (ein Tap fügt hinzu). Alternativ
+   Link/Token unter **„Kontakt hinzufügen"** einfügen. Umgekehrt genauso.
 4. Einer schreibt zuerst — er wird X3DH-Initiator, der andere antwortet. Ab da
    läuft der Double Ratchet.
+
+Das Kontakt-Bundle enthält **nur öffentliche Schlüssel** — der Link darf über
+jeden Kanal (auch unsicher) geteilt werden. Gegen Man-in-the-Middle vergleicht
+ihr danach eure **Safety Number**.
 
 ## Ehrliche Grenzen
 

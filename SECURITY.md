@@ -55,8 +55,10 @@ Stimmen die Hashes, entspricht der laufende Code dem geprüften Quellcode.
 - **Endpoint**: gegen ein kompromittiertes Gerät (Malware, Client-Side-Scanning
   im OS) hilft keine E2E-Verschlüsselung. Genau das ist der Kern der Kritik an
   der Chatkontrolle.
-- **Bundle-Austausch**: aktuell out-of-band (Copy-Paste). Ein Prekey-Server für
-  echtes Onboarding steht noch aus.
+- **Bundle-Austausch**: out-of-band per QR-Code oder Deep-Link. Das Bundle
+  enthält nur öffentliche Schlüssel — der Kanal muss nicht geheim sein, aber ein
+  MITM (Bundle-Austausch) wird nur durch den Safety-Number-Vergleich erkannt.
+  Ein Prekey-Server für Onboarding per kurzem Handle steht noch aus.
 
 ## Verantwortungsvolle Offenlegung
 

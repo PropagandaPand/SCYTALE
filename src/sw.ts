@@ -35,7 +35,21 @@ sw.addEventListener('install', (event) => {
   event.waitUntil(
     (async () => {
       const cache = await caches.open(PRECACHE);
-      await cache.addAll(ASSETS);
+      // Best-effort, per asset: a single failing request must NOT abort the whole
+      // install (that would leave the SW forever un-activated). Skip index.html
+      // here — it 307-redirects to '/', and the Cache API refuses to store a
+      // redirected response, which is exactly what broke activation before.
+      await Promise.all(
+        ASSETS.filter((u) => u !== '/index.html').map((u) => cache.add(u).catch(() => undefined)),
+      );
+      // Cache the app shell under '/index.html' by fetching '/' (200, no redirect)
+      // and storing a fresh, non-redirected Response ourselves.
+      try {
+        const shell = await fetch('/', { cache: 'no-store' });
+        if (shell.ok) await cache.put('/index.html', new Response(await shell.blob(), { headers: shell.headers }));
+      } catch {
+        /* offline during install — navigation will fall back to network later */
+      }
       await sw.skipWaiting();
     })(),
   );
@@ -64,10 +78,16 @@ async function freshShell(cache: Cache): Promise<Response> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 3500);
   try {
-    const fresh = await fetch('/index.html', { cache: 'no-store', signal: ctrl.signal });
+    // Fetch '/' (200), NOT '/index.html' (which 307-redirects — a redirected
+    // response can't be cached and would throw on cache.put).
+    const fresh = await fetch('/', { cache: 'no-store', signal: ctrl.signal });
     clearTimeout(timer);
     if (fresh.ok) {
-      await cache.put('/index.html', fresh.clone());
+      try {
+        await cache.put('/index.html', fresh.clone());
+      } catch {
+        /* keep serving even if caching fails */
+      }
       return fresh;
     }
   } catch {

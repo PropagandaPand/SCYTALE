@@ -1583,6 +1583,42 @@ select {
   transform: translateX(18px);
 }
 
+/* ==== FULL-SCREEN QR (own code, for easy scanning) ================== */
+.qr-card.tappable {
+  display: block;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  background: #fff;
+}
+.qr-card.tappable:active {
+  transform: scale(0.98);
+}
+.qr-full {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 24px;
+  animation: scyfade 0.18s ease;
+}
+.qr-full img {
+  width: min(88vw, 88vh);
+  height: min(88vw, 88vh);
+  image-rendering: pixelated; /* keep module edges crisp when scaled up */
+}
+.qr-full p {
+  color: #0b0d10;
+  font-size: 13px;
+  text-align: center;
+  max-width: 320px;
+}
+
 /* ==== LIGHTBOX (full-screen image) ================================== */
 .lightbox {
   position: fixed;

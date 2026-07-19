@@ -26,10 +26,17 @@ export function QrScanner({
 
     (async () => {
       try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'environment' },
-          audio: false,
-        });
+        // High resolution matters: our share-link QR is dense (long token), so
+        // a low-res frame can't resolve the modules. Fall back to any camera if
+        // the rear one isn't available.
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
+            audio: false,
+          });
+        } catch {
+          stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        }
         if (!active) {
           stream.getTracks().forEach((t) => t.stop());
           return;
@@ -48,7 +55,7 @@ export function QrScanner({
             canvas.height = video.videoHeight;
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
             const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-            const code = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
+            const code = jsQR(img.data, img.width, img.height, { inversionAttempts: 'attemptBoth' });
             if (code?.data) {
               active = false;
               onResultRef.current(code.data);

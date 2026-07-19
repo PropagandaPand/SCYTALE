@@ -11,7 +11,7 @@ export async function makeQr(text: string): Promise<string> {
   return toDataURL(text, {
     errorCorrectionLevel: 'M',
     margin: 2,
-    width: 256,
+    width: 512, // crisp enough to blow up full-screen for easy scanning
     color: { dark: '#0b0d10', light: '#ffffff' },
   });
 }

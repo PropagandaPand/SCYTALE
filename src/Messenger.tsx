@@ -202,6 +202,7 @@ export function Messenger({ dek, onLock }: Props) {
   const [zoomImg, setZoomImg] = useState<string | null>(null); // full-screen image viewer
   const [notifOn, setNotifOn] = useState(false);
   const [notifBusy, setNotifBusy] = useState(false);
+  const [qrFull, setQrFull] = useState(false); // own QR blown up full-screen for scanning
 
   useEffect(() => {
     activeRoomRef.current = activeRoom;
@@ -905,13 +906,9 @@ export function Messenger({ dek, onLock }: Props) {
         if (endpoint) inboxClientRef.current?.unsubscribePush(endpoint);
         setNotifOn(false);
       } else {
-        const sub = await enablePush();
-        if (sub) {
-          inboxClientRef.current?.setPush(sub);
-          setNotifOn(true);
-        } else {
-          setError('Benachrichtigungen wurden nicht erlaubt (oder das Gerät unterstützt sie nicht).');
-        }
+        const sub = await enablePush(); // throws a user-facing reason on failure
+        inboxClientRef.current?.setPush(sub);
+        setNotifOn(true);
       }
     } catch (e) {
       setError('Benachrichtigungen fehlgeschlagen: ' + (e as Error).message);
@@ -1384,11 +1381,15 @@ export function Messenger({ dek, onLock }: Props) {
         <div className="subbody">
           <div className="sect-lbl">Mich teilen</div>
           <div className="card share-card">
-            <div className="qr-card">
+            <button
+              className="qr-card tappable"
+              onClick={() => qrDataUrl && setQrFull(true)}
+              aria-label="QR-Code groß anzeigen"
+            >
               {qrDataUrl ? <img src={qrDataUrl} alt="QR-Code deines Kontakt-Links" /> : <span className="ph">QR…</span>}
-            </div>
+            </button>
             <p className="share-hint">
-              Scannen lassen — oder Link teilen.
+              Antippen für Vollbild zum Scannen — oder Link teilen.
               <br />
               Ein Tap fügt dich hinzu.
             </p>
@@ -1431,6 +1432,13 @@ export function Messenger({ dek, onLock }: Props) {
               }}
               onClose={() => setScanning(false)}
             />
+          )}
+
+          {qrFull && qrDataUrl && (
+            <div className="qr-full" onClick={() => setQrFull(false)} role="dialog" aria-label="QR-Code Vollbild">
+              <img src={qrDataUrl} alt="QR-Code deines Kontakt-Links" />
+              <p>Halte den Code vor die Kamera des Kontakts · tippen zum Schließen</p>
+            </div>
           )}
 
           <div className="info-note">
@@ -1631,6 +1639,8 @@ export function Messenger({ dek, onLock }: Props) {
               </span>
             </button>
           )}
+
+          {error && <div className="err-note">{error}</div>}
 
           <div className="info-note" style={{ textAlign: 'left' }}>
             <span className="g">

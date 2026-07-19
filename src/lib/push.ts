@@ -19,11 +19,23 @@ export interface PushSub {
 export type PushState = 'unsupported' | 'default' | 'granted' | 'denied';
 
 function b64urlToBytes(s: string): Uint8Array {
-  const b64 = s.replace(/-/g, '+').replace(/_/g, '/') + '=='.slice((s.length + 3) % 4);
-  const bin = atob(b64);
+  const pad = '='.repeat((4 - (s.length % 4)) % 4);
+  const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/') + pad);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
+}
+
+function isIOS(): boolean {
+  return /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
+/** Installed to the home screen (required for Push on iOS). */
+export function isStandalone(): boolean {
+  return (
+    window.matchMedia('(display-mode: standalone)').matches ||
+    (navigator as unknown as { standalone?: boolean }).standalone === true
+  );
 }
 
 export function pushSupported(): boolean {
@@ -35,18 +47,37 @@ export function pushState(): PushState {
   return Notification.permission as PushState;
 }
 
-/** Ask permission (if needed) and subscribe. Returns the subscription or null. */
-export async function enablePush(): Promise<PushSub | null> {
-  if (!pushSupported()) return null;
+function withTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
+  return Promise.race([p, new Promise<T>((_, reject) => setTimeout(() => reject(new Error(msg)), ms))]);
+}
+
+/** Ask permission (if needed) and subscribe. Throws a user-facing German error
+ *  on any failure so the UI can show exactly why (iOS fails in many quiet ways). */
+export async function enablePush(): Promise<PushSub> {
+  if (!pushSupported()) {
+    throw new Error('Dieses Gerät oder dieser Browser unterstützt keine Push-Benachrichtigungen.');
+  }
+  if (isIOS() && !isStandalone()) {
+    throw new Error(
+      'Auf dem iPhone gehen Benachrichtigungen nur in der installierten PWA (Teilen → „Zum Home-Bildschirm"), nicht im Safari-Tab.',
+    );
+  }
   const perm = await Notification.requestPermission();
-  if (perm !== 'granted') return null;
-  const reg = await navigator.serviceWorker.ready;
+  if (perm !== 'granted') throw new Error('Benachrichtigungen wurden nicht erlaubt.');
+
+  const reg = await withTimeout(navigator.serviceWorker.ready, 8000, 'Service Worker nicht bereit (Timeout).');
   let sub = await reg.pushManager.getSubscription();
   if (!sub) {
-    sub = await reg.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: b64urlToBytes(VAPID_PUBLIC) as BufferSource,
-    });
+    // On iOS this call can hang forever if the push service is unreachable —
+    // bound it so the UI never stays stuck in a spinning/greyed state.
+    sub = await withTimeout(
+      reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: b64urlToBytes(VAPID_PUBLIC) as BufferSource,
+      }),
+      12000,
+      'Push-Dienst nicht erreichbar (Zeitüberschreitung). Auf iOS: PWA einmal ganz schließen und neu öffnen, dann erneut versuchen.',
+    );
   }
   return sub.toJSON() as PushSub;
 }

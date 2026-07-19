@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useRef, useState } from 'react';
+import { useEffect, useReducer, useRef, useState, type ChangeEvent } from 'react';
 import { loadOrCreateIdentity, fingerprintOf } from './lib/identity';
 import {
   loadOrCreatePreKeys,
@@ -20,18 +20,47 @@ import {
   makeContact,
   makeContactFromHeader,
   sendMessage,
+  sendFile,
   receiveEnvelope,
   inboxRoom,
   type Contact,
+  type MessageContent,
   type PreKeyLookup,
 } from './lib/session';
 import { saveContact, loadContacts } from './lib/store';
 import { loadMessages, saveMessages, type ChatMessage } from './lib/messages';
 import { RelayClient, type RelayStatus } from './lib/relay';
 import { makeQr } from './lib/qr';
+import { bytesToB64, b64ToBytes } from './lib/bytes';
+import { compressImage } from './lib/imagecompress';
 import { Identicon } from './Identicon';
 import { QrScanner } from './QrScanner';
-import { IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera } from './icons';
+import {
+  IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach,
+} from './icons';
+
+const MAX_ATTACH = 600 * 1024; // inline cap — keeps the WS frame under Cloudflare's ~1 MiB limit
+
+function incomingMessage(content: MessageContent): ChatMessage {
+  if (content.kind === 'text') return { mine: false, text: content.text, ts: Date.now() };
+  return {
+    mine: false,
+    ts: Date.now(),
+    file: { name: content.name, mime: content.mime, dataB64: bytesToB64(content.data) },
+  };
+}
+
+function downloadFile(f: { name: string; mime: string; dataB64: string }) {
+  const blob = new Blob([b64ToBytes(f.dataB64)], { type: f.mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = f.name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
 
 interface Props {
   dek: CryptoKey;
@@ -75,6 +104,7 @@ export function Messenger({ dek, onLock }: Props) {
   const messagesRef = useRef<Record<string, ChatMessage[]>>({});
   const unreadRef = useRef<Record<string, number>>({});
   const sendRoomRef = useRef<Map<string, string>>(new Map());
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const viewRef = useRef<View>('list');
   const activeRoomRef = useRef<string | null>(null);
   const initedRef = useRef(false);
@@ -160,8 +190,8 @@ export function Messenger({ dek, onLock }: Props) {
 
     try {
       const wasNew = contact.ratchet === null;
-      const text = await receiveEnvelope(id, contact, env, lookup);
-      await appendMessage(contact.roomId, { mine: false, text, ts: Date.now() });
+      const content = await receiveEnvelope(id, contact, env, lookup);
+      await appendMessage(contact.roomId, incomingMessage(content));
       if (!(viewRef.current === 'chat' && activeRoomRef.current === contact.roomId)) {
         unreadRef.current[contact.roomId] = (unreadRef.current[contact.roomId] ?? 0) + 1;
       }
@@ -298,6 +328,50 @@ export function Messenger({ dek, onLock }: Props) {
       bump();
     } catch (e) {
       setError('Senden fehlgeschlagen: ' + (e as Error).message);
+    }
+  }
+
+  async function onPickFile(e: ChangeEvent<HTMLInputElement>) {
+    const input = e.target;
+    const file = input.files?.[0];
+    input.value = '';
+    const id = identityRef.current;
+    if (!file || !activeRoom || !id) return;
+    const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
+    if (!contact) return;
+    setError('');
+    try {
+      let data: Uint8Array<ArrayBuffer>;
+      let mime = file.type || 'application/octet-stream';
+      let name = file.name || 'datei';
+      if (mime.startsWith('image/')) {
+        const c = await compressImage(file, MAX_ATTACH);
+        data = c.data as Uint8Array<ArrayBuffer>;
+        mime = c.mime;
+        name = name.replace(/\.[^.]+$/, '') + '.jpg';
+      } else {
+        data = new Uint8Array(await file.arrayBuffer());
+      }
+      if (data.length > MAX_ATTACH) {
+        setError(`Zu groß (${Math.round(data.length / 1024)} KB) — inline gehen ~${Math.round(MAX_ATTACH / 1024)} KB.`);
+        return;
+      }
+      const envelope = await sendFile(id, contact, name, mime, data);
+      let room = sendRoomRef.current.get(contact.roomId);
+      if (!room) {
+        await connectSend(contact);
+        room = sendRoomRef.current.get(contact.roomId);
+      }
+      (room ? relaysRef.current.get(room) : undefined)?.send(envelope);
+      await appendMessage(contact.roomId, {
+        mine: true,
+        ts: Date.now(),
+        file: { name, mime, dataB64: bytesToB64(data) },
+      });
+      await saveContact(dek, contact);
+      bump();
+    } catch (err) {
+      setError('Anhang fehlgeschlagen: ' + (err as Error).message);
     }
   }
 
@@ -465,8 +539,26 @@ export function Messenger({ dek, onLock }: Props) {
             Verschlüsselt · nur ihr beide lest mit
           </div>
           {msgs.map((m, i) => (
-            <div key={`${m.ts}-${i}`} className={`bubble ${m.mine ? 'mine' : 'theirs'}`}>
-              {m.text}
+            <div
+              key={`${m.ts}-${i}`}
+              className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file ? ' has-file' : ''}`}
+            >
+              {m.file ? (
+                m.file.mime.startsWith('image/') ? (
+                  <img
+                    className="bubble-img"
+                    src={`data:${m.file.mime};base64,${m.file.dataB64}`}
+                    alt={m.file.name}
+                  />
+                ) : (
+                  <button className="file-chip" onClick={() => downloadFile(m.file!)}>
+                    <IconAttach size={16} />
+                    <span className="fn">{m.file.name}</span>
+                  </button>
+                )
+              ) : (
+                m.text
+              )}
               <span className="meta">
                 {fmtClock(m.ts)}
                 {m.mine && <IconDoubleCheck size={13} />}
@@ -478,6 +570,10 @@ export function Messenger({ dek, onLock }: Props) {
         {error && <div className="err-note">{error}</div>}
 
         <div className="composer">
+          <input ref={fileInputRef} type="file" hidden onChange={(e) => void onPickFile(e)} />
+          <button className="attach-btn" title="Anhang" onClick={() => fileInputRef.current?.click()}>
+            <IconAttach />
+          </button>
           <div className="composer-pill">
             <input
               value={msgInput}

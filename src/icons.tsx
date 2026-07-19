@@ -93,6 +93,21 @@ export function IconCamera({ size = 17 }: { size?: number }) {
   );
 }
 
+export function IconAttach({ size = 20 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 20 20" aria-hidden="true">
+      <path
+        d="M14.5 6.5 8.2 12.8a1.9 1.9 0 0 0 2.7 2.7l6.3-6.3a3.6 3.6 0 0 0-5.1-5.1l-6.5 6.5a5.3 5.3 0 0 0 7.5 7.5l5-5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 export function IconInfo({ size = 16 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">

@@ -8,8 +8,9 @@ import { loadRecord, saveRecord } from './db';
 
 export interface ChatMessage {
   mine: boolean;
-  text: string;
   ts: number;
+  text?: string;
+  file?: { name: string; mime: string; dataB64: string };
 }
 
 const aad = (roomId: string) => utf8.encode(`scytale:messages:v1:${roomId}`);

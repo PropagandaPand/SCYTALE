@@ -101,7 +101,54 @@ export async function makeContactFromHeader(
 }
 
 /** Encrypt outgoing text into a wire envelope; establishes the session if needed. */
-export async function sendMessage(me: IdentityKeys, contact: Contact, text: string): Promise<Bytes> {
+/** Message payload: a plain text or a file, framed into the ratchet plaintext. */
+export type MessageContent =
+  | { kind: 'text'; text: string }
+  | { kind: 'file'; name: string; mime: string; data: Bytes };
+
+// Frame: byte0 = 0 (text) | 1 (file). File: [nameLen(2)][name][mimeLen(2)][mime][data]
+function frameContent(c: MessageContent): Bytes {
+  if (c.kind === 'text') {
+    const t = utf8.encode(c.text);
+    const out = new Uint8Array(1 + t.length);
+    out[0] = 0;
+    out.set(t, 1);
+    return out;
+  }
+  const name = utf8.encode(c.name);
+  const mime = utf8.encode(c.mime);
+  const out = new Uint8Array(1 + 2 + name.length + 2 + mime.length + c.data.length);
+  const dv = new DataView(out.buffer);
+  let o = 0;
+  out[o++] = 1;
+  dv.setUint16(o, name.length);
+  o += 2;
+  out.set(name, o);
+  o += name.length;
+  dv.setUint16(o, mime.length);
+  o += 2;
+  out.set(mime, o);
+  o += mime.length;
+  out.set(c.data, o);
+  return out;
+}
+
+function unframeContent(bytes: Bytes): MessageContent {
+  if (bytes[0] === 0) return { kind: 'text', text: utf8.decode(bytes.slice(1)) };
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let o = 1;
+  const nameLen = dv.getUint16(o);
+  o += 2;
+  const name = utf8.decode(bytes.slice(o, o + nameLen));
+  o += nameLen;
+  const mimeLen = dv.getUint16(o);
+  o += 2;
+  const mime = utf8.decode(bytes.slice(o, o + mimeLen));
+  o += mimeLen;
+  return { kind: 'file', name, mime, data: bytes.slice(o) };
+}
+
+async function sendContent(me: IdentityKeys, contact: Contact, content: MessageContent): Promise<Bytes> {
   if (!contact.ratchet) {
     if (!contact.bundle) {
       throw new Error('Für den ersten Schritt braucht ihr den Code dieses Kontakts.');
@@ -114,12 +161,26 @@ export async function sendMessage(me: IdentityKeys, contact: Contact, text: stri
     );
     contact.pendingHeader = header;
   }
-  const message = await ratchetEncrypt(contact.ratchet, utf8.encode(text));
+  const message = await ratchetEncrypt(contact.ratchet, frameContent(content));
   const conv = contact.roomId;
   const envelope = contact.pendingHeader
     ? ({ type: 'prekey', conv, x3dh: contact.pendingHeader, message } as const)
     : ({ type: 'msg', conv, message } as const);
   return encodeEnvelope(envelope);
+}
+
+export async function sendMessage(me: IdentityKeys, contact: Contact, text: string): Promise<Bytes> {
+  return sendContent(me, contact, { kind: 'text', text });
+}
+
+export async function sendFile(
+  me: IdentityKeys,
+  contact: Contact,
+  name: string,
+  mime: string,
+  data: Bytes,
+): Promise<Bytes> {
+  return sendContent(me, contact, { kind: 'file', name, mime, data });
 }
 
 /** Decrypt an incoming envelope; establishes the responder session on first contact. */
@@ -128,7 +189,7 @@ export async function receiveMessage(
   contact: Contact,
   bytes: Bytes,
   lookup: PreKeyLookup,
-): Promise<string> {
+): Promise<MessageContent> {
   return receiveEnvelope(me, contact, await decodeEnvelope(bytes), lookup);
 }
 
@@ -137,7 +198,7 @@ export async function receiveEnvelope(
   contact: Contact,
   envelope: Envelope,
   lookup: PreKeyLookup,
-): Promise<string> {
+): Promise<MessageContent> {
   if (!contact.ratchet) {
     if (envelope.type !== 'prekey') {
       throw new Error('Erste Nachricht ohne X3DH-Header — Session kann nicht aufgebaut werden.');
@@ -152,7 +213,7 @@ export async function receiveEnvelope(
     contact.pendingHeader = null;
   }
 
-  return utf8.decode(await ratchetDecrypt(contact.ratchet, envelope.message));
+  return unframeContent(await ratchetDecrypt(contact.ratchet, envelope.message));
 }
 
 // --- Contact (de)serialisation for the vault (produces plaintext bytes only) ---

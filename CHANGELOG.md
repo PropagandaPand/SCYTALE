@@ -6,6 +6,24 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Bilder & Dateien
+
+#### Hinzugefügt
+- **Anhänge im Chat**: Bilder und Dateien laufen durch dieselbe E2E-Pipeline
+  (Double Ratchet) wie Text — der Relay sieht nur Ciphertext. Attach-Button im
+  Composer, Bild-Vorschau inline, Dateien als Chip mit Download (Blob-URL).
+- **Bild-Kompression** vor dem Senden (`imagecompress.ts`): Canvas, max 1600px,
+  JPEG-Qualität stufenweise runter bis unter das Inline-Limit.
+- Content-Framing in `session.ts` (`MessageContent` text|file, `sendFile`,
+  `receiveEnvelope` liefert jetzt `MessageContent`); Verlauf speichert Anhänge
+  verschlüsselt mit.
+- Verifiziert: Datei-Round-Trip (Metadaten + Bytes unverändert) durch die
+  echte Krypto-Pipeline.
+
+#### Grenzen
+- Inline-Limit ~600 KB (Cloudflare-WebSocket-Frame < 1 MiB). Größere Dateien via
+  R2-Blobstore wären ein späteres Upgrade.
+
 ### QR-Scanner in der App
 
 #### Hinzugefügt

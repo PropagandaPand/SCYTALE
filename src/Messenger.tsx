@@ -12,6 +12,7 @@ import {
   encodeBundle,
   decodeBundle,
   decodeEnvelope,
+  openInbound,
   pairwiseSafetyNumber,
   identityFingerprint,
   sign,
@@ -315,7 +316,9 @@ export function Messenger({ dek, onLock }: Props) {
     try {
       let env;
       try {
-        env = await decodeEnvelope(bytes);
+        // Sealed Sender: open the anonymous outer box first (falls back to raw
+        // for any legacy unsealed message still in flight), then decode.
+        env = await decodeEnvelope(await openInbound(id, bytes));
       } catch {
         return; // handled in finally (ack + drop)
       }

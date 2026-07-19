@@ -2,7 +2,7 @@
 
 SCYTALE ist gegen **anlasslose Massenüberwachung** gebaut (Chatkontrolle /
 CSAR). Dieses Dokument ist die genaue Aufschlüsselung aller Mechanismen und
-sagt ehrlich, was geschützt ist — und was nicht. Stand: v0.11.9.
+sagt ehrlich, was geschützt ist — und was nicht. Stand: v0.12.0.
 
 **Leitprinzipien:** niemals eigene Krypto erfinden (vetted Primitiven +
 etablierte Protokolle: X3DH, Double Ratchet); der Server ist ein **dummer
@@ -104,7 +104,17 @@ SK  = HKDF-SHA256( 0xFF·32 || DH1||DH2||DH3||DH4 ,  info="SCYTALE_X3DH_v1" )
 `worker/relay.ts`, `worker/index.ts` · `src/lib/relay.ts`, `session.ts`
 
 - **Durable Object = Briefkasten pro Inbox.** Nur Ciphertext, keine Schlüssel,
-  kein Klartext; kennt nur Routing-Metadaten.
+  kein Klartext.
+- **Sealed Sender** (`src/crypto/seal.ts`): der komplette Wire-Envelope wird in
+  einen **anonymen Box an den Empfänger** verpackt (libsodium `crypto_box_seal`
+  = ephemerer Schlüssel, **kein Absender-Key im Ciphertext**). Damit sieht der
+  Relay **nicht mehr**, *wer* einliefert, und auch die frühere `conv`-Paar-ID
+  sowie die X3DH-Identitätsschlüssel des Absenders (erste Nachricht) sind
+  **verborgen** — sie liegen jetzt *innerhalb* der Versiegelung. Der Relay
+  lernt nur noch: *welche* Inbox (Empfänger), *wann*, *wie groß*. Absender-
+  **Authentizität** bleibt erhalten — sie kommt aus dem X3DH/Ratchet *innen*,
+  den der Empfänger nach dem Öffnen prüft. Die Versiegelung ist reiner
+  Anonymitäts-Wrapper, nicht die Sicherheitsgrenze.
 - **Inbox** = `SHA-256("scytale-inbox:" ‖ Ed25519-SignPub)` — aus der eigenen
   Identität ableitbar, man lauscht ohne jemanden zu kennen.
 - **Owner-Auth per Ed25519-Challenge-Response**: DO schickt Nonce, Besitzer
@@ -190,9 +200,12 @@ Header angezeigte **Versionsnummer** hilft beim Abgleich, welcher Build läuft.
 
 ## Bekannte Grenzen 
 
-- **Metadaten**: der Relay sieht *welche* Inbox *wann* Ciphertext bekommt
-  (Timing, Größe, Routing/conv-IDs). Inhalt und Identitäts-Klartext nie. Sealed
-  Sender ist geplant; Traffic-Analyse bleibt hart.
+- **Rest-Metadaten trotz Sealed Sender**: *wer* sendet und die `conv`-Paar-ID
+  sind jetzt verborgen. Übrig bleibt, was das Empfänger-Adressieren zwangsläufig
+  offenlegt: **welche Inbox** (Empfänger-pseudonym), **Timing** und **Größe** —
+  plus **Netzwerk-Korrelation** (Absender-IP → Empfänger-Inbox), die kryptografie
+  nicht abdeckt (bräuchte Tor/Mixnet). Gleiche Rest-Fläche wie Signals Sealed
+  Sender; Traffic-Analyse bleibt hart.
 - **Push-Timing** geht zwangsläufig an Apple/Google (dass ein Gerät *irgendeine*
   Nachricht bekam) → deshalb inhaltslos + opt-in.
 - **Gruppen v1/v2**: „Soft"-Membership per Pairwise-Fan-out ohne kryptografisches

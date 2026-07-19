@@ -6,6 +6,21 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Feature: Sealed Sender (Absender-Metadaten verbergen)
+
+- Der komplette Wire-Envelope wird vor dem Senden in einen **anonymen Box an den
+  Empfänger** verpackt (libsodium `crypto_box_seal` — ephemerer Schlüssel, kein
+  Absender-Key im Ciphertext). Der Relay sieht damit **nicht mehr, wer** an eine
+  Inbox einliefert; auch die frühere `conv`-Paar-ID und die X3DH-Identitäts-
+  schlüssel des Absenders (erste Nachricht) sind jetzt **verborgen** (innerhalb
+  der Versiegelung).
+- Absender-**Authentizität** bleibt: sie kommt aus dem X3DH/Ratchet innen, den
+  der Empfänger nach dem Öffnen prüft. Neues Modul `src/crypto/seal.ts`.
+- Empfänger-Fallback für Legacy-Nachrichten (unversiegelt) während des Rollouts.
+- Rest-Metadaten (ehrlich): Empfänger-Inbox, Timing, Größe, IP-Korrelation —
+  gleiche Fläche wie Signals Sealed Sender.
+
+
 ### Feature: Profilbild-Zuschnitt + QR-Vollbild + robusterer QR-Scan
 
 - **Crop-Auswahl**: beim Setzen des Profilbilds wählt man jetzt den Ausschnitt —

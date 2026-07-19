@@ -14,6 +14,8 @@ import {
   deserializeState,
   encodeEnvelope,
   decodeEnvelope,
+  sealTo,
+  openInbound,
   encodeBundle,
   decodeBundle,
   encodeInitialHeader,
@@ -249,7 +251,9 @@ async function sendContent(me: IdentityKeys, contact: Contact, content: MessageC
   const envelope = contact.pendingHeader
     ? ({ type: 'prekey', conv, x3dh: contact.pendingHeader, message } as const)
     : ({ type: 'msg', conv, message } as const);
-  return encodeEnvelope(envelope);
+  // Sealed Sender: wrap the whole envelope in an anonymous box to the recipient,
+  // so the relay never sees the sender's X3DH identity keys or the conv id.
+  return sealTo(contact.peerDhPub, await encodeEnvelope(envelope));
 }
 
 export async function sendMessage(me: IdentityKeys, contact: Contact, text: string): Promise<Bytes> {
@@ -304,7 +308,7 @@ export async function receiveMessage(
   bytes: Bytes,
   lookup: PreKeyLookup,
 ): Promise<MessageContent> {
-  return receiveEnvelope(me, contact, await decodeEnvelope(bytes), lookup);
+  return receiveEnvelope(me, contact, await decodeEnvelope(await openInbound(me, bytes)), lookup);
 }
 
 export async function receiveEnvelope(

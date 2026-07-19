@@ -124,7 +124,9 @@ export type MessageContent =
   | { kind: 'file'; name: string; mime: string; data: Bytes }
   | { kind: 'profile'; name?: string; avatar?: Bytes }
   | { kind: 'group'; groupId: string; senderName?: string; inner: MessageContent }
-  | { kind: 'ginvite'; group: GroupInvite };
+  | { kind: 'ginvite'; group: GroupInvite }
+  | { kind: 'gremove'; groupId: string } // "you were removed from this group"
+  | { kind: 'gleave'; groupId: string }; // "I left this group"
 
 function prefixed(type: number, body: Uint8Array): Bytes {
   const out = new Uint8Array(1 + body.length);
@@ -182,6 +184,8 @@ function frameContent(c: MessageContent): Bytes {
     const json = JSON.stringify({ g: c.groupId, s: c.senderName ?? '', i: bytesToB64(frameContent(c.inner)) });
     return prefixed(3, utf8.encode(json));
   }
+  if (c.kind === 'gremove') return prefixed(5, utf8.encode(c.groupId));
+  if (c.kind === 'gleave') return prefixed(6, utf8.encode(c.groupId));
   // ginvite
   return prefixed(4, utf8.encode(JSON.stringify(c.group)));
 }
@@ -207,6 +211,8 @@ function unframeContent(bytes: Bytes): MessageContent {
   if (bytes[0] === 4) {
     return { kind: 'ginvite', group: JSON.parse(utf8.decode(bytes.slice(1))) as GroupInvite };
   }
+  if (bytes[0] === 5) return { kind: 'gremove', groupId: utf8.decode(bytes.slice(1)) };
+  if (bytes[0] === 6) return { kind: 'gleave', groupId: utf8.decode(bytes.slice(1)) };
 
   let o = 1;
   const nameLen = dv.getUint16(o);
@@ -276,6 +282,14 @@ export async function sendGroupMessage(
 
 export async function sendGroupInvite(me: IdentityKeys, contact: Contact, group: GroupInvite): Promise<Bytes> {
   return sendContent(me, contact, { kind: 'ginvite', group });
+}
+
+export async function sendGroupRemove(me: IdentityKeys, contact: Contact, groupId: string): Promise<Bytes> {
+  return sendContent(me, contact, { kind: 'gremove', groupId });
+}
+
+export async function sendGroupLeave(me: IdentityKeys, contact: Contact, groupId: string): Promise<Bytes> {
+  return sendContent(me, contact, { kind: 'gleave', groupId });
 }
 
 /** Decrypt an incoming envelope; establishes the responder session on first contact. */

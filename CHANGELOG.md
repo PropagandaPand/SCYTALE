@@ -6,6 +6,21 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Gruppen v2 — Mitglieder-Verwaltung
+
+#### Hinzugefügt
+- **Gruppe verwalten** (Menü im Gruppenchat): Mitglieder **hinzufügen** (aus
+  Kontakten), **entfernen**, Gruppe **umbenennen**, Gruppe **verlassen**.
+- Änderungen werden per aktualisiertem **Roster-Push** (`ginvite`) an alle
+  Mitglieder verteilt (Konvergenz). Neue Steuer-Nachrichten `gremove` (Empfänger
+  verlässt die Gruppe lokal) und `gleave` (Absender wird aus dem Roster entfernt).
+- Verifiziert: `gremove`/`gleave` Round-Trip.
+
+#### Grenzen
+- „Soft"-Membership ohne kryptografisches Re-Keying: ein entferntes Mitglied
+  behält alte Schlüssel/Verlauf; echte Vorwärts-/Rückwärts-Sicherheit bei
+  Mitgliederwechsel bräuchte Sender-Keys/MLS (v3).
+
 ### Gruppen (MVP)
 
 #### Hinzugefügt

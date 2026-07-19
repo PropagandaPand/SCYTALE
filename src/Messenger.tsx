@@ -26,6 +26,8 @@ import {
   sendProfile,
   sendGroupMessage,
   sendGroupInvite,
+  sendGroupRemove,
+  sendGroupLeave,
   receiveEnvelope,
   inboxRoom,
   computeRoomId,
@@ -78,6 +80,12 @@ function eqBytes(a: Uint8Array, b: Uint8Array): boolean {
   return true;
 }
 
+function hexOf(b: Uint8Array): string {
+  let s = '';
+  for (const x of b) s += x.toString(16).padStart(2, '0');
+  return s;
+}
+
 function incomingMessage(content: MessageContent): ChatMessage {
   if (content.kind === 'file') {
     return {
@@ -107,7 +115,7 @@ interface Props {
   onLock: () => void;
 }
 
-type View = 'list' | 'chat' | 'add' | 'verify' | 'profile' | 'newgroup';
+type View = 'list' | 'chat' | 'add' | 'verify' | 'profile' | 'newgroup' | 'gmanage';
 
 const shortFp = (fp: string) => (fp ? fp.split(' ').slice(0, 3).join(' ') + ' …' : '…');
 const displayName = (c: Contact) =>
@@ -185,6 +193,7 @@ export function Messenger({ dek, onLock }: Props) {
   const [profileName, setProfileName] = useState('');
   const [activeGroup, setActiveGroup] = useState<string | null>(null);
   const [groupNameInput, setGroupNameInput] = useState('');
+  const [groupRenameInput, setGroupRenameInput] = useState('');
   const [groupSel, setGroupSel] = useState<Set<string>>(new Set());
   const [safetyNumber, setSafetyNumber] = useState('');
   const [safetyQr, setSafetyQr] = useState('');
@@ -274,6 +283,10 @@ export function Messenger({ dek, onLock }: Props) {
         await applyGroupInvite(content.group);
       } else if (content.kind === 'group') {
         await applyGroupMessage(content.groupId, content.senderName, content.inner, contact);
+      } else if (content.kind === 'gremove') {
+        await deleteGroupAction(content.groupId);
+      } else if (content.kind === 'gleave') {
+        await applyGroupLeave(content.groupId, contact);
       } else {
         await appendMessage(contact.roomId, incomingMessage(content));
         if (!(viewRef.current === 'chat' && activeRoomRef.current === contact.roomId)) {
@@ -550,10 +563,83 @@ export function Messenger({ dek, onLock }: Props) {
 
   async function applyGroupInvite(invite: GroupInvite) {
     const g = await fromInvite(invite);
+    const had = messagesRef.current[g.id];
     groupsRef.current = [g, ...groupsRef.current.filter((x) => x.id !== g.id)];
-    messagesRef.current[g.id] ??= [];
+    messagesRef.current[g.id] = had ?? [];
     await saveGroup(dek, g);
     for (const m of g.members) await ensureMemberContact(m);
+  }
+
+  async function updateGroup(group: Group, sync: boolean) {
+    groupsRef.current = groupsRef.current.map((x) => (x.id === group.id ? group : x));
+    await saveGroup(dek, group);
+    if (sync) await sendGroupInvites(group);
+    bump();
+  }
+
+  async function addMembersToGroup(group: Group, roomIds: string[]) {
+    const additions: GroupMember[] = [];
+    for (const c of contactsRef.current) {
+      if (!roomIds.includes(c.roomId) || !c.bundle) continue;
+      if (group.members.some((m) => eqBytes(m.dhPub, c.peerDhPub))) continue;
+      additions.push({ signPub: c.peerSignPub, dhPub: c.peerDhPub, bundle: c.bundle, name: displayName(c) });
+    }
+    if (additions.length === 0) return;
+    await updateGroup({ ...group, members: [...group.members, ...additions] }, true);
+  }
+
+  async function removeMemberFromGroup(group: Group, member: GroupMember) {
+    const id = identityRef.current;
+    if (!id) return;
+    const newGroup = { ...group, members: group.members.filter((m) => !eqBytes(m.dhPub, member.dhPub)) };
+    await updateGroup(newGroup, true);
+    const removed = await ensureMemberContact(member);
+    if (removed) {
+      try {
+        await sendEnvelopeTo(removed, await sendGroupRemove(id, removed, group.id));
+      } catch {
+        /* they'll just stop receiving; roster already dropped them */
+      }
+    }
+  }
+
+  async function leaveGroup(group: Group) {
+    const id = identityRef.current;
+    if (id) {
+      for (const m of group.members) {
+        const c = await ensureMemberContact(m);
+        if (c) {
+          try {
+            await sendEnvelopeTo(c, await sendGroupLeave(id, c, group.id));
+          } catch {
+            /* best effort */
+          }
+        }
+      }
+    }
+    await deleteGroupAction(group.id);
+  }
+
+  async function renameGroup(group: Group, name: string) {
+    const n = name.trim();
+    if (!n || n === group.name) return;
+    await updateGroup({ ...group, name: n }, true);
+  }
+
+  async function applyGroupLeave(groupId: string, contact: Contact) {
+    const g = groupsRef.current.find((x) => x.id === groupId);
+    if (!g) return;
+    const newGroup = { ...g, members: g.members.filter((m) => !eqBytes(m.dhPub, contact.peerDhPub)) };
+    groupsRef.current = groupsRef.current.map((x) => (x.id === groupId ? newGroup : x));
+    await saveGroup(dek, newGroup);
+    bump();
+  }
+
+  function openManage(g: Group) {
+    setChatMenu(false);
+    setGroupRenameInput(g.name);
+    setGroupSel(new Set());
+    setView('gmanage');
   }
 
   function openChat(roomId: string) {
@@ -1131,6 +1217,7 @@ export function Messenger({ dek, onLock }: Props) {
           </button>
           {chatMenu && (
             <div className="chat-menu">
+              <button onClick={() => openManage(activeGroupData)}>Gruppe verwalten</button>
               <button
                 onClick={() => {
                   setChatMenu(false);
@@ -1143,10 +1230,10 @@ export function Messenger({ dek, onLock }: Props) {
                 className="danger"
                 onClick={() => {
                   setChatMenu(false);
-                  if (confirm('Gruppe wirklich löschen?')) void deleteGroupAction(activeGroupData.id);
+                  if (confirm('Gruppe wirklich verlassen?')) void leaveGroup(activeGroupData);
                 }}
               >
-                Gruppe löschen
+                Gruppe verlassen
               </button>
             </div>
           )}
@@ -1415,6 +1502,121 @@ export function Messenger({ dek, onLock }: Props) {
             onClick={() => void createGroup()}
           >
             Gruppe erstellen ({groupSel.size})
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Manage group ──────────────────────────────────────────────────
+  if (view === 'gmanage' && activeGroupData) {
+    const g = activeGroupData;
+    const addable = visibleContacts.filter(
+      (c) => c.bundle && !g.members.some((m) => eqBytes(m.dhPub, c.peerDhPub)),
+    );
+    return (
+      <div className="subview">
+        <div className="subhead">
+          <button className="back" onClick={() => setView('chat')}>
+            <IconBack />
+          </button>
+          <div className="h">Gruppe verwalten</div>
+        </div>
+        <div className="subbody">
+          <div className="field-lbl">Gruppenname</div>
+          <div className="rename-row" style={{ marginBottom: 18 }}>
+            <input className="name-input" value={groupRenameInput} onChange={(e) => setGroupRenameInput(e.target.value)} />
+            <button className="btn btn-primary" style={{ width: 'auto' }} onClick={() => void renameGroup(g, groupRenameInput)}>
+              ✓
+            </button>
+          </div>
+
+          <div className="sect-lbl">Mitglieder ({g.members.length + 1})</div>
+          <div className="card pad16">
+            <div className="member-row">
+              {myAvatarB64 ? (
+                <img className="avatar-img sm" src={avatarSrc(myAvatarB64)} alt="" />
+              ) : (
+                <div className="avatar sm">
+                  <Identicon seed={'me-' + fingerprint} />
+                </div>
+              )}
+              <span className="conv-name">Du</span>
+            </div>
+            {g.members.map((m, i) => (
+              <div key={i} className="member-row">
+                <div className="avatar sm">
+                  <Identicon seed={hexOf(m.dhPub)} />
+                </div>
+                <span className="conv-name">{m.name || '…'}</span>
+                <button
+                  className="icon-mini danger"
+                  aria-label="Entfernen"
+                  onClick={() => {
+                    if (confirm(`${m.name || 'Mitglied'} entfernen?`)) void removeMemberFromGroup(g, m);
+                  }}
+                >
+                  <IconTrash size={15} />
+                </button>
+              </div>
+            ))}
+          </div>
+
+          {addable.length > 0 && (
+            <>
+              <div className="sect-lbl" style={{ marginTop: 18 }}>
+                Hinzufügen
+              </div>
+              <div className="card pad16">
+                {addable.map((c) => {
+                  const on = groupSel.has(c.roomId);
+                  return (
+                    <button
+                      key={c.roomId}
+                      className={`member-row${on ? ' on' : ''}`}
+                      onClick={() => {
+                        const s = new Set(groupSel);
+                        if (on) s.delete(c.roomId);
+                        else s.add(c.roomId);
+                        setGroupSel(s);
+                      }}
+                    >
+                      {c.peerAvatarB64 ? (
+                        <img className="avatar-img sm" src={avatarSrc(c.peerAvatarB64)} alt="" />
+                      ) : (
+                        <div className="avatar sm">
+                          <Identicon seed={c.roomId} />
+                        </div>
+                      )}
+                      <span className="conv-name">{displayName(c)}</span>
+                      <span className={`check${on ? ' on' : ''}`}>{on ? '✓' : ''}</span>
+                    </button>
+                  );
+                })}
+                <button
+                  className="btn btn-primary"
+                  style={{ marginTop: 12 }}
+                  disabled={groupSel.size === 0}
+                  onClick={async () => {
+                    await addMembersToGroup(g, [...groupSel]);
+                    setGroupSel(new Set());
+                  }}
+                >
+                  {groupSel.size} hinzufügen
+                </button>
+              </div>
+            </>
+          )}
+
+          {error && <div className="err-note">{error}</div>}
+          <button
+            className="btn btn-outline danger-btn"
+            style={{ marginTop: 18 }}
+            onClick={() => {
+              if (confirm('Gruppe wirklich verlassen?')) void leaveGroup(g);
+            }}
+          >
+            Gruppe verlassen
           </button>
         </div>
       </div>

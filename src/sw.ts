@@ -23,6 +23,19 @@
 
 const sw = self as unknown as ServiceWorkerGlobalScope;
 
+// VAPID public key (public by design) — needed to re-subscribe from the SW when
+// the browser rotates the endpoint (pushsubscriptionchange).
+const VAPID_PUBLIC =
+  'BCvQuiivhlyNteecWKop_2Jh-cPdK_V8UeiSwgyt8_yPzbduj6dQf6fAJkqOTaVZXMaIsUCb0l8VLLJV8aVuzAo';
+function vapidKeyBytes(): Uint8Array {
+  const s = VAPID_PUBLIC;
+  const pad = '='.repeat((4 - (s.length % 4)) % 4);
+  const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/') + pad);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
 // vite-plugin-pwa replaces `self.__WB_MANIFEST` with the precache list at build.
 const manifest = (self as unknown as { __WB_MANIFEST: { url: string; revision: string | null }[] })
   .__WB_MANIFEST;
@@ -124,20 +137,32 @@ sw.addEventListener('fetch', (event) => {
 });
 
 // ── Content-free Web Push ─────────────────────────────────────────────
+// iOS revokes push permission if a push event doesn't end in showNotification
+// (no silent push allowed), so we ALWAYS show one — never bail out early. The
+// server only pushes when the owner isn't connected, so notify-while-open is
+// rare. Title omits "SCYTALE" (iOS already shows the app name as the source).
+// Content-free by design — no sender, no text.
 sw.addEventListener('push', (event) => {
   event.waitUntil(
-    (async () => {
-      const windows = await sw.clients.matchAll({ type: 'window', includeUncontrolled: true });
-      if (windows.some((c) => c.visibilityState === 'visible')) return; // app already open
-      // iOS already shows the app name ("SCYTALE") as the source header, so the
-      // title must NOT repeat it. Content-free by design — no sender, no text.
-      await sw.registration.showNotification('Neue Nachricht', {
-        body: 'Tippen zum Öffnen',
-        icon: '/pwa-192.png',
-        badge: '/pwa-192.png',
-        tag: 'scytale-new-message',
-      });
-    })(),
+    sw.registration.showNotification('Neue Nachricht', {
+      body: 'Tippen zum Öffnen',
+      icon: '/pwa-192.png',
+      badge: '/pwa-192.png',
+      tag: 'scytale-new-message',
+    }),
+  );
+});
+
+// Browsers rotate push endpoints; without this the user is silently lost. Re-
+// subscribe here so getSubscription() returns a valid one again — the app then
+// re-registers it with the relay over its authenticated owner socket on next
+// launch (currentSubscription → setPush).
+sw.addEventListener('pushsubscriptionchange', (event) => {
+  (event as ExtendableEvent).waitUntil(
+    sw.registration.pushManager
+      .subscribe({ userVisibleOnly: true, applicationServerKey: vapidKeyBytes() as BufferSource })
+      .then(() => undefined)
+      .catch(() => undefined),
   );
 });
 

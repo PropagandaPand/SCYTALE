@@ -6,7 +6,29 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Offline-Zustellung (Store-and-Forward-Mailbox)
+
+Bisher mussten beide gleichzeitig online sein — sonst war die Nachricht weg.
+
+#### Geändert
+- **Relay-Durable-Object zur verschlüsselten Mailbox** ausgebaut: Nachrichten
+  werden in SQLite zwischengespeichert und ausgeliefert, sobald der Empfänger
+  online kommt. Ack-basiert → kein Verlust.
+- **Inbox-Owner-Authentifizierung**: die Inbox = `SHA-256(Ed25519-Identity-Pub)`.
+  Der Besitzer beweist sich per **Ed25519-Challenge-Response** (signiert die
+  Nonce des DO); der DO prüft `hash(signPub) == Inbox` + Signatur. Nur so kann
+  jemand die Warteschlange leeren — nicht jeder, der bloß deinen Code hat.
+  (libsodium-Sig ↔ WebCrypto-Ed25519-Verify verifiziert.)
+- JSON-Protokoll (hello/challenge/auth/send/msg/ack); Client mit Dedup gegen
+  Doppel-Zustellung. `inboxRoom` von BLAKE2b(dhPub) auf SHA-256(signPub)
+  umgestellt (Worker kann's nativ prüfen).
+
 ### Bilder & Dateien
+
+#### Geändert
+- Bilder werden vor dem Senden über einen Canvas re-enkodiert → **EXIF/GPS/
+  Metadaten werden entfernt**; Orientierung wird vorher in die Pixel gebacken
+  (`imageOrientation: 'from-image'`), damit nichts kippt.
 
 #### Hinzugefügt
 - **Anhänge im Chat**: Bilder und Dateien laufen durch dieselbe E2E-Pipeline

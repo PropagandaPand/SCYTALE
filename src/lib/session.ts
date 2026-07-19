@@ -63,11 +63,17 @@ export async function computeRoomId(a: Bytes, b: Bytes): Promise<string> {
   return s.to_hex(s.crypto_generichash(16, concatBytes(x, y), null));
 }
 
-/** Our inbox room: derived from our OWN identity, so we can listen without
- *  knowing anyone else. Whoever holds our code can send here. */
-export async function inboxRoom(dhPub: Bytes): Promise<string> {
-  const s = await getSodium();
-  return s.to_hex(s.crypto_generichash(16, concatBytes(utf8.encode('scytale-inbox:'), dhPub), null));
+/** Our inbox room: SHA-256 of our Ed25519 identity pub. Derived from our OWN
+ *  identity, so we can listen without knowing anyone else; whoever holds our
+ *  code can send here. The relay verifies inbox ownership by checking this hash
+ *  and an Ed25519 signature — so only we can drain our own queue. SHA-256 (not
+ *  BLAKE2b) so the Worker can recompute it natively. */
+export async function inboxRoom(signPub: Bytes): Promise<string> {
+  const material = concatBytes(utf8.encode('scytale-inbox:'), signPub);
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', material));
+  let hex = '';
+  for (const b of digest) hex += b.toString(16).padStart(2, '0');
+  return hex;
 }
 
 /** Initiator side: we hold their code (bundle). */

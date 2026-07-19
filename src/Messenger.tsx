@@ -13,6 +13,7 @@ import {
   decodeBundle,
   decodeEnvelope,
   pairwiseSafetyNumber,
+  sign,
   type Bytes,
   type IdentityKeys,
 } from './crypto';
@@ -104,6 +105,8 @@ export function Messenger({ dek, onLock }: Props) {
   const messagesRef = useRef<Record<string, ChatMessage[]>>({});
   const unreadRef = useRef<Record<string, number>>({});
   const sendRoomRef = useRef<Map<string, string>>(new Map());
+  const inboxClientRef = useRef<RelayClient | null>(null);
+  const seenIdsRef = useRef<Set<number>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
   const viewRef = useRef<View>('list');
   const activeRoomRef = useRef<string | null>(null);
@@ -142,53 +145,64 @@ export function Messenger({ dek, onLock }: Props) {
     await saveMessages(dek, roomId, messagesRef.current[roomId]);
   }
 
-  // Listen on our own inbox — derived from our identity, so no peer needed.
+  // Listen on our own inbox and authenticate as its owner (Ed25519 sig over the
+  // DO's challenge) so the relay hands us our queued + live messages.
   function connectInbox(room: string) {
-    if (relaysRef.current.has(room)) return;
-    const client = new RelayClient(room, (bytes) => void onInbox(bytes), () => {});
+    const id = identityRef.current;
+    if (!id || relaysRef.current.has(room)) return;
+    const client = new RelayClient(room, {
+      onCipher: (bytes, ackId) => void onInbox(bytes, ackId),
+      auth: {
+        signPub: id.sign.publicKey,
+        sign: (nonce) => sign(nonce, id.sign.privateKey),
+      },
+    });
     relaysRef.current.set(room, client);
+    inboxClientRef.current = client;
     client.connect();
   }
 
-  // A send channel to a contact's inbox (they hold no code of ours to reach us
-  // here; we reach them). Its status is the reachability dot for that contact.
+  // A send channel to a contact's inbox. Status = reachability dot for them.
   async function connectSend(contact: Contact) {
-    const room = await inboxRoom(contact.peerDhPub);
+    const room = await inboxRoom(contact.peerSignPub);
     sendRoomRef.current.set(contact.roomId, room);
     if (relaysRef.current.has(room)) return;
-    const client = new RelayClient(
-      room,
-      () => {}, // send-only; inbound arrives on our own inbox
-      (s) => setStatuses((prev) => ({ ...prev, [contact.roomId]: s })),
-    );
+    const client = new RelayClient(room, {
+      onStatus: (s) => setStatuses((prev) => ({ ...prev, [contact.roomId]: s })),
+    });
     relaysRef.current.set(room, client);
     client.connect();
   }
 
-  async function onInbox(bytes: Bytes) {
+  async function onInbox(bytes: Bytes, ackId: number) {
     const id = identityRef.current;
     const lookup = lookupRef.current;
-    if (!id || !lookup) return;
+    if (!id || !lookup) return; // not ready — leave queued (no ack), retry on reconnect
 
-    let env;
-    try {
-      env = await decodeEnvelope(bytes);
-    } catch {
+    if (seenIdsRef.current.has(ackId)) {
+      inboxClientRef.current?.ack(ackId);
       return;
     }
 
-    let contact = contactsRef.current.find((c) => c.roomId === env.conv);
-    if (!contact) {
-      // First contact from someone who holds our code — auto-create it.
-      if (env.type !== 'prekey') return;
-      contact = await makeContactFromHeader(id.dh.publicKey, env.x3dh);
-      contactsRef.current = [...contactsRef.current, contact];
-      messagesRef.current[contact.roomId] = [];
-      await connectSend(contact);
-      await saveContact(dek, contact);
-    }
-
     try {
+      let env;
+      try {
+        env = await decodeEnvelope(bytes);
+      } catch {
+        return; // handled in finally (ack + drop)
+      }
+
+      let contact = contactsRef.current.find((c) => c.roomId === env.conv);
+      if (!contact) {
+        // First contact from someone who holds our code — auto-create it.
+        if (env.type !== 'prekey') return;
+        contact = await makeContactFromHeader(id.dh.publicKey, env.x3dh);
+        contactsRef.current = [...contactsRef.current, contact];
+        messagesRef.current[contact.roomId] = [];
+        await connectSend(contact);
+        await saveContact(dek, contact);
+      }
+
       const wasNew = contact.ratchet === null;
       const content = await receiveEnvelope(id, contact, env, lookup);
       await appendMessage(contact.roomId, incomingMessage(content));
@@ -198,8 +212,11 @@ export function Messenger({ dek, onLock }: Props) {
       await saveContact(dek, contact);
       if (wasNew && prekeysRef.current) await savePreKeys(dek, prekeysRef.current);
       bump();
-    } catch (e) {
-      setError('Empfang fehlgeschlagen: ' + (e as Error).message);
+    } catch {
+      // Decrypt failure (e.g. a duplicate re-delivery) — drop it, don't spam UI.
+    } finally {
+      seenIdsRef.current.add(ackId);
+      inboxClientRef.current?.ack(ackId);
     }
   }
 
@@ -247,7 +264,7 @@ export function Messenger({ dek, onLock }: Props) {
       setShareLink(link);
       makeQr(link).then(setQrDataUrl).catch(() => undefined);
 
-      connectInbox(await inboxRoom(id.dh.publicKey));
+      connectInbox(await inboxRoom(id.sign.publicKey));
 
       const cs = await loadContacts(dek);
       contactsRef.current = cs;

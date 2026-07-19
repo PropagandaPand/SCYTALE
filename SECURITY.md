@@ -13,7 +13,13 @@ CSAR). Dieses Dokument sagt ehrlich, was geschützt ist — und was nicht.
 | Nachrichten (in transit) | Double Ratchet — Forward Secrecy + Post-Compromise Security, AES-256-GCM pro Nachricht |
 
 Der Relay (Cloudflare Durable Object) ist ein **dummer Ciphertext-Briefkasten**.
-Er sieht nie Klartext und hält nie Schlüssel.
+Er sieht nie Klartext und hält nie Schlüssel. Nachrichten werden verschlüsselt
+in SQLite zwischengespeichert (Store-and-Forward), bis der Empfänger online kommt.
+Nur der echte Inbox-Besitzer kann seine Warteschlange leeren — er authentifiziert
+sich per Ed25519-Challenge-Response (Inbox = `SHA-256(Ed25519-Pub)`), sodass
+niemand, der bloß den Kontakt-Code hat, fremde Queues abgreifen kann.
+
+Bilder werden vor dem Versand re-enkodiert → **EXIF/GPS-Metadaten entfernt**.
 
 ## PWA-Härtung
 

@@ -2,6 +2,11 @@
  * Downscale + re-encode an image to fit an inline size budget, so it can travel
  * through the E2E message pipeline. JPEG (universally encodable in canvas), max
  * 1600px on the long edge, quality stepped down until it fits.
+ *
+ * Re-encoding through a canvas also **strips all metadata (EXIF/GPS/timestamps)**
+ * — the output blob carries only pixels. We bake the EXIF orientation into those
+ * pixels first (`imageOrientation: 'from-image'`) so stripping it doesn't rotate
+ * the photo.
  */
 export interface Compressed {
   data: Uint8Array;
@@ -11,7 +16,7 @@ export interface Compressed {
 const MAX_DIM = 1600;
 
 export async function compressImage(file: File, maxBytes: number): Promise<Compressed> {
-  const bitmap = await createImageBitmap(file);
+  const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
   const scale = Math.min(1, MAX_DIM / Math.max(bitmap.width, bitmap.height));
   const width = Math.max(1, Math.round(bitmap.width * scale));
   const height = Math.max(1, Math.round(bitmap.height * scale));

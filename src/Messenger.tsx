@@ -1043,6 +1043,18 @@ export function Messenger({ dek, onLock }: Props) {
 
   // ── Contact list ──────────────────────────────────────────────────
   if (view === 'list') {
+    // WhatsApp-style: groups and contacts in one list, most recent activity on
+    // top. Chats without messages (ts 0) sink to the bottom until they get one.
+    const convItems = [
+      ...groups.map((g) => {
+        const last = messagesRef.current[g.id]?.at(-1);
+        return { kind: 'group' as const, group: g, last, unread: unreadRef.current[g.id] ?? 0, ts: last?.ts ?? 0 };
+      }),
+      ...visibleContacts.map((c) => {
+        const last = messagesRef.current[c.roomId]?.at(-1);
+        return { kind: 'contact' as const, contact: c, last, unread: unreadRef.current[c.roomId] ?? 0, ts: last?.ts ?? 0 };
+      }),
+    ].sort((a, b) => b.ts - a.ts);
     return (
       <>
         <div className="list">
@@ -1102,11 +1114,9 @@ export function Messenger({ dek, onLock }: Props) {
               </div>
             ) : (
               <>
-                {groups.map((g) => {
-                  const last = messagesRef.current[g.id]?.at(-1);
-                  const unread = unreadRef.current[g.id] ?? 0;
-                  return (
-                    <button key={g.id} className="conv-row" onClick={() => openGroup(g.id)}>
+                {convItems.map((item) =>
+                  item.kind === 'group' ? (
+                    <button key={item.group.id} className="conv-row" onClick={() => openGroup(item.group.id)}>
                       <div className="avatar-wrap">
                         <div className="avatar group">
                           <IconGroup size={22} />
@@ -1114,56 +1124,52 @@ export function Messenger({ dek, onLock }: Props) {
                       </div>
                       <div className="conv-main">
                         <div className="conv-line1">
-                          <span className="conv-name">{g.name}</span>
-                          <span className="conv-ts">{fmtListTs(last?.ts)}</span>
+                          <span className="conv-name">{item.group.name}</span>
+                          <span className="conv-ts">{fmtListTs(item.last?.ts)}</span>
                         </div>
                         <div className="conv-line2">
                           <span className="conv-last">
-                            {last
-                              ? (last.mine ? '' : last.sender ? `${last.sender}: ` : '') + lastPreview(last)
-                              : `${g.members.length + 1} Mitglieder`}
+                            {item.last
+                              ? (item.last.mine ? '' : item.last.sender ? `${item.last.sender}: ` : '') +
+                                lastPreview(item.last)
+                              : `${item.group.members.length + 1} Mitglieder`}
                           </span>
-                          {unread > 0 && <span className="unread">{unread}</span>}
+                          {item.unread > 0 && <span className="unread">{item.unread}</span>}
                         </div>
                       </div>
                     </button>
-                  );
-                })}
-                {visibleContacts.map((c) => {
-                  const last = messagesRef.current[c.roomId]?.at(-1);
-                  const unread = unreadRef.current[c.roomId] ?? 0;
-                  return (
-                    <button key={c.roomId} className="conv-row" onClick={() => openChat(c.roomId)}>
+                  ) : (
+                    <button key={item.contact.roomId} className="conv-row" onClick={() => openChat(item.contact.roomId)}>
                       <div className="avatar-wrap">
-                        {c.peerAvatarB64 ? (
-                          <img className="avatar-img" src={avatarSrc(c.peerAvatarB64)} alt="" />
+                        {item.contact.peerAvatarB64 ? (
+                          <img className="avatar-img" src={avatarSrc(item.contact.peerAvatarB64)} alt="" />
                         ) : (
                           <div className="avatar">
-                            <Identicon seed={c.roomId} />
+                            <Identicon seed={item.contact.roomId} />
                           </div>
                         )}
-                        <span className={`sdot ${st(c.roomId)}`} />
+                        <span className={`sdot ${st(item.contact.roomId)}`} />
                       </div>
                       <div className="conv-main">
                         <div className="conv-line1">
-                          <span className="conv-name">{displayName(c)}</span>
-                          {c.verified && (
+                          <span className="conv-name">{displayName(item.contact)}</span>
+                          {item.contact.verified && (
                             <span className="verified-badge">
                               <IconShield size={14} filled />
                             </span>
                           )}
-                          <span className="conv-ts">{fmtListTs(last?.ts)}</span>
+                          <span className="conv-ts">{fmtListTs(item.last?.ts)}</span>
                         </div>
                         <div className="conv-line2">
                           <span className="conv-last">
-                            {last ? lastPreview(last) : c.ratchet ? 'Verbunden' : 'Neu — sag Hallo'}
+                            {item.last ? lastPreview(item.last) : item.contact.ratchet ? 'Verbunden' : 'Neu — sag Hallo'}
                           </span>
-                          {unread > 0 && <span className="unread">{unread}</span>}
+                          {item.unread > 0 && <span className="unread">{item.unread}</span>}
                         </div>
                       </div>
                     </button>
-                  );
-                })}
+                  ),
+                )}
               </>
             )}
           </div>

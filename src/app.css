@@ -143,3 +143,21 @@ button.contact {
 .composer { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--border); }
 .composer input { flex: 1; }
 button.send { width: auto; margin: 0; padding: 0 16px; }
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-size: 0.82rem;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+  z-index: 50;
+}
+.toast button { width: auto; margin: 0; }

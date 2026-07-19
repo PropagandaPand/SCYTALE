@@ -7,8 +7,6 @@
  * not a secret; its job is to defeat rainbow tables and make each vault's
  * derivation unique).
  */
-import { argon2id } from 'hash-wasm';
-
 export interface Argon2Params {
   /** Memory cost in KiB. 262144 KiB = 256 MiB. */
   memorySize: number;
@@ -38,6 +36,8 @@ export async function deriveKekBytes(
   salt: Uint8Array<ArrayBuffer>,
   params: Argon2Params = DEFAULT_ARGON2,
 ): Promise<Uint8Array<ArrayBuffer>> {
+  // Lazy-load hash-wasm — only needed at vault create/unlock, not on first paint.
+  const { argon2id } = await import('hash-wasm');
   const out = await argon2id({
     password: passphrase,
     salt,

@@ -7,8 +7,10 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
-      registerType: 'autoUpdate',
-      injectRegister: 'auto',
+      // 'prompt' (not autoUpdate): a new version never activates silently — the
+      // user must confirm. No unattended code swap on a security-critical app.
+      registerType: 'prompt',
+      injectRegister: null,
       manifest: {
         name: 'SCYTALE',
         short_name: 'SCYTALE',

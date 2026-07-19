@@ -1,7 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { createVault, unlockVault, WrongPassphraseError } from './crypto';
 import { loadHeader, saveHeader } from './lib/db';
 import { Messenger } from './Messenger';
+import { ReloadPrompt } from './ReloadPrompt';
+
+// Auto-lock after this much inactivity — the DEK is dropped from memory.
+const IDLE_LOCK_MS = 5 * 60 * 1000;
 
 type Phase = 'loading' | 'create' | 'unlock' | 'open';
 type StatusKind = '' | 'ok' | 'err';
@@ -60,14 +64,35 @@ export function App() {
     }
   }
 
-  function lock() {
+  const lock = useCallback(() => {
     setDek(null);
     setPhase('unlock');
     say('Gesperrt. DEK aus dem RAM entfernt.');
-  }
+  }, []);
+
+  // Auto-lock on inactivity while unlocked.
+  useEffect(() => {
+    if (phase !== 'open') return;
+    let timer = window.setTimeout(lock, IDLE_LOCK_MS);
+    const reset = () => {
+      clearTimeout(timer);
+      timer = window.setTimeout(lock, IDLE_LOCK_MS);
+    };
+    const events: (keyof WindowEventMap)[] = ['pointerdown', 'keydown', 'touchstart'];
+    for (const e of events) window.addEventListener(e, reset, { passive: true });
+    return () => {
+      clearTimeout(timer);
+      for (const e of events) window.removeEventListener(e, reset);
+    };
+  }, [phase, lock]);
 
   if (phase === 'open' && dek) {
-    return <Messenger dek={dek} onLock={lock} />;
+    return (
+      <>
+        <Messenger dek={dek} onLock={lock} />
+        <ReloadPrompt />
+      </>
+    );
   }
 
   return (
@@ -111,6 +136,7 @@ export function App() {
           <div className={`status ${statusKind}`}>{status}</div>
         </div>
       )}
+      <ReloadPrompt />
     </>
   );
 }

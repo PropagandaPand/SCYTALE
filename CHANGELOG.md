@@ -6,6 +6,23 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Etappe 6 — PWA-Härtung
+
+#### Hinzugefügt
+- **Content-Security-Policy** `default-src 'self'` + Security-Header (HSTS,
+  `nosniff`, `frame-ancestors 'none'`, Referrer-Policy, Permissions-Policy,
+  COOP/CORP) auf allen Asset-Antworten im Worker → kein externes Nachladen oder
+  Exfiltrieren, selbst bei XSS.
+- **Update-Prompt**: Service Worker im `prompt`-Modus (`registerType: 'prompt'`,
+  `ReloadPrompt.tsx`) — neue Version aktiviert sich nie ohne Bestätigung.
+- **Auto-Lock**: DEK wird nach 5 Minuten Inaktivität aus dem RAM entfernt.
+- **`SECURITY.md`**: Bedrohungsmodell, PWA-Härtung, Reproducible-Build-Verifikation.
+
+#### Geändert
+- **Lazy-Loading** von libsodium & hash-wasm via dynamischem `import()` → App-Shell
+  von ~270 KB auf **~70 KB gzip**; libsodium (188 KB gzip) lädt als eigener Chunk
+  erst bei Bedarf. Krypto-Round-Trip nach dem Umbau erneut verifiziert.
+
 ### UI-Migration: Svelte → React
 
 #### Geändert

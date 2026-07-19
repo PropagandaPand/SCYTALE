@@ -44,7 +44,7 @@ Forward Secrecy und Post-Compromise Security.
 - [x] **Etappe 3** — Key Exchange: Prekey-Bundles + X3DH (HKDF-SHA256, MITM-Abwehr)
 - [x] **Etappe 4** — Double Ratchet (Forward Secrecy + Post-Compromise Security, Out-of-Order)
 - [x] **Etappe 5** — Relay + Chat-UI: Wire-Format, Session-Persistenz, Live-Chat über Durable Object
-- [ ] **Etappe 6** — PWA-Härtung: Service-Worker-Pinning, SRI, reproducible builds
+- [x] **Etappe 6** — PWA-Härtung: CSP + Security-Header, Update-Prompt (kein Silent-Swap), Auto-Lock, Lazy-Load, [SECURITY.md](SECURITY.md)
 - [ ] **Später** — Metadaten-Schutz (Sealed Sender), Gruppen (MLS?)
 
 ## Entwicklung

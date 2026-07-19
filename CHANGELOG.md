@@ -6,6 +6,18 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Fix: Gleichzeitiger Verbindungsaufbau (Ratchet-Desync)
+
+- Wenn sich **beide** Seiten gegenseitig hinzufügen und **beide zuerst schreiben**,
+  initiierte jeder eine eigene X3DH-Session → beide Double-Ratchets desynchron →
+  keiner konnte den anderen entschlüsseln (Symptom: Profilbild ging durch, Text nicht).
+- Fix in `receiveEnvelope`: bei gleichzeitigem Aufbau (eigene Session unbestätigt
+  **und** eingehendes Prekey) wird **deterministisch nach Identitäts-Reihenfolge**
+  entschieden — die niedrigere Identität bleibt Initiator, die höhere übernimmt
+  deren Session. Beide konvergieren. Verifiziert per Test.
+- Selbstheilend: bestehende kaputte Sessions konvergieren bei der nächsten
+  Nachricht (beide senden noch Prekey-Envelopes bis zur Bestätigung).
+
 ### Fix: Gruppennachrichten an noch nicht verbundene Empfänger
 
 - **Wurzel**: `RelayClient.send()` verwarf Frames, wenn der WebSocket noch nicht

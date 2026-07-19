@@ -308,6 +308,18 @@ export async function receiveEnvelope(
   envelope: Envelope,
   lookup: PreKeyLookup,
 ): Promise<MessageContent> {
+  // Simultaneous initiation: we started a session and haven't heard back
+  // (pendingHeader set) AND the peer also sent a prekey. Both can't keep their
+  // own session — pick one deterministically by identity order: the lower key
+  // stays initiator, the higher adopts the peer's session. Both then converge.
+  if (contact.ratchet && contact.pendingHeader && envelope.type === 'prekey') {
+    if (cmp(me.dh.publicKey, contact.peerDhPub) < 0) {
+      throw new Error('Gleichzeitiger Verbindungsaufbau — Peer-Prekey ignoriert (unsere Session gewinnt).');
+    }
+    contact.ratchet = null; // peer wins — drop our attempt and respond to theirs
+    contact.pendingHeader = null;
+  }
+
   if (!contact.ratchet) {
     if (envelope.type !== 'prekey') {
       throw new Error('Erste Nachricht ohne X3DH-Header — Session kann nicht aufgebaut werden.');

@@ -2,7 +2,7 @@
 
 SCYTALE ist gegen **anlasslose Massenüberwachung** gebaut (Chatkontrolle /
 CSAR). Dieses Dokument ist die genaue Aufschlüsselung aller Mechanismen und
-sagt ehrlich, was geschützt ist — und was nicht. Stand: v0.12.0.
+sagt ehrlich, was geschützt ist — und was nicht. Stand: v0.14.0.
 
 **Leitprinzipien:** niemals eigene Krypto erfinden (vetted Primitiven +
 etablierte Protokolle: X3DH, Double Ratchet); der Server ist ein **dummer
@@ -42,6 +42,25 @@ Gerät/Browser-Profil erzeugt und in IndexedDB gehalten (Rohbytes nie JS-lesbar)
 Er verschlüsselt ein zufälliges *bindingSecret*, das **vor** Argon2id in die
 Passphrase gemischt wird → ein exfiltrierter Tresor ist **ohne dieses Gerät
 wertlos**, selbst mit korrekter Passphrase.
+
+**Recovery-Backup (bewusster Trade-off, `src/lib/backup.ts`):** für Multi-Device
+/ Gerätewechsel gibt es einen **verschlüsselten Datei-Export** der Identität
+(inkl. Master-Privkey), Kontakte und Verlauf. Das ist der **erste Mechanismus,
+der die Geräte-Bindung bewusst aufweicht** — ein Backup ist per Definition der
+exfiltrierbare Pfad, den Device-Binding sonst ausschließt. Deshalb streng
+gegated:
+- **Opt-in & explizit**, nie automatisch.
+- **Zweite Authentifizierung:** die Tresor-Passphrase wird **unmittelbar vor dem
+  Export erneut abgefragt** (`unlockBoundVault`) — ein entsperrter Tresor +
+  physischer Zugriff ist damit **kein Ein-Klick-Exfil**.
+- **Separate Export-Passphrase** verschlüsselt die Datei mit **vollem Argon2id**;
+  der `MIN_ARGON2`-Floor wird **nicht** umgangen (AES-256-GCM über den daraus
+  abgeleiteten Schlüssel).
+- **Rotations-Hinweis:** ein Backup enthält den Master-Privkey. Nach einer
+  Master-Rotation entschlüsselt ein **altes** Backup weiter den *alten* Master —
+  er kann Device-Certs seiner Epoch für noch nicht rotierte Kontakte ausstellen.
+  **Alte Backups sind bei Rotation zu vernichten** (der Rotations-Flow weist
+  explizit darauf hin).
 
 **Brute-Force-Lockout:** nach 5 Fehlversuchen eskalierende Sperre
 (30 s · 2^(n−5), gedeckelt bei 300 s), in IndexedDB persistiert.
@@ -220,12 +239,13 @@ Header angezeigte **Versionsnummer** hilft beim Abgleich, welcher Build läuft.
 - **Bundle-Austausch (MITM)**: das Bundle enthält nur öffentliche Schlüssel, der
   Kanal muss nicht geheim sein — aber ein Vertausch wird nur durch den
   **Safety-Number-Vergleich** erkannt.
-- **Kein Recovery (bewusst)**: der Device-Key liegt in IndexedDB. Löscht der
-  Nutzer die Website-Daten (bzw. Safari räumt nach längerer Inaktivität auf),
-  ist der Tresor auf demselben Gerät **unwiederbringlich** — das ist die gewollte
-  Kehrseite von „keine Hintertür": ein exportierbares bindingSecret wäre ein
-  Wiederherstellungs- *und* Exfiltrationspfad. Ein optionaler, unter separater
-  Passphrase verschlüsselter Export bleibt eine mögliche spätere Wahl.
+- **Recovery vs. Device-Binding**: ohne Backup ist der Tresor bei Verlust der
+  Website-Daten auf dem Gerät **unwiederbringlich** (Device-Binding). Der
+  **opt-in Recovery-Export** (oben, §1) hebt das gezielt auf — er ist der
+  bewusst akzeptierte, gegatete Exfiltrationspfad (zweite Auth + separate
+  Passphrase). Wer ihn nicht nutzt, behält die volle Device-Bindung; wer ihn
+  nutzt, ist für die Sicherheit von Datei **und** Export-Passphrase selbst
+  verantwortlich.
 - **Prekey-Downgrade**: fehlt im Bundle ein One-Time-Prekey, läuft X3DH regulär
   auf DH1–DH3 (nur die *erste* Nachricht hat dann reduzierte Forward Secrecy —
   wie im Signal-Standard). Ein aktiver Angreifer, der das Bundle *modifiziert*

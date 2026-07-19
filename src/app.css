@@ -1595,6 +1595,53 @@ select {
   transform: translateX(18px);
 }
 
+/* ==== BACKUP / RECOVERY ============================================= */
+.backup-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 6px;
+}
+.backup-actions .btn {
+  flex: 1;
+}
+.backup-body {
+  width: min(88vw, 420px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+.backup-warn {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+  border-radius: var(--r-md);
+  padding: 10px 12px;
+}
+.backup-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  text-align: left;
+}
+.backup-field span {
+  font-size: 12px;
+  color: var(--muted);
+}
+.backup-field input[type='password'],
+.backup-field input[type='file'] {
+  width: 100%;
+  padding: 11px 12px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 15px;
+}
+
 /* ==== AVATAR CROPPER ================================================ */
 .crop-modal {
   position: fixed;

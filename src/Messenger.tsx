@@ -59,6 +59,7 @@ import { compressImage } from './lib/imagecompress';
 import { Identicon } from './Identicon';
 import { QrScanner } from './QrScanner';
 import { CropModal } from './CropModal';
+import { BackupModal } from './BackupModal';
 import { AudioPlayer } from './AudioPlayer';
 import {
   IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach, IconMic, IconTrash, IconDots, IconGroup,
@@ -206,6 +207,7 @@ export function Messenger({ dek, onLock }: Props) {
   const [notifBusy, setNotifBusy] = useState(false);
   const [qrFull, setQrFull] = useState(false); // own QR blown up full-screen for scanning
   const [cropFile, setCropFile] = useState<File | null>(null); // avatar being cropped
+  const [backupMode, setBackupMode] = useState<'export' | 'import' | null>(null);
   const [swipeDx, setSwipeDx] = useState(0); // edge-swipe-back drag distance
   const [swiping, setSwiping] = useState(false);
   const swipeStart = useRef<{ x: number; y: number } | null>(null);
@@ -1824,6 +1826,27 @@ export function Messenger({ dek, onLock }: Props) {
               </p>
             </div>
           )}
+
+          <div className="sect-lbl" style={{ marginTop: 22 }}>Backup &amp; Wiederherstellung</div>
+          <div className="backup-actions">
+            <button className="btn btn-ghost" onClick={() => setBackupMode('export')}>
+              Backup exportieren
+            </button>
+            <button className="btn btn-ghost" onClick={() => setBackupMode('import')}>
+              Wiederherstellen
+            </button>
+          </div>
+          <div className="info-note" style={{ textAlign: 'left' }}>
+            <span className="g">
+              <IconInfo />
+            </span>
+            <p>
+              Verschlüsseltes Backup deiner Identität als Datei — für Gerätewechsel/Recovery. Braucht eine
+              <b> eigene Passphrase</b> und fragt vorher die Tresor-Passphrase erneut ab.
+            </p>
+          </div>
+
+          {backupMode && <BackupModal mode={backupMode} dek={dek} onClose={() => setBackupMode(null)} />}
         </div>
       </div>
     );

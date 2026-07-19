@@ -89,6 +89,9 @@ async function deserialize(bytes: Bytes): Promise<PreKeyState> {
   };
 }
 
+// Exposed for the encrypted backup/export (Recovery Key).
+export { serialize as serializePreKeys, deserialize as deserializePreKeys };
+
 export async function loadOrCreatePreKeys(dek: CryptoKey, identity: IdentityKeys): Promise<PreKeyState> {
   const rec = await loadRecord(KEY);
   if (rec) {

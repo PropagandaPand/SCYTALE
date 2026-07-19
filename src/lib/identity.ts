@@ -38,3 +38,8 @@ export async function loadOrCreateIdentity(dek: CryptoKey): Promise<IdentityKeys
 export function fingerprintOf(id: IdentityKeys): Promise<string> {
   return identityFingerprint(id.master.publicKey, id.master.publicKey);
 }
+
+/** Persist an identity (used by backup restore to install the recovered one). */
+export async function saveIdentity(dek: CryptoKey, id: IdentityKeys): Promise<void> {
+  await saveRecord(KEY, await seal(dek, await serializeIdentity(id), AAD));
+}

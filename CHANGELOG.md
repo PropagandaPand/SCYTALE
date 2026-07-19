@@ -6,6 +6,28 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Kontakt-Nicknames + UI/UX-Politur
+
+Design-Philosophie (Emil Kowalski) über die ganze App gezogen — inspiriert vom
+AZIS-Projekt.
+
+#### Hinzugefügt
+- **Nicknames**: jeder Kontakt kann lokal benannt werden (im Tresor
+  verschlüsselt); Name wird in Kontaktliste und Chat-Header statt der Safety
+  Number angezeigt, umbenennbar über den Namen im Chat-Header.
+- **CipherVault-Lockscreen** (`CipherVault.tsx`): animiertes Schloss + scrollende
+  Chiffre-Tracks als State-Machine — das Schloss reagiert auf die Krypta
+  (`busy`/`deny`/`locked`/`unlocking`/`tamper`/`fatal`): KDF läuft → Tracks
+  beschleunigen; falsche Passphrase → rotes Shake; Unlock → Bügel öffnet + Burst;
+  Device-Mismatch → amber; Self-Test-Fail → roter Jitter.
+
+#### Geändert
+- **Motion-System**: custom Easing-Curves (`--ease-out`/`--ease-in-out`),
+  Buttons mit `:active`-Scale-Feedback, Panel-Stagger-Entrances, Nachrichten-
+  Enter-Animation, pulsierende Verbindungs-Dots, Fokus-Glow — nur `transform`/
+  `opacity`, alles `<300ms`, `prefers-reduced-motion` respektiert.
+- Kontaktliste & Chat-Header neu gestaltet (Name + kleine Fingerprint-Zeile).
+
 ### Krypto-Härtung: Device-Binding + Lockout + Self-Test
 
 Inspiriert von der At-Rest-Krypto des AZIS-Projekts, neu in SCYTALEs Architektur.

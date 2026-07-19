@@ -32,6 +32,7 @@ interface ChatMessage {
 }
 
 const shortFp = (fp: string) => (fp ? fp.split(' ').slice(0, 3).join(' ') + ' …' : '…');
+const displayName = (c: Contact) => c.nickname?.trim() || shortFp(c.peerFingerprint);
 
 // Accept either a raw bundle token or a full deep-link containing #add=<token>.
 function extractToken(input: string): string {
@@ -59,6 +60,8 @@ export function Messenger({ dek, onLock }: Props) {
   const [msgInput, setMsgInput] = useState('');
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [renameInput, setRenameInput] = useState('');
 
   function connectRelay(c: Contact) {
     if (relaysRef.current.has(c.roomId)) return;
@@ -166,6 +169,10 @@ export function Messenger({ dek, onLock }: Props) {
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, activeRoom]);
 
+  useEffect(() => {
+    setRenaming(false);
+  }, [activeRoom]);
+
   async function onSend() {
     setError('');
     const text = msgInput.trim();
@@ -187,6 +194,22 @@ export function Messenger({ dek, onLock }: Props) {
     } catch (e) {
       setError('Senden fehlgeschlagen: ' + (e as Error).message);
     }
+  }
+
+  function startRename() {
+    const c = contactsRef.current.find((x) => x.roomId === activeRoom);
+    setRenameInput(c?.nickname ?? '');
+    setRenaming(true);
+  }
+
+  async function saveNickname() {
+    const c = contactsRef.current.find((x) => x.roomId === activeRoom);
+    if (!c) return;
+    const name = renameInput.trim();
+    c.nickname = name || undefined;
+    setRenaming(false);
+    await saveContact(dek, c);
+    bump();
   }
 
   async function copyLink() {
@@ -255,8 +278,13 @@ export function Messenger({ dek, onLock }: Props) {
               {contacts.map((c) => (
                 <button key={c.roomId} className="contact" onClick={() => setActiveRoom(c.roomId)}>
                   <span className={`dot ${statuses[c.roomId] ?? 'closed'}`} />
-                  <span className="mono-out">{shortFp(c.peerFingerprint)}</span>
-                  <span className="badge">{c.ratchet ? 'aktiv' : 'neu'}</span>
+                  <span className="who">
+                    <span className="name">{displayName(c)}</span>
+                    <span className="sub-fp">{shortFp(c.peerFingerprint)}</span>
+                  </span>
+                  <span className={`badge ${c.ratchet ? 'active' : ''}`}>
+                    {c.ratchet ? 'aktiv' : 'neu'}
+                  </span>
                 </button>
               ))}
             </div>
@@ -266,9 +294,29 @@ export function Messenger({ dek, onLock }: Props) {
         <div className="panel chat">
           <div className="chat-head">
             <button className="ghost slim" onClick={() => setActiveRoom(null)}>
-              ← Zurück
+              ←
             </button>
-            <span className="mono-out">{shortFp(activeContact.peerFingerprint)}</span>
+            {renaming ? (
+              <div className="rename-row">
+                <input
+                  autoFocus
+                  value={renameInput}
+                  placeholder="Name für diesen Kontakt…"
+                  onChange={(e) => setRenameInput(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && void saveNickname()}
+                />
+                <button className="slim" onClick={() => void saveNickname()}>
+                  ✓
+                </button>
+              </div>
+            ) : (
+              <div className="peer">
+                <button className="peer-name" onClick={startRename} title="Umbenennen">
+                  {displayName(activeContact)} <span className="pencil">✎</span>
+                </button>
+                <span className="peer-fp">{shortFp(activeContact.peerFingerprint)}</span>
+              </div>
+            )}
             <span className={`dot ${statuses[activeContact.roomId] ?? 'closed'}`} />
           </div>
           <div id="msglist" className="msglist">

@@ -11,6 +11,7 @@ import {
 import { cryptoSelfTest } from './lib/selftest';
 import { Messenger } from './Messenger';
 import { ReloadPrompt } from './ReloadPrompt';
+import { CipherVault } from './CipherVault';
 
 type Phase = 'loading' | 'create' | 'unlock' | 'open';
 type StatusKind = '' | 'ok' | 'err';
@@ -160,7 +161,7 @@ export function App() {
       <h1>SCYTALE</h1>
       <p className="sub">Ende-zu-Ende verschlüsselt · Client-Side</p>
 
-      {phase === 'loading' && lockState !== 'fatal' && <div className="panel">Lade Tresor…</div>}
+      <CipherVault state={lockState} />
 
       {lockState === 'fatal' ? (
         <div className="panel">

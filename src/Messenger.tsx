@@ -115,7 +115,7 @@ interface Props {
   onLock: () => void;
 }
 
-type View = 'list' | 'chat' | 'add' | 'verify' | 'profile' | 'newgroup' | 'gmanage';
+type View = 'list' | 'chat' | 'add' | 'verify' | 'contact' | 'profile' | 'newgroup' | 'gmanage';
 
 const shortFp = (fp: string) => (fp ? fp.split(' ').slice(0, 3).join(' ') + ' …' : '…');
 const displayName = (c: Contact) =>
@@ -198,6 +198,7 @@ export function Messenger({ dek, onLock }: Props) {
   const [groupSel, setGroupSel] = useState<Set<string>>(new Set());
   const [safetyNumber, setSafetyNumber] = useState('');
   const [safetyQr, setSafetyQr] = useState('');
+  const [zoomImg, setZoomImg] = useState<string | null>(null); // full-screen image viewer
 
   useEffect(() => {
     activeRoomRef.current = activeRoom;
@@ -915,6 +916,12 @@ export function Messenger({ dek, onLock }: Props) {
     }
   }
 
+  function openContact() {
+    setChatMenu(false);
+    setRenaming(false);
+    setView('contact');
+  }
+
   async function openVerify() {
     const c = contactsRef.current.find((x) => x.roomId === activeRoom);
     const id = identityRef.current;
@@ -932,6 +939,16 @@ export function Messenger({ dek, onLock }: Props) {
     await saveContact(dek, c);
     bump();
   }
+
+  // Full-screen image viewer (avatars, later chat images). Tap anywhere closes.
+  const lightbox = zoomImg ? (
+    <div className="lightbox" onClick={() => setZoomImg(null)} role="dialog" aria-label="Bild">
+      <img src={zoomImg} alt="" />
+      <button className="lightbox-close" onClick={() => setZoomImg(null)} aria-label="Schließen">
+        ×
+      </button>
+    </div>
+  ) : null;
 
   const contacts = contactsRef.current;
   const visibleContacts = contacts.filter((c) => !c.hidden);
@@ -1120,13 +1137,15 @@ export function Messenger({ dek, onLock }: Props) {
           <button className="chat-back" onClick={() => setView('list')}>
             <IconBack />
           </button>
-          {activeContact.peerAvatarB64 ? (
-            <img className="avatar-img sm" src={avatarSrc(activeContact.peerAvatarB64)} alt="" />
-          ) : (
-            <div className="avatar sm">
-              <Identicon seed={activeContact.roomId} />
-            </div>
-          )}
+          <button className="chat-avatar-btn" onClick={openContact} aria-label="Kontaktinfo">
+            {activeContact.peerAvatarB64 ? (
+              <img className="avatar-img sm" src={avatarSrc(activeContact.peerAvatarB64)} alt="" />
+            ) : (
+              <div className="avatar sm">
+                <Identicon seed={activeContact.roomId} />
+              </div>
+            )}
+          </button>
           {renaming ? (
             <div className="rename-row">
               <input
@@ -1200,6 +1219,7 @@ export function Messenger({ dek, onLock }: Props) {
                     className="bubble-img"
                     src={`data:${m.file.mime};base64,${m.file.dataB64}`}
                     alt={m.file.name}
+                    onClick={() => setZoomImg(`data:${m.file!.mime};base64,${m.file!.dataB64}`)}
                   />
                 ) : m.file.mime.startsWith('audio/') ? (
                   <AudioPlayer dataB64={m.file.dataB64} mime={m.file.mime} />
@@ -1223,6 +1243,7 @@ export function Messenger({ dek, onLock }: Props) {
         {error && <div className="err-note">{error}</div>}
 
         {composerEl}
+        {lightbox}
       </div>
     );
   }
@@ -1421,6 +1442,101 @@ export function Messenger({ dek, onLock }: Props) {
           )}
           <p className="verify-foot">Stimmen die Zahlen überein, ist die Leitung frei von Man-in-the-Middle.</p>
         </div>
+      </div>
+    );
+  }
+
+  // ── Contact detail ────────────────────────────────────────────────
+  if (view === 'contact' && activeContact) {
+    const c = activeContact;
+    const verified = !!c.verified;
+    const hasAvatar = !!c.peerAvatarB64;
+    return (
+      <div className="subview">
+        <div className="subhead">
+          <button className="back" onClick={() => setView('chat')}>
+            <IconBack />
+          </button>
+          <div className="h">Kontakt</div>
+        </div>
+        <div className="contact-body">
+          <button
+            className="contact-avatar"
+            onClick={() => hasAvatar && setZoomImg(avatarSrc(c.peerAvatarB64!))}
+            aria-label={hasAvatar ? 'Profilbild groß ansehen' : undefined}
+          >
+            {hasAvatar ? (
+              <img src={avatarSrc(c.peerAvatarB64!)} alt="Profilbild" />
+            ) : (
+              <div className="contact-identicon">
+                <Identicon seed={c.roomId} />
+              </div>
+            )}
+          </button>
+
+          <div className="contact-name">{displayName(c)}</div>
+          <button
+            className="contact-verify-chip"
+            style={{ color: verified ? 'var(--verified)' : 'var(--muted)' }}
+            onClick={() => void openVerify()}
+          >
+            <IconLock size={12} />
+            {verified ? 'verifiziert' : 'nicht verifiziert · zum Prüfen antippen'}
+          </button>
+
+          <div className="contact-fields">
+            {renaming ? (
+              <div className="contact-field">
+                <span className="cf-label">Dein Name für den Kontakt</span>
+                <div className="rename-row">
+                  <input
+                    autoFocus
+                    value={renameInput}
+                    placeholder="Nickname…"
+                    onChange={(e) => setRenameInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && void saveNickname()}
+                  />
+                  <button className="btn btn-primary" onClick={() => void saveNickname()}>
+                    ✓
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button className="contact-field tappable" onClick={startRename}>
+                <span className="cf-label">
+                  Dein Name für den Kontakt <span className="pencil">✎</span>
+                </span>
+                <span className="cf-value">{c.nickname?.trim() || <em>nicht gesetzt</em>}</span>
+              </button>
+            )}
+
+            <div className="contact-field">
+              <span className="cf-label">Name, den die Person selbst gesetzt hat</span>
+              <span className="cf-value">{c.peerName?.trim() || <em>keiner</em>}</span>
+            </div>
+
+            <div className="contact-field">
+              <span className="cf-label">Sicherheitsnummer (Fingerprint)</span>
+              <span className="cf-value mono">{c.peerFingerprint}</span>
+            </div>
+          </div>
+
+          <div className="contact-actions">
+            <button
+              className="btn btn-ghost"
+              onClick={() => confirm('Chatverlauf wirklich löschen?') && void clearChatAction(c.roomId)}
+            >
+              Chatverlauf löschen
+            </button>
+            <button
+              className="btn btn-danger"
+              onClick={() => confirm('Kontakt und Chat wirklich löschen?') && void deleteContactAction(c.roomId)}
+            >
+              Kontakt löschen
+            </button>
+          </div>
+        </div>
+        {lightbox}
       </div>
     );
   }

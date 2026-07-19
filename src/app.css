@@ -944,6 +944,7 @@ select {
   max-height: 280px;
   border-radius: 15px;
   object-fit: cover;
+  cursor: pointer;
 }
 .bubble.has-file .meta {
   display: block;
@@ -1382,6 +1383,164 @@ select {
   background: rgba(255, 255, 255, 0.08);
   color: #fff;
   border-color: rgba(255, 255, 255, 0.3);
+}
+
+/* ==== CONTACT DETAIL ================================================= */
+.chat-avatar-btn {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  display: inline-flex;
+  border-radius: 50%;
+}
+.chat-avatar-btn:active {
+  transform: scale(0.94);
+}
+
+.contact-body {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 24px 20px 32px;
+  gap: 12px;
+}
+.contact-avatar {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  width: 132px;
+  height: 132px;
+  border-radius: 50%;
+  overflow: hidden;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.28);
+  transition: transform 0.16s var(--ease-out);
+}
+.contact-avatar:active {
+  transform: scale(0.97);
+}
+.contact-avatar img,
+.contact-identicon {
+  width: 132px;
+  height: 132px;
+  object-fit: cover;
+  display: block;
+}
+.contact-name {
+  font-size: 21px;
+  font-weight: 700;
+  text-align: center;
+  margin-top: 4px;
+}
+.contact-verify-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 4px 8px;
+}
+
+.contact-fields {
+  width: 100%;
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.contact-field {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.contact-field.tappable {
+  cursor: pointer;
+}
+.contact-field.tappable:active {
+  transform: scale(0.99);
+}
+.cf-label {
+  font-size: 12px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.cf-value {
+  font-size: 15px;
+  word-break: break-word;
+}
+.cf-value em {
+  color: var(--muted);
+  font-style: normal;
+}
+.cf-value.mono {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  letter-spacing: 0.02em;
+  line-height: 1.5;
+}
+.contact-actions {
+  width: 100%;
+  margin-top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.btn-ghost {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+}
+.btn-danger {
+  background: transparent;
+  color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
+}
+
+/* ==== LIGHTBOX (full-screen image) ================================== */
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.92);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  animation: scyfade 0.18s ease;
+}
+.lightbox img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--r-md);
+}
+.lightbox-close {
+  position: absolute;
+  top: max(16px, env(safe-area-inset-top));
+  right: 20px;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 0;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
 }
 
 @media (prefers-reduced-motion: reduce) {

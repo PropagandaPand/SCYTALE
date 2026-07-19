@@ -6,6 +6,27 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Feature: Kontakt-Detail-Tab + Bild-Lightbox
+
+- Neuer Kontakt-Tab (Tap auf das Avatar in der Chat-Kopfzeile): großes
+  Profilbild, angezeigter Name, **dein** Nickname (bearbeitbar), der **von der
+  Person selbst gesetzte** Name, Fingerprint und Verifikationsstatus mit
+  Sprung zur Sicherheitsnummer. Chatverlauf/Kontakt löschen ebenfalls hier.
+- Profilbilder und Chat-Bilder per Tap **bildschirmfüllend** ansehbar (Lightbox).
+
+### Fix: iOS-Zuverlässigkeit (tote Sockets nach Hintergrund)
+
+- App-Level Ping/Pong-Heartbeat erkennt von iOS eingefrorene „Zombie"-Sockets
+  (readyState bleibt OPEN, Verbindung ist aber tot) und reconnectet.
+- Rückkehr in den Vordergrund (visibilitychange/pageshow) erzwingt Reconnect
+  aller Relays → Inbox wird zuverlässig neu geleert.
+
+### Fix: Beschädigte Frames nicht mehr als Datei rendern
+
+- `unframeContent` wirft bei unbekanntem Frame-Typ, statt ihn als Datei
+  anzuzeigen — ein verstümmeltes Profil-Update erscheint nicht mehr als
+  Junk-Datei im Chat.
+
 ### Fix: Gleichzeitiger Verbindungsaufbau (Ratchet-Desync)
 
 - Wenn sich **beide** Seiten gegenseitig hinzufügen und **beide zuerst schreiben**,

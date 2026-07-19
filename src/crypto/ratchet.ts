@@ -18,7 +18,7 @@
  */
 import { getSodium } from './sodium';
 import { hkdfSha256, hmacSha256 } from './kdf';
-import { concatBytes } from './codec';
+import { concatBytes, b64encode, b64decode, utf8 } from './codec';
 import type { Bytes } from './types';
 import type { KeyPair } from './identity';
 
@@ -230,4 +230,42 @@ async function dhRatchet(state: RatchetState, header: RatchetHeader): Promise<vo
   step = await kdfRk(state.RK, await dh(state.DHs.privateKey, state.DHr));
   state.RK = step.rk;
   state.CKs = step.ck;
+}
+
+// --- Persistence: the full ratchet state must survive a lock/reload ---
+
+export async function serializeState(s: RatchetState): Promise<Bytes> {
+  const skipped: Record<string, string> = {};
+  for (const [k, v] of s.skipped) skipped[k] = await b64encode(v);
+  const o = {
+    DHs: { pub: await b64encode(s.DHs.publicKey), priv: await b64encode(s.DHs.privateKey) },
+    DHr: s.DHr ? await b64encode(s.DHr) : null,
+    RK: await b64encode(s.RK),
+    CKs: s.CKs ? await b64encode(s.CKs) : null,
+    CKr: s.CKr ? await b64encode(s.CKr) : null,
+    Ns: s.Ns,
+    Nr: s.Nr,
+    PN: s.PN,
+    skipped,
+    AD: await b64encode(s.AD),
+  };
+  return utf8.encode(JSON.stringify(o));
+}
+
+export async function deserializeState(bytes: Bytes): Promise<RatchetState> {
+  const o = JSON.parse(utf8.decode(bytes));
+  const skipped = new Map<string, Bytes>();
+  for (const k of Object.keys(o.skipped)) skipped.set(k, await b64decode(o.skipped[k]));
+  return {
+    DHs: { publicKey: await b64decode(o.DHs.pub), privateKey: await b64decode(o.DHs.priv) },
+    DHr: o.DHr ? await b64decode(o.DHr) : null,
+    RK: await b64decode(o.RK),
+    CKs: o.CKs ? await b64decode(o.CKs) : null,
+    CKr: o.CKr ? await b64decode(o.CKr) : null,
+    Ns: o.Ns,
+    Nr: o.Nr,
+    PN: o.PN,
+    skipped,
+    AD: await b64decode(o.AD),
+  };
 }

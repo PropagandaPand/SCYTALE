@@ -43,18 +43,28 @@ Forward Secrecy und Post-Compromise Security.
 - [x] **Etappe 2** — Identität: Ed25519 + X25519 Keys, im Tresor verschlüsselt, Safety Number
 - [x] **Etappe 3** — Key Exchange: Prekey-Bundles + X3DH (HKDF-SHA256, MITM-Abwehr)
 - [x] **Etappe 4** — Double Ratchet (Forward Secrecy + Post-Compromise Security, Out-of-Order)
-- [ ] **Etappe 5** — Relay + Chat-UI (Ciphertext-only über Durable Object)
+- [x] **Etappe 5** — Relay + Chat-UI: Wire-Format, Session-Persistenz, Live-Chat über Durable Object
 - [ ] **Etappe 6** — PWA-Härtung: Service-Worker-Pinning, SRI, reproducible builds
 - [ ] **Später** — Metadaten-Schutz (Sealed Sender), Gruppen (MLS?)
 
 ## Entwicklung
 
 ```bash
-npm install
-npm run dev        # Vite-Dev-Server (Frontend)
-npm run cf:dev     # wrangler dev (Worker + Durable Object lokal)
+npm install --ignore-scripts   # --ignore-scripts: umgeht miniflares sharp-Build
+npm run dev        # Vite-Dev-Server (nur Frontend, ohne Relay)
+npm run build && npm run cf:dev  # Worker + Durable Object lokal (inkl. Relay)
 npm run deploy     # Build + wrangler deploy
 ```
+
+### Zu zweit testen (1:1-Chat)
+
+1. `npm run build && npm run cf:dev` starten → zwei Browser-Fenster auf die
+   lokale Worker-URL öffnen (oder die App deployen und auf zwei Geräten öffnen).
+2. In jedem Fenster einen Tresor anlegen (eigene Passphrase).
+3. In Fenster A **„Mein Bundle zeigen"** → Token kopieren → in Fenster B unter
+   **„Kontakt hinzufügen"** einfügen. Umgekehrt genauso (beide importieren sich).
+4. Einer schreibt zuerst — er wird X3DH-Initiator, der andere antwortet. Ab da
+   läuft der Double Ratchet.
 
 ## Ehrliche Grenzen
 

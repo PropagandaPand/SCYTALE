@@ -8,3 +8,4 @@ export * from './kdf';
 export * from './prekeys';
 export * from './x3dh';
 export * from './ratchet';
+export * from './wire';

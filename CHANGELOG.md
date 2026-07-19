@@ -6,6 +6,28 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Etappe 5 — Relay + Chat-UI
+
+#### Hinzugefügt
+- **Wire-Format** (`wire.ts`): Envelope-Serialisierung — `prekey` (mit
+  X3DH-Header für den Erstkontakt) und `msg` (normale Ratchet-Nachricht);
+  Prekey-Bundle als Base64-Token für Copy-Paste-Austausch.
+- **Session-Persistenz**: kompletter Ratchet-State + Kontakte verschlüsselt im
+  Tresor (`serializeState`/`deserializeState`, `serializeContact`) — Gespräche
+  überstehen Lock/Reload.
+- **Konversations-Logik** (`session.ts`, transport-/storage-agnostisch):
+  `makeContact`, `sendMessage`, `receiveMessage`; deterministischer Relay-Raum
+  `hash(sortiert(beide Identity-Keys))`; Initiator/Responder-Rollen automatisch.
+- **Relay-Client** (`relay.ts`): WebSocket zum Durable Object, nur Ciphertext,
+  Auto-Reconnect.
+- **Chat-UI** (`Messenger.svelte`): eigenes Bundle teilen, Kontakt per Token
+  hinzufügen, Live-1:1-Chat mit Nachrichtenliste und Verbindungsstatus;
+  `App.svelte` auf reinen Auth-Screen reduziert.
+- Verifiziert gegen echten kompilierten Code: voller Zwei-Parteien-Ablauf über
+  Wire-Envelopes **mit Serialisierungs-Round-Trip nach jeder Nachricht**
+  (Persistenz), inkl. Out-of-Order. Worker + Durable Object via
+  `wrangler --dry-run` validiert.
+
 ### Etappe 4 — Double Ratchet
 
 #### Hinzugefügt

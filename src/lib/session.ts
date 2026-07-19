@@ -214,6 +214,11 @@ function unframeContent(bytes: Bytes): MessageContent {
   if (bytes[0] === 5) return { kind: 'gremove', groupId: utf8.decode(bytes.slice(1)) };
   if (bytes[0] === 6) return { kind: 'gleave', groupId: utf8.decode(bytes.slice(1)) };
 
+  // Only type 1 is a real file. Anything else is a corrupt/unknown frame — throw
+  // so it's dropped, never rendered as a junk "file" in the chat (e.g. a mangled
+  // profile update must not surface as a downloadable attachment).
+  if (bytes[0] !== 1) throw new Error('Unbekannter Frame-Typ: ' + bytes[0]);
+
   let o = 1;
   const nameLen = dv.getUint16(o);
   o += 2;

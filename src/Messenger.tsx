@@ -376,7 +376,20 @@ export function Messenger({ dek, onLock }: Props) {
       }
     })();
 
+    // iOS freezes PWAs in the background and silently kills their sockets. When
+    // we come back to the foreground, force every relay to reconnect so the
+    // inbox re-drains — otherwise the app looks "connected" but receives nothing.
+    const onForeground = () => {
+      if (document.visibilityState === 'visible') {
+        for (const r of relaysRef.current.values()) r.reconnect();
+      }
+    };
+    document.addEventListener('visibilitychange', onForeground);
+    window.addEventListener('pageshow', onForeground);
+
     return () => {
+      document.removeEventListener('visibilitychange', onForeground);
+      window.removeEventListener('pageshow', onForeground);
       for (const r of relaysRef.current.values()) r.close();
       relaysRef.current.clear();
     };

@@ -79,6 +79,15 @@ export class RelayRoom extends DurableObject<Env> {
     const att = (ws.deserializeAttachment() ?? {}) as Att;
 
     switch (m.t) {
+      case 'ping': {
+        // App-level heartbeat: lets the client detect a dead (iOS-frozen) socket.
+        try {
+          ws.send(JSON.stringify({ t: 'pong' }));
+        } catch {
+          /* going away */
+        }
+        return;
+      }
       case 'hello': {
         const nonce = b64e(crypto.getRandomValues(new Uint8Array(24)));
         ws.serializeAttachment({ ...att, nonce } satisfies Att);

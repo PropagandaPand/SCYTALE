@@ -6,6 +6,20 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### QR-Scanner in der App
+
+#### Hinzugefügt
+- **In-App-QR-Scanner** (`QrScanner.tsx`, `jsQR` lazy-geladen): öffnet die
+  Rückkamera, dekodiert Frames per Canvas, importiert bei Treffer den Kontakt
+  (`addBundle`) — kein Umweg mehr über die native Kamera-App. Rahmen-Overlay +
+  Fehlerbehandlung (Zugriff verweigert / keine Kamera).
+- Button „QR-Code scannen" in der Verbinden-Ansicht.
+
+#### Geändert
+- **Permissions-Policy** im Worker: `camera=(self)` (vorher `camera=()`) — nur
+  same-origin, alles andere bleibt gesperrt. getUserMedia braucht Secure Context
+  (https/localhost), auf `workers.dev` gegeben.
+
 ### Einseitiges Onboarding (Inbox-Modell)
 
 Bisher mussten **beide** ihren Code austauschen, damit Nachrichten durchgehen.

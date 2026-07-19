@@ -934,6 +934,81 @@ body {
   font-size: 0.8rem;
 }
 
+/* ==== QR scanner ===================================================== */
+.scan-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.or-tiny {
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--faint);
+  margin: 11px 0;
+}
+.scanner {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: #000;
+  animation: scyfade 0.2s ease;
+}
+.scanner-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.scanner-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 24px;
+  pointer-events: none;
+}
+.scanner-frame {
+  position: relative;
+  width: min(72vw, 300px);
+  aspect-ratio: 1;
+}
+.scanner-frame .c {
+  position: absolute;
+  width: 30px;
+  height: 30px;
+  border: 3px solid #fff;
+}
+.scanner-frame .c.tl { top: 0; left: 0; border-right: 0; border-bottom: 0; border-top-left-radius: 8px; }
+.scanner-frame .c.tr { top: 0; right: 0; border-left: 0; border-bottom: 0; border-top-right-radius: 8px; }
+.scanner-frame .c.bl { bottom: 0; left: 0; border-right: 0; border-top: 0; border-bottom-left-radius: 8px; }
+.scanner-frame .c.br { bottom: 0; right: 0; border-left: 0; border-top: 0; border-bottom-right-radius: 8px; }
+.scanner-hint {
+  color: #fff;
+  font-size: 13px;
+  text-align: center;
+  background: rgba(0, 0, 0, 0.55);
+  padding: 8px 14px;
+  border-radius: 999px;
+  max-width: 90%;
+}
+.scanner-close {
+  position: absolute;
+  bottom: calc(24px + env(safe-area-inset-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  width: auto;
+  padding: 12px 28px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

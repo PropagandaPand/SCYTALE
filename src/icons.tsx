@@ -78,6 +78,21 @@ export function IconDoubleCheck({ size = 13 }: { size?: number }) {
   );
 }
 
+export function IconCamera({ size = 17 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 20 18" aria-hidden="true">
+      <path
+        d="M6.5 3 5.3 5H2.5A1.5 1.5 0 0 0 1 6.5v8A1.5 1.5 0 0 0 2.5 16h15a1.5 1.5 0 0 0 1.5-1.5v-8A1.5 1.5 0 0 0 17.5 5h-2.8L13.5 3h-7Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+      <circle cx="10" cy="10" r="3.2" fill="none" stroke="currentColor" strokeWidth="1.4" />
+    </svg>
+  );
+}
+
 export function IconInfo({ size = 16 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">

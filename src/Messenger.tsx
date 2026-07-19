@@ -30,7 +30,8 @@ import { loadMessages, saveMessages, type ChatMessage } from './lib/messages';
 import { RelayClient, type RelayStatus } from './lib/relay';
 import { makeQr } from './lib/qr';
 import { Identicon } from './Identicon';
-import { IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo } from './icons';
+import { QrScanner } from './QrScanner';
+import { IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera } from './icons';
 
 interface Props {
   dek: CryptoKey;
@@ -92,6 +93,7 @@ export function Messenger({ dek, onLock }: Props) {
   const [copied, setCopied] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameInput, setRenameInput] = useState('');
+  const [scanning, setScanning] = useState(false);
   const [safetyNumber, setSafetyNumber] = useState('');
   const [safetyQr, setSafetyQr] = useState('');
 
@@ -527,6 +529,10 @@ export function Messenger({ dek, onLock }: Props) {
 
           <div className="sect-lbl">Kontakt hinzufügen</div>
           <div className="card pad16">
+            <button className="btn btn-primary scan-btn" onClick={() => setScanning(true)}>
+              <IconCamera /> QR-Code scannen
+            </button>
+            <div className="or-tiny">oder Link / Token einfügen</div>
             <textarea
               className="paste-box"
               placeholder="scy://add?… — Link oder Bundle-Token einfügen"
@@ -539,6 +545,16 @@ export function Messenger({ dek, onLock }: Props) {
           </div>
 
           {error && <div className="err-note">{error}</div>}
+
+          {scanning && (
+            <QrScanner
+              onResult={(text) => {
+                setScanning(false);
+                void addBundle(text);
+              }}
+              onClose={() => setScanning(false)}
+            />
+          )}
 
           <div className="info-note">
             <span className="g">

@@ -6,6 +6,19 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Etappe 2 — Identität
+
+#### Hinzugefügt
+- Langlebige Geräte-Identität: **Ed25519**-Keypair (Signieren) + **X25519**-Keypair
+  (Diffie-Hellman), via libsodium (`libsodium-wrappers-sumo`).
+- Private Schlüssel werden **im Tresor verschlüsselt** (DEK/AES-256-GCM) abgelegt;
+  Erzeugung automatisch beim ersten Start.
+- **Safety Number**: BLAKE2b-256 über die öffentlichen Schlüssel, als sechs
+  5-Ziffern-Gruppen — Basis für spätere MITM-Verifikation.
+- Krypto-Bausteine für X3DH/Double Ratchet vorbereitet: `sign`/`verify`
+  (Ed25519), `dhAgree` (X25519).
+- Krypto-Ordner umstrukturiert (Bytes-Typ, Codec, Sodium-Init ausgelagert).
+
 ### Etappe 1 — Scaffold + At-Rest-Kern
 
 #### Hinzugefügt

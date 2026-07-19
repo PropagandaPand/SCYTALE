@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createVault, unlockVault, seal, open, utf8, WrongPassphraseError } from './crypto';
   import { loadHeader, saveHeader, loadRecord, saveRecord } from './lib/db';
+  import { loadOrCreateIdentity, fingerprintOf } from './lib/identity';
 
   // Etappe-1-Demo: beweist den At-Rest-Kern (Argon2id + KEK/DEK + AES-256-GCM)
   // end-to-end. Der Messaging-Layer (X3DH + Double Ratchet) folgt in Etappe 3–4.
@@ -16,6 +17,8 @@
   let dek: CryptoKey | null = null;
   let note = $state('');
   let sealedPreview = $state('');
+  let fingerprint = $state('');
+  let identityCreated = $state<number | null>(null);
 
   const DEMO_KEY = 'demo-note';
   // AAD bindet Record-Typ + Version an den Auth-Tag (Anti-Swapping).
@@ -41,7 +44,9 @@
       dek = newDek;
       passphrase = '';
       phase = 'open';
-      setStatus('Tresor erstellt & entsperrt.', 'ok');
+      setStatus('Erzeuge Identität…');
+      await loadIdentity();
+      setStatus('Tresor erstellt, Identität erzeugt.', 'ok');
     } catch (e) {
       setStatus('Fehler: ' + (e as Error).message, 'err');
     } finally {
@@ -59,6 +64,7 @@
       passphrase = '';
       phase = 'open';
       setStatus('Entsperrt.', 'ok');
+      await loadIdentity();
       await loadNote();
     } catch (e) {
       if (e instanceof WrongPassphraseError) setStatus('Falsche Passphrase.', 'err');
@@ -85,6 +91,13 @@
     }
   }
 
+  async function loadIdentity() {
+    if (!dek) return;
+    const id = await loadOrCreateIdentity(dek);
+    fingerprint = await fingerprintOf(id);
+    identityCreated = id.createdAt;
+  }
+
   async function loadNote() {
     if (!dek) return;
     const record = await loadRecord(DEMO_KEY);
@@ -103,6 +116,8 @@
     dek = null;
     note = '';
     sealedPreview = '';
+    fingerprint = '';
+    identityCreated = null;
     phase = 'unlock';
     setStatus('Gesperrt. DEK aus dem RAM entfernt.');
   }
@@ -134,6 +149,13 @@
     <div class="status {statusKind}">{status}</div>
   </div>
 {:else if phase === 'open'}
+  <div class="panel">
+    <div class="field-label">Deine Safety Number (Ed25519 + X25519)</div>
+    <div class="fingerprint">{fingerprint || '…'}</div>
+    {#if identityCreated}
+      <div class="mono-out">Identität erzeugt: {new Date(identityCreated).toLocaleString('de-DE')}</div>
+    {/if}
+  </div>
   <div class="panel">
     <label for="note">Geheime Notiz (wird AES-256-GCM verschlüsselt)</label>
     <textarea id="note" bind:value={note}></textarea>

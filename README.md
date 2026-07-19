@@ -40,7 +40,7 @@ Forward Secrecy und Post-Compromise Security.
 ## Roadmap
 
 - [x] **Etappe 1** — Scaffold + At-Rest-Kern (Argon2id / KEK-DEK / AES-256-GCM)
-- [ ] **Etappe 2** — Identität: langlebige Identity-Keys, verschlüsselt im Tresor
+- [x] **Etappe 2** — Identität: Ed25519 + X25519 Keys, im Tresor verschlüsselt, Safety Number
 - [ ] **Etappe 3** — Key Exchange: Prekey-Bundles + X3DH
 - [ ] **Etappe 4** — Double Ratchet (Forward Secrecy pro Nachricht)
 - [ ] **Etappe 5** — Relay + Chat-UI (Ciphertext-only über Durable Object)

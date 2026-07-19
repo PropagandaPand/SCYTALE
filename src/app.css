@@ -37,7 +37,7 @@ h1 { font-size: 1.4rem; letter-spacing: 0.12em; margin: 0 0 2px; }
   margin-bottom: 16px;
 }
 
-label { display: block; font-size: 0.75rem; color: var(--muted); margin-bottom: 6px; }
+label, .field-label { display: block; font-size: 0.75rem; color: var(--muted); margin-bottom: 6px; }
 
 input, textarea {
   width: 100%;
@@ -71,3 +71,14 @@ button:disabled { opacity: 0.5; cursor: wait; }
 .status.err { color: var(--danger); }
 .status.ok { color: var(--accent); }
 .mono-out { font-size: 0.72rem; color: var(--muted); word-break: break-all; margin-top: 10px; }
+.fingerprint {
+  font-size: 1.05rem;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  text-align: center;
+  word-spacing: 0.3em;
+}

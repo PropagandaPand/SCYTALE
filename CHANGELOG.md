@@ -6,6 +6,23 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Etappe 4 — Double Ratchet
+
+#### Hinzugefügt
+- **Double Ratchet** (Signal-Spec) auf dem X3DH-Geheimnis:
+  - **Symmetric-key ratchet** (`KDF_CK` via HMAC-SHA256): frischer Message Key
+    pro Nachricht → **Forward Secrecy**.
+  - **DH ratchet** (`KDF_RK` via HKDF-SHA256): frischer DH-Output pro Roundtrip
+    → **Post-Compromise Security** (Selbstheilung).
+  - Pro Nachricht AES-256-GCM mit aus dem Message Key abgeleitetem Key+IV;
+    Header (`dh || pn || n`) in die AEAD-AD gebunden.
+  - **Skipped Message Keys** für Out-of-Order-/verlorene Nachrichten
+    (begrenzt durch `MAX_SKIP = 1000`).
+- Verifiziert gegen den **echten kompilierten Modul-Code** (esbuild-Bundle):
+  Zwei-Wege-Konversation, 5 Round-Trips, Out-of-Order-Zustellung,
+  Ciphertext-/Header-Tampering abgelehnt, gleicher Klartext → verschiedene
+  Ciphertexte.
+
 ### Etappe 3 — Key Exchange (X3DH)
 
 #### Hinzugefügt

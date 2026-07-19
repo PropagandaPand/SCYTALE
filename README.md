@@ -42,7 +42,7 @@ Forward Secrecy und Post-Compromise Security.
 - [x] **Etappe 1** — Scaffold + At-Rest-Kern (Argon2id / KEK-DEK / AES-256-GCM)
 - [x] **Etappe 2** — Identität: Ed25519 + X25519 Keys, im Tresor verschlüsselt, Safety Number
 - [x] **Etappe 3** — Key Exchange: Prekey-Bundles + X3DH (HKDF-SHA256, MITM-Abwehr)
-- [ ] **Etappe 4** — Double Ratchet (Forward Secrecy pro Nachricht)
+- [x] **Etappe 4** — Double Ratchet (Forward Secrecy + Post-Compromise Security, Out-of-Order)
 - [ ] **Etappe 5** — Relay + Chat-UI (Ciphertext-only über Durable Object)
 - [ ] **Etappe 6** — PWA-Härtung: Service-Worker-Pinning, SRI, reproducible builds
 - [ ] **Später** — Metadaten-Schutz (Sealed Sender), Gruppen (MLS?)

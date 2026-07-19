@@ -7,3 +7,4 @@ export * from './identity';
 export * from './kdf';
 export * from './prekeys';
 export * from './x3dh';
+export * from './ratchet';

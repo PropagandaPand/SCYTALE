@@ -10,3 +10,4 @@ export * from './x3dh';
 export * from './ratchet';
 export * from './wire';
 export * from './seal';
+export * from './sas';

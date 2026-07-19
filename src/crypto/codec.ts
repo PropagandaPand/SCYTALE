@@ -22,3 +22,16 @@ export async function b64decode(str: string): Promise<Bytes> {
   const s = await getSodium();
   return new Uint8Array(s.from_base64(str, s.base64_variants.ORIGINAL));
 }
+
+/** Concatenate byte arrays into a fresh ArrayBuffer-backed view. */
+export function concatBytes(...parts: Uint8Array[]): Bytes {
+  let total = 0;
+  for (const p of parts) total += p.length;
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) {
+    out.set(p, off);
+    off += p.length;
+  }
+  return out;
+}

@@ -4,3 +4,6 @@ export * from './sodium';
 export * from './argon2';
 export * from './vault';
 export * from './identity';
+export * from './kdf';
+export * from './prekeys';
+export * from './x3dh';

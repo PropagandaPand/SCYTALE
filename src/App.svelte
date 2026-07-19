@@ -2,6 +2,7 @@
   import { createVault, unlockVault, seal, open, utf8, WrongPassphraseError } from './crypto';
   import { loadHeader, saveHeader, loadRecord, saveRecord } from './lib/db';
   import { loadOrCreateIdentity, fingerprintOf } from './lib/identity';
+  import { loadOrCreatePreKeys } from './lib/prekeys';
 
   // Etappe-1-Demo: beweist den At-Rest-Kern (Argon2id + KEK/DEK + AES-256-GCM)
   // end-to-end. Der Messaging-Layer (X3DH + Double Ratchet) folgt in Etappe 3–4.
@@ -19,6 +20,7 @@
   let sealedPreview = $state('');
   let fingerprint = $state('');
   let identityCreated = $state<number | null>(null);
+  let prekeyInfo = $state('');
 
   const DEMO_KEY = 'demo-note';
   // AAD bindet Record-Typ + Version an den Auth-Tag (Anti-Swapping).
@@ -96,6 +98,8 @@
     const id = await loadOrCreateIdentity(dek);
     fingerprint = await fingerprintOf(id);
     identityCreated = id.createdAt;
+    const pk = await loadOrCreatePreKeys(dek, id);
+    prekeyInfo = `Signed Prekey #${pk.signedPreKey.id} · ${pk.oneTimePreKeys.length} Einmal-Prekeys`;
   }
 
   async function loadNote() {
@@ -118,6 +122,7 @@
     sealedPreview = '';
     fingerprint = '';
     identityCreated = null;
+    prekeyInfo = '';
     phase = 'unlock';
     setStatus('Gesperrt. DEK aus dem RAM entfernt.');
   }
@@ -154,6 +159,9 @@
     <div class="fingerprint">{fingerprint || '…'}</div>
     {#if identityCreated}
       <div class="mono-out">Identität erzeugt: {new Date(identityCreated).toLocaleString('de-DE')}</div>
+    {/if}
+    {#if prekeyInfo}
+      <div class="mono-out">{prekeyInfo}</div>
     {/if}
   </div>
   <div class="panel">

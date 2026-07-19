@@ -6,6 +6,24 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Etappe 3 — Key Exchange (X3DH)
+
+#### Hinzugefügt
+- **Prekeys**: signierter Prekey (X25519, per Ed25519-Identität signiert) +
+  Batch aus 100 Einmal-Prekeys. Private Hälften im Tresor verschlüsselt,
+  öffentliches Bundle zum Verteilen.
+- **X3DH-Handshake** (Signal-Spec): vier DHs (`DH1..DH4`) → HKDF-SHA256 mit
+  `0xFF`-Präfix und Zero-Salt → gemeinsames Geheimnis, asynchron (Empfänger
+  muss nicht online sein).
+  - Initiator prüft die Signed-Prekey-Signatur → bricht bei Manipulation ab
+    (MITM-Abwehr).
+  - Associated Data (`IK_A || IK_B`) bindet die Identitäten.
+  - HKDF via WebCrypto (nativ, keine zusätzliche WASM-Abhängigkeit).
+- Prekey-Service: Erzeugung/Persistenz, Bundle-Bau, Einmal-Prekey-Verbrauch
+  (nie wiederverwendet).
+- Verifiziert: identisches Secret bei Alice/Bob (mit/ohne OPK), Abbruch bei
+  vertauschtem Prekey, frische Ephemerals → frische Secrets.
+
 ### Etappe 2 — Identität
 
 #### Hinzugefügt

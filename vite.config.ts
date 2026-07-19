@@ -7,9 +7,10 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
-      // 'prompt' (not autoUpdate): a new version never activates silently — the
-      // user must confirm. No unattended code swap on a security-critical app.
-      registerType: 'prompt',
+      // TESTING PHASE: autoUpdate so clients self-update while the wire protocol
+      // is still changing (a stale cached client can't talk to the new relay).
+      // Revert to 'prompt' before release (no unattended code swap).
+      registerType: 'autoUpdate',
       injectRegister: null,
       manifest: {
         name: 'SCYTALE',

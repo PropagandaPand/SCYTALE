@@ -6,6 +6,16 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Nachrichtenverlauf persistent
+
+#### Hinzugefügt
+- **Persistenter Chat-Verlauf** (`lib/messages.ts`): der entschlüsselte Verlauf
+  wird pro Chat mit dem DEK verschlüsselt (AES-256-GCM, AAD an den Raum gebunden)
+  in IndexedDB gespeichert und beim Entsperren geladen. Gespräche überstehen jetzt
+  Logout/Reload — vorher lagen sie nur im RAM.
+- Messenger nutzt einen `messagesRef` als Quelle der Wahrheit; jedes Senden/
+  Empfangen persistiert den Verlauf. Round-Trip + Raum-Bindung verifiziert.
+
 ### Kontakt-Nicknames + UI/UX-Politur
 
 Design-Philosophie (Emil Kowalski) über die ganze App gezogen — inspiriert vom

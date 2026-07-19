@@ -17,18 +17,13 @@ import {
   type PreKeyLookup,
 } from './lib/session';
 import { saveContact, loadContacts } from './lib/store';
+import { loadMessages, saveMessages, type ChatMessage } from './lib/messages';
 import { RelayClient, type RelayStatus } from './lib/relay';
 import { makeQr } from './lib/qr';
 
 interface Props {
   dek: CryptoKey;
   onLock: () => void;
-}
-
-interface ChatMessage {
-  mine: boolean;
-  text: string;
-  ts: number;
 }
 
 const shortFp = (fp: string) => (fp ? fp.split(' ').slice(0, 3).join(' ') + ' …' : '…');
@@ -46,6 +41,7 @@ export function Messenger({ dek, onLock }: Props) {
   const lookupRef = useRef<PreKeyLookup | null>(null);
   const relaysRef = useRef<Map<string, RelayClient>>(new Map());
   const contactsRef = useRef<Contact[]>([]);
+  const messagesRef = useRef<Record<string, ChatMessage[]>>({});
   const initedRef = useRef(false);
 
   const [, bump] = useReducer((x: number) => x + 1, 0);
@@ -62,6 +58,14 @@ export function Messenger({ dek, onLock }: Props) {
   const [copied, setCopied] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameInput, setRenameInput] = useState('');
+
+  const commitMessages = () => setMessages({ ...messagesRef.current });
+
+  async function appendMessage(roomId: string, msg: ChatMessage) {
+    messagesRef.current[roomId] = [...(messagesRef.current[roomId] ?? []), msg];
+    commitMessages();
+    await saveMessages(dek, roomId, messagesRef.current[roomId]);
+  }
 
   function connectRelay(c: Contact) {
     if (relaysRef.current.has(c.roomId)) return;
@@ -82,10 +86,7 @@ export function Messenger({ dek, onLock }: Props) {
     try {
       const wasNew = contact.ratchet === null;
       const text = await receiveMessage(id, contact, bytes, lookup);
-      setMessages((prev) => ({
-        ...prev,
-        [roomId]: [...(prev[roomId] ?? []), { mine: false, text, ts: Date.now() }],
-      }));
+      await appendMessage(roomId, { mine: false, text, ts: Date.now() });
       await saveContact(dek, contact);
       if (wasNew && prekeysRef.current) await savePreKeys(dek, prekeysRef.current);
       bump();
@@ -108,7 +109,8 @@ export function Messenger({ dek, onLock }: Props) {
         return;
       }
       contactsRef.current = [...contactsRef.current, contact];
-      setMessages((prev) => ({ ...prev, [contact.roomId]: [] }));
+      messagesRef.current[contact.roomId] = [];
+      commitMessages();
       await saveContact(dek, contact);
       connectRelay(contact);
       setActiveRoom(contact.roomId);
@@ -141,12 +143,11 @@ export function Messenger({ dek, onLock }: Props) {
 
       const cs = await loadContacts(dek);
       contactsRef.current = cs;
-      const msgInit: Record<string, ChatMessage[]> = {};
       for (const c of cs) {
-        msgInit[c.roomId] = [];
+        messagesRef.current[c.roomId] = await loadMessages(dek, c.roomId);
         connectRelay(c);
       }
-      setMessages(msgInit);
+      commitMessages();
       bump();
 
       // Auto-import a contact from a deep-link (#add=<token>), then clean the URL.
@@ -184,10 +185,7 @@ export function Messenger({ dek, onLock }: Props) {
     try {
       const envelope = await sendMessage(id, contact, text);
       relay.send(envelope);
-      setMessages((prev) => ({
-        ...prev,
-        [activeRoom]: [...(prev[activeRoom] ?? []), { mine: true, text, ts: Date.now() }],
-      }));
+      await appendMessage(activeRoom, { mine: true, text, ts: Date.now() });
       setMsgInput('');
       await saveContact(dek, contact);
       bump();
@@ -320,8 +318,8 @@ export function Messenger({ dek, onLock }: Props) {
             <span className={`dot ${statuses[activeContact.roomId] ?? 'closed'}`} />
           </div>
           <div id="msglist" className="msglist">
-            {(messages[activeContact.roomId] ?? []).map((m) => (
-              <div key={m.ts} className={`msg ${m.mine ? 'mine' : 'theirs'}`}>
+            {(messages[activeContact.roomId] ?? []).map((m, i) => (
+              <div key={`${m.ts}-${i}`} className={`msg ${m.mine ? 'mine' : 'theirs'}`}>
                 {m.text}
               </div>
             ))}

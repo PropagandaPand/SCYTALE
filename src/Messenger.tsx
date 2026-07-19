@@ -8,7 +8,7 @@ import {
   consumeOneTimePreKey,
   type PreKeyState,
 } from './lib/prekeys';
-import { encodeBundle, decodeBundle, type Bytes, type IdentityKeys } from './crypto';
+import { encodeBundle, decodeBundle, pairwiseSafetyNumber, type Bytes, type IdentityKeys } from './crypto';
 import {
   makeContact,
   sendMessage,
@@ -20,20 +20,41 @@ import { saveContact, loadContacts } from './lib/store';
 import { loadMessages, saveMessages, type ChatMessage } from './lib/messages';
 import { RelayClient, type RelayStatus } from './lib/relay';
 import { makeQr } from './lib/qr';
+import { Identicon } from './Identicon';
+import { IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo } from './icons';
 
 interface Props {
   dek: CryptoKey;
   onLock: () => void;
 }
 
+type View = 'list' | 'chat' | 'add' | 'verify';
+
 const shortFp = (fp: string) => (fp ? fp.split(' ').slice(0, 3).join(' ') + ' …' : '…');
 const displayName = (c: Contact) => c.nickname?.trim() || shortFp(c.peerFingerprint);
 
-// Accept either a raw bundle token or a full deep-link containing #add=<token>.
 function extractToken(input: string): string {
   const m = input.match(/[#?&]add=([^&\s]+)/);
   return (m ? m[1] : input).trim();
 }
+
+function fmtListTs(ts: number | undefined): string {
+  if (!ts) return '';
+  const d = new Date(ts);
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) {
+    return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+  }
+  const y = new Date(now);
+  y.setDate(now.getDate() - 1);
+  if (d.toDateString() === y.toDateString()) return 'Gestern';
+  return d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
+}
+
+const fmtClock = (ts: number) => {
+  const d = new Date(ts);
+  return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+};
 
 export function Messenger({ dek, onLock }: Props) {
   const identityRef = useRef<IdentityKeys | null>(null);
@@ -42,22 +63,34 @@ export function Messenger({ dek, onLock }: Props) {
   const relaysRef = useRef<Map<string, RelayClient>>(new Map());
   const contactsRef = useRef<Contact[]>([]);
   const messagesRef = useRef<Record<string, ChatMessage[]>>({});
+  const unreadRef = useRef<Record<string, number>>({});
+  const viewRef = useRef<View>('list');
+  const activeRoomRef = useRef<string | null>(null);
   const initedRef = useRef(false);
 
   const [, bump] = useReducer((x: number) => x + 1, 0);
   const [fingerprint, setFingerprint] = useState('');
   const [shareLink, setShareLink] = useState('');
   const [qrDataUrl, setQrDataUrl] = useState('');
+  const [view, setView] = useState<View>('list');
   const [activeRoom, setActiveRoom] = useState<string | null>(null);
   const [messages, setMessages] = useState<Record<string, ChatMessage[]>>({});
   const [statuses, setStatuses] = useState<Record<string, RelayStatus>>({});
-  const [showShare, setShowShare] = useState(false);
   const [addInput, setAddInput] = useState('');
   const [msgInput, setMsgInput] = useState('');
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameInput, setRenameInput] = useState('');
+  const [safetyNumber, setSafetyNumber] = useState('');
+  const [safetyQr, setSafetyQr] = useState('');
+
+  useEffect(() => {
+    activeRoomRef.current = activeRoom;
+  }, [activeRoom]);
+  useEffect(() => {
+    viewRef.current = view;
+  }, [view]);
 
   const commitMessages = () => setMessages({ ...messagesRef.current });
 
@@ -87,6 +120,9 @@ export function Messenger({ dek, onLock }: Props) {
       const wasNew = contact.ratchet === null;
       const text = await receiveMessage(id, contact, bytes, lookup);
       await appendMessage(roomId, { mine: false, text, ts: Date.now() });
+      if (!(viewRef.current === 'chat' && activeRoomRef.current === roomId)) {
+        unreadRef.current[roomId] = (unreadRef.current[roomId] ?? 0) + 1;
+      }
       await saveContact(dek, contact);
       if (wasNew && prekeysRef.current) await savePreKeys(dek, prekeysRef.current);
       bump();
@@ -104,8 +140,7 @@ export function Messenger({ dek, onLock }: Props) {
       const bundle = await decodeBundle(token);
       const contact = await makeContact(id.dh.publicKey, bundle);
       if (contactsRef.current.some((c) => c.roomId === contact.roomId)) {
-        setActiveRoom(contact.roomId);
-        setError('Kontakt existiert bereits.');
+        openChat(contact.roomId);
         return;
       }
       contactsRef.current = [...contactsRef.current, contact];
@@ -113,9 +148,8 @@ export function Messenger({ dek, onLock }: Props) {
       commitMessages();
       await saveContact(dek, contact);
       connectRelay(contact);
-      setActiveRoom(contact.roomId);
       setAddInput('');
-      bump();
+      openChat(contact.roomId);
     } catch (e) {
       setError('Ungültiges Bundle: ' + (e as Error).message);
     }
@@ -150,7 +184,6 @@ export function Messenger({ dek, onLock }: Props) {
       commitMessages();
       bump();
 
-      // Auto-import a contact from a deep-link (#add=<token>), then clean the URL.
       const hashMatch = location.hash.match(/[#&]add=([^&]+)/);
       if (hashMatch) {
         history.replaceState(null, '', location.pathname + location.search);
@@ -166,13 +199,38 @@ export function Messenger({ dek, onLock }: Props) {
   }, []);
 
   useEffect(() => {
-    const el = document.getElementById('msglist');
+    const el = document.getElementById('msgs');
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, activeRoom]);
+  }, [messages, activeRoom, view]);
 
   useEffect(() => {
     setRenaming(false);
   }, [activeRoom]);
+
+  function openChat(roomId: string) {
+    setError('');
+    setActiveRoom(roomId);
+    activeRoomRef.current = roomId;
+    unreadRef.current[roomId] = 0;
+    setView('chat');
+    bump();
+  }
+
+  function startRename() {
+    const c = contactsRef.current.find((x) => x.roomId === activeRoom);
+    setRenameInput(c?.nickname ?? '');
+    setRenaming(true);
+  }
+
+  async function saveNickname() {
+    const c = contactsRef.current.find((x) => x.roomId === activeRoom);
+    if (!c) return;
+    const name = renameInput.trim();
+    c.nickname = name || undefined;
+    setRenaming(false);
+    await saveContact(dek, c);
+    bump();
+  }
 
   async function onSend() {
     setError('');
@@ -194,152 +252,300 @@ export function Messenger({ dek, onLock }: Props) {
     }
   }
 
-  function startRename() {
-    const c = contactsRef.current.find((x) => x.roomId === activeRoom);
-    setRenameInput(c?.nickname ?? '');
-    setRenaming(true);
-  }
-
-  async function saveNickname() {
-    const c = contactsRef.current.find((x) => x.roomId === activeRoom);
-    if (!c) return;
-    const name = renameInput.trim();
-    c.nickname = name || undefined;
-    setRenaming(false);
-    await saveContact(dek, c);
-    bump();
-  }
-
   async function copyLink() {
     try {
       await navigator.clipboard.writeText(shareLink);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
     } catch {
-      /* clipboard may be blocked; the textarea is selectable anyway */
+      /* clipboard may be blocked; the box is selectable anyway */
     }
+  }
+
+  async function openVerify() {
+    const c = contactsRef.current.find((x) => x.roomId === activeRoom);
+    const id = identityRef.current;
+    setView('verify');
+    if (!c || !id) return;
+    const sn = await pairwiseSafetyNumber(id.sign.publicKey, id.dh.publicKey, c.peerSignPub, c.peerDhPub);
+    setSafetyNumber(sn);
+    makeQr('SCYTALE-SN:' + sn.replace(/ /g, '')).then(setSafetyQr).catch(() => undefined);
+  }
+
+  async function markVerified() {
+    const c = contactsRef.current.find((x) => x.roomId === activeRoom);
+    if (!c) return;
+    c.verified = true;
+    await saveContact(dek, c);
+    bump();
   }
 
   const contacts = contactsRef.current;
   const activeContact = contacts.find((c) => c.roomId === activeRoom) ?? null;
+  const st = (roomId: string) => statuses[roomId] ?? 'closed';
 
-  return (
-    <>
-      <header className="bar">
-        <div>
-          <div className="brand">SCYTALE</div>
-          <div className="mono-out">Ich: {shortFp(fingerprint)}</div>
-        </div>
-        <button className="ghost slim" onClick={onLock}>
-          Sperren
-        </button>
-      </header>
-
-      {error && <div className="status err">{error}</div>}
-
-      {!activeContact ? (
-        <>
-          <div className="panel">
-            <button className="ghost" onClick={() => setShowShare((v) => !v)}>
-              {showShare ? 'Meinen Link verbergen' : 'Mich teilen (QR / Link)'}
-            </button>
-            {showShare && (
-              <>
-                <p className="hint">
-                  Lass dein Gegenüber den QR mit der Handy-Kamera scannen — oder schick den Link.
-                  Ein Tap fügt dich hinzu.
-                </p>
-                {qrDataUrl && (
-                  <img className="qr" src={qrDataUrl} alt="QR-Code deines Kontakt-Links" />
-                )}
-                <textarea readOnly rows={3} className="token" value={shareLink} />
-                <button onClick={copyLink}>{copied ? 'Kopiert ✓' : 'Link kopieren'}</button>
-              </>
-            )}
+  // ── Contact list ──────────────────────────────────────────────────
+  if (view === 'list') {
+    return (
+      <>
+        <div className="list">
+          <div className="list-top">
+            <div className="list-head">
+              <div className="list-brand">
+                <img src="/scytale-logo.png" alt="" />
+                <div>
+                  <div className="t">SCYTALE</div>
+                  <div className="fp">{shortFp(fingerprint)}</div>
+                </div>
+              </div>
+              <div className="icon-btns">
+                <button className="icon-btn" title="Teilen / Kontakt" onClick={() => { setError(''); setView('add'); }}>
+                  <IconPlus />
+                </button>
+                <button className="icon-btn" title="Sperren" onClick={onLock}>
+                  <IconLock size={15} />
+                </button>
+              </div>
+            </div>
+            <div className="search-bar">
+              <span className="g">
+                <IconSearch />
+              </span>
+              Suchen
+            </div>
           </div>
 
-          <div className="panel">
-            <div className="field-label">Kontakt hinzufügen (Link oder Bundle einfügen)</div>
+          <div className="enc-line">
+            <IconShield size={13} />
+            Alle Nachrichten Ende-zu-Ende verschlüsselt
+          </div>
+
+          <div className="conv-scroll">
+            {contacts.length === 0 ? (
+              <div className="list-empty">
+                Noch keine Kontakte.<br />Tippe oben auf <b>+</b>, um dich zu teilen oder jemanden hinzuzufügen.
+              </div>
+            ) : (
+              contacts.map((c) => {
+                const last = messagesRef.current[c.roomId]?.at(-1);
+                const unread = unreadRef.current[c.roomId] ?? 0;
+                return (
+                  <button key={c.roomId} className="conv-row" onClick={() => openChat(c.roomId)}>
+                    <div className="avatar-wrap">
+                      <div className="avatar">
+                        <Identicon seed={c.roomId} />
+                      </div>
+                      <span className={`sdot ${st(c.roomId)}`} />
+                    </div>
+                    <div className="conv-main">
+                      <div className="conv-line1">
+                        <span className="conv-name">{displayName(c)}</span>
+                        {c.verified && (
+                          <span className="verified-badge">
+                            <IconShield size={14} filled />
+                          </span>
+                        )}
+                        <span className="conv-ts">{fmtListTs(last?.ts)}</span>
+                      </div>
+                      <div className="conv-line2">
+                        <span className="conv-last">
+                          {last ? last.text : c.ratchet ? 'Verbunden' : 'Neu — sag Hallo'}
+                        </span>
+                        {unread > 0 && <span className="unread">{unread}</span>}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  // ── Chat ──────────────────────────────────────────────────────────
+  if (view === 'chat' && activeContact) {
+    const msgs = messages[activeContact.roomId] ?? [];
+    const verified = !!activeContact.verified;
+    return (
+      <div className="chat">
+        <div className="chat-top">
+          <button className="chat-back" onClick={() => setView('list')}>
+            <IconBack />
+          </button>
+          <div className="avatar sm">
+            <Identicon seed={activeContact.roomId} />
+          </div>
+          {renaming ? (
+            <div className="rename-row">
+              <input
+                autoFocus
+                value={renameInput}
+                placeholder="Name für diesen Kontakt…"
+                onChange={(e) => setRenameInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && void saveNickname()}
+              />
+              <button className="btn btn-primary" onClick={() => void saveNickname()}>
+                ✓
+              </button>
+            </div>
+          ) : (
+            <div className="chat-peer">
+              <button className="n" onClick={startRename} title="Umbenennen">
+                {displayName(activeContact)} <span className="pencil">✎</span>
+              </button>
+              <button
+                className="verify-line"
+                style={{ color: verified ? 'var(--verified)' : 'var(--muted)' }}
+                onClick={() => void openVerify()}
+              >
+                <IconLock size={10} />
+                {verified ? 'verifiziert' : 'nicht verifiziert · antippen'}
+              </button>
+            </div>
+          )}
+          <span className={`sdot ${st(activeContact.roomId)}`} style={{ position: 'static', border: 0, width: 9, height: 9 }} />
+        </div>
+
+        <div id="msgs" className="msgs">
+          <div className="enc-pill">
+            <span className="g">
+              <IconLock size={10} />
+            </span>
+            Verschlüsselt · nur ihr beide lest mit
+          </div>
+          {msgs.map((m, i) => (
+            <div key={`${m.ts}-${i}`} className={`bubble ${m.mine ? 'mine' : 'theirs'}`}>
+              {m.text}
+              <span className="meta">
+                {fmtClock(m.ts)}
+                {m.mine && <IconDoubleCheck size={13} />}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        {error && <div className="err-note">{error}</div>}
+
+        <div className="composer">
+          <div className="composer-pill">
+            <input
+              value={msgInput}
+              placeholder="Verschlüsselte Nachricht…"
+              onChange={(e) => setMsgInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && void onSend()}
+            />
+          </div>
+          <button className="send-btn" onClick={() => void onSend()}>
+            <IconSend />
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Share / Add ───────────────────────────────────────────────────
+  if (view === 'add') {
+    return (
+      <div className="subview">
+        <div className="subhead">
+          <button className="back" onClick={() => setView('list')}>
+            <IconBack />
+          </button>
+          <div className="h">Verbinden</div>
+        </div>
+        <div className="subbody">
+          <div className="sect-lbl">Mich teilen</div>
+          <div className="card share-card">
+            <div className="qr-card">
+              {qrDataUrl ? <img src={qrDataUrl} alt="QR-Code deines Kontakt-Links" /> : <span className="ph">QR…</span>}
+            </div>
+            <p className="share-hint">
+              Scannen lassen — oder Link teilen.
+              <br />
+              Ein Tap fügt dich hinzu.
+            </p>
+            <div className="link-box">{shareLink}</div>
+            <button className="btn btn-primary" onClick={() => void copyLink()}>
+              {copied ? 'Kopiert ✓' : 'Link kopieren'}
+            </button>
+          </div>
+
+          <div className="divider">
+            <div className="l" />
+            <span>ODER</span>
+            <div className="l" />
+          </div>
+
+          <div className="sect-lbl">Kontakt hinzufügen</div>
+          <div className="card pad16">
             <textarea
-              rows={3}
-              className="token"
-              placeholder="Link oder Bundle-Token des Kontakts…"
+              className="paste-box"
+              placeholder="scy://add?… — Link oder Bundle-Token einfügen"
               value={addInput}
               onChange={(e) => setAddInput(e.target.value)}
             />
-            <button onClick={() => void addBundle(addInput)}>Hinzufügen</button>
+            <button className="btn btn-outline" onClick={() => void addBundle(addInput)}>
+              Hinzufügen
+            </button>
           </div>
 
-          {contacts.length > 0 && (
-            <div className="panel">
-              <div className="field-label">Kontakte</div>
-              {contacts.map((c) => (
-                <button key={c.roomId} className="contact" onClick={() => setActiveRoom(c.roomId)}>
-                  <span className={`dot ${statuses[c.roomId] ?? 'closed'}`} />
-                  <span className="who">
-                    <span className="name">{displayName(c)}</span>
-                    <span className="sub-fp">{shortFp(c.peerFingerprint)}</span>
-                  </span>
-                  <span className={`badge ${c.ratchet ? 'active' : ''}`}>
-                    {c.ratchet ? 'aktiv' : 'neu'}
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
-        </>
-      ) : (
-        <div className="panel chat">
-          <div className="chat-head">
-            <button className="ghost slim" onClick={() => setActiveRoom(null)}>
-              ←
-            </button>
-            {renaming ? (
-              <div className="rename-row">
-                <input
-                  autoFocus
-                  value={renameInput}
-                  placeholder="Name für diesen Kontakt…"
-                  onChange={(e) => setRenameInput(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && void saveNickname()}
-                />
-                <button className="slim" onClick={() => void saveNickname()}>
-                  ✓
-                </button>
-              </div>
-            ) : (
-              <div className="peer">
-                <button className="peer-name" onClick={startRename} title="Umbenennen">
-                  {displayName(activeContact)} <span className="pencil">✎</span>
-                </button>
-                <span className="peer-fp">{shortFp(activeContact.peerFingerprint)}</span>
-              </div>
-            )}
-            <span className={`dot ${statuses[activeContact.roomId] ?? 'closed'}`} />
-          </div>
-          <div id="msglist" className="msglist">
-            {(messages[activeContact.roomId] ?? []).map((m, i) => (
-              <div key={`${m.ts}-${i}`} className={`msg ${m.mine ? 'mine' : 'theirs'}`}>
-                {m.text}
-              </div>
-            ))}
-            {!(messages[activeContact.roomId]?.length) && (
-              <div className="mono-out empty">Noch keine Nachrichten. Sag Hallo — verschlüsselt.</div>
-            )}
-          </div>
-          <div className="composer">
-            <input
-              value={msgInput}
-              placeholder="Nachricht…"
-              onChange={(e) => setMsgInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && onSend()}
-            />
-            <button className="send" onClick={onSend}>
-              ➤
-            </button>
+          {error && <div className="err-note">{error}</div>}
+
+          <div className="info-note">
+            <span className="g">
+              <IconInfo />
+            </span>
+            <p>
+              Enthält <b>nur öffentliche Schlüssel</b>. Über jeden Kanal teilbar — gegen MITM danach die Safety
+              Number vergleichen.
+            </p>
           </div>
         </div>
-      )}
-    </>
-  );
+      </div>
+    );
+  }
+
+  // ── Verify / Safety Number ────────────────────────────────────────
+  if (view === 'verify' && activeContact) {
+    const verified = !!activeContact.verified;
+    const groups = safetyNumber ? safetyNumber.split(' ') : [];
+    return (
+      <div className="subview">
+        <div className="subhead">
+          <button className="back" onClick={() => setView('chat')}>
+            <IconBack />
+          </button>
+          <div className="h">Safety Number</div>
+        </div>
+        <div className="verify-body">
+          <div className="qr-card sm">
+            {safetyQr ? <img src={safetyQr} alt="Safety-Number-QR" /> : <span className="ph">…</span>}
+          </div>
+          <p className="verify-expl">
+            Vergleicht diese Zahl mit <b>{displayName(activeContact)}</b> — persönlich oder über einen anderen Kanal.
+          </p>
+          <div className="sn-grid">
+            {groups.map((g, i) => (
+              <span key={i}>{g}</span>
+            ))}
+          </div>
+          {verified ? (
+            <div className="verified-banner">
+              <IconShield size={17} />
+              Als verifiziert markiert
+            </div>
+          ) : (
+            <button className="btn btn-primary" style={{ height: 50 }} onClick={() => void markVerified()}>
+              Als verifiziert markieren
+            </button>
+          )}
+          <p className="verify-foot">Stimmen die Zahlen überein, ist die Leitung frei von Man-in-the-Middle.</p>
+        </div>
+      </div>
+    );
+  }
+
+  return null;
 }

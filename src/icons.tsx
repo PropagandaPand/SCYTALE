@@ -1,0 +1,88 @@
+/** Inline SVG glyphs (currentColor), copied from the redesign prototype. */
+
+export function IconLock({ size = 15 }: { size?: number }) {
+  return (
+    <svg width={size} height={(size * 17) / 15} viewBox="0 0 15 17" aria-hidden="true">
+      <rect x="1" y="7" width="13" height="9" rx="2" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M4 7V4.5a3.5 3.5 0 0 1 7 0V7" fill="none" stroke="currentColor" strokeWidth="1.4" />
+    </svg>
+  );
+}
+
+export function IconShield({ size = 13, filled = false }: { size?: number; filled?: boolean }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 15 15" aria-hidden="true">
+      {filled && (
+        <path
+          d="M7.5 1 2 3.4v3.3c0 3.3 2.3 6.3 5.5 7.3 3.2-1 5.5-4 5.5-7.3V3.4L7.5 1Z"
+          fill="currentColor"
+          opacity=".16"
+        />
+      )}
+      <path
+        d="M7.5 1 2 3.4v3.3c0 3.3 2.3 6.3 5.5 7.3 3.2-1 5.5-4 5.5-7.3V3.4L7.5 1Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+      />
+      <path
+        d="m5.2 7.4 1.7 1.7 3-3.4"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+export function IconSearch({ size = 15 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 15 15" aria-hidden="true">
+      <circle cx="6.5" cy="6.5" r="5" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      <path d="m10.5 10.5 3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export function IconBack({ size = 11 }: { size?: number }) {
+  return (
+    <svg width={size} height={(size * 19) / 11} viewBox="0 0 11 19" aria-hidden="true">
+      <path d="M9.5 1 1.5 9.5l8 8.5" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+export function IconPlus({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden="true">
+      <path d="M9 3v12M3 9h12" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export function IconSend({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden="true">
+      <path d="M2 9 16 2.5 11 16l-2.5-5L2 9Z" fill="currentColor" stroke="currentColor" strokeWidth="1" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+export function IconDoubleCheck({ size = 13 }: { size?: number }) {
+  return (
+    <svg width={size} height={(size * 9) / 13} viewBox="0 0 15 9" aria-hidden="true">
+      <path d="m1 5 2.5 2.5L8 2M6.5 5 9 7.5 14 1.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+export function IconInfo({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
+      <circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M8 4.5v4.5M8 11h.01" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+}

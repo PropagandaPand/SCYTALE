@@ -36,6 +36,7 @@ export interface Contact {
   peerDhPub: Bytes;
   peerFingerprint: string;
   nickname?: string; // user-chosen local name for this peer
+  verified?: boolean; // local flag: safety number compared out-of-band
   bundle: PreKeyBundle; // needed to run X3DH as initiator
   ratchet: RatchetState | null; // null until the session is established
   pendingHeader: InitialMessageHeader | null; // initiator attaches until first reply arrives
@@ -125,6 +126,7 @@ interface ContactWire {
   peerDhPub: string;
   peerFingerprint: string;
   nickname: string | null;
+  verified: boolean;
   bundle: string; // bundle token
   ratchet: string | null; // base64 of serializeState output
   pendingHeader: unknown | null;
@@ -146,6 +148,7 @@ export async function serializeContact(c: Contact): Promise<Bytes> {
     peerDhPub: await b64(c.peerDhPub),
     peerFingerprint: c.peerFingerprint,
     nickname: c.nickname ?? null,
+    verified: c.verified ?? false,
     bundle: await encodeBundle(c.bundle),
     ratchet: c.ratchet ? await b64(await serializeState(c.ratchet)) : null,
     pendingHeader: c.pendingHeader ? await encodeInitialHeader(c.pendingHeader) : null,
@@ -161,6 +164,7 @@ export async function deserializeContact(bytes: Bytes): Promise<Contact> {
     peerDhPub: await unb64(wire.peerDhPub),
     peerFingerprint: wire.peerFingerprint,
     nickname: wire.nickname ?? undefined,
+    verified: wire.verified ?? false,
     bundle: await decodeBundle(wire.bundle),
     ratchet: wire.ratchet ? await deserializeState(await unb64(wire.ratchet)) : null,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -10,7 +10,7 @@
  * the human-verifiable safety number.
  */
 import { getSodium } from './sodium';
-import { b64encode, b64decode } from './codec';
+import { b64encode, b64decode, concatBytes } from './codec';
 import type { Bytes } from './types';
 
 export interface KeyPair {
@@ -111,3 +111,38 @@ const _enc = new TextEncoder();
 const _dec = new TextDecoder();
 const utf8Encode = (s: string): Bytes => _enc.encode(s);
 const utf8Decode = (b: Bytes): string => _dec.decode(b);
+
+function cmpBytes(a: Uint8Array, b: Uint8Array): number {
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    if (a[i] !== b[i]) return a[i] - b[i];
+  }
+  return a.length - b.length;
+}
+
+function digits(hash: Uint8Array, groups: number): string {
+  const out: string[] = [];
+  for (let i = 0; i + 5 <= hash.length && out.length < groups; i += 5) {
+    let v = 0;
+    for (let j = 0; j < 5; j++) v = v * 256 + hash[i + j];
+    out.push((v % 100000).toString().padStart(5, '0'));
+  }
+  return out.join(' ');
+}
+
+/**
+ * Pairwise safety number — a 60-digit code both parties derive identically from
+ * their two identities (order-independent). Compared out-of-band to detect a
+ * man-in-the-middle. Rendered as twelve 5-digit groups.
+ */
+export async function pairwiseSafetyNumber(
+  aSign: Bytes,
+  aDh: Bytes,
+  bSign: Bytes,
+  bDh: Bytes,
+): Promise<string> {
+  const s = await getSodium();
+  const a = concatBytes(aSign, aDh);
+  const b = concatBytes(bSign, bDh);
+  const [x, y] = cmpBytes(a, b) <= 0 ? [a, b] : [b, a];
+  return digits(s.crypto_generichash(60, concatBytes(x, y), null), 12);
+}

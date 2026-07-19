@@ -15,14 +15,13 @@ export default defineConfig({
         name: 'SCYTALE',
         short_name: 'SCYTALE',
         description: 'Ende-zu-Ende verschlüsselter Messenger.',
-        theme_color: '#0b0d10',
-        background_color: '#0b0d10',
+        theme_color: '#0b0c0e',
+        background_color: '#0b0c0e',
         display: 'standalone',
         start_url: '/',
         icons: [
-          { src: '/icons/pwa-192.png', sizes: '192x192', type: 'image/png' },
-          { src: '/icons/pwa-512.png', sizes: '512x512', type: 'image/png' },
-          { src: '/icons/pwa-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+          { src: '/scytale-logo.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+          { src: '/scytale-logo.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
         ],
       },
       workbox: {

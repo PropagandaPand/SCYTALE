@@ -11,11 +11,10 @@ import {
 import { cryptoSelfTest } from './lib/selftest';
 import { Messenger } from './Messenger';
 import { ReloadPrompt } from './ReloadPrompt';
-import { CipherVault } from './CipherVault';
+import { IconLock } from './icons';
 
 type Phase = 'loading' | 'create' | 'unlock' | 'open';
 type StatusKind = '' | 'ok' | 'err';
-// Vault state machine — drives the (upcoming) animated lock as well.
 type LockState = 'idle' | 'busy' | 'deny' | 'locked' | 'unlocking' | 'tamper' | 'fatal';
 
 const IDLE_LOCK_MS = 5 * 60 * 1000;
@@ -36,7 +35,6 @@ export function App() {
     setStatusKind(kind);
   }
 
-  // Startup: crypto self-test, then decide create vs unlock.
   useEffect(() => {
     void (async () => {
       if (!(await cryptoSelfTest())) {
@@ -67,47 +65,26 @@ export function App() {
     }, 500);
   }
 
-  async function onCreate() {
-    if (passphrase.length < 8) return say('Mindestens 8 Zeichen.', 'err');
+  async function submit() {
+    if (lockState === 'locked' || busy) return;
+    if (phase === 'create' && passphrase.length < 8) return say('Mindestens 8 Zeichen.', 'err');
     setBusy(true);
     setLockState('busy');
-    say('Leite Schlüssel ab (Argon2id, 256 MiB) & binde an dieses Gerät…');
+    say(phase === 'create' ? 'Erzeuge Tresor (Argon2id · 256 MiB)…' : 'Entsperre (Argon2id)…');
     try {
-      const newDek = await createBoundVault(passphrase);
+      const newDek = phase === 'create' ? await createBoundVault(passphrase) : await unlockBoundVault(passphrase);
       setLockState('unlocking');
       setPassphrase('');
       window.setTimeout(() => {
         setDek(newDek);
         setPhase('open');
         say('');
-      }, 500);
-    } catch (e) {
-      setLockState('deny');
-      say('Fehler: ' + (e as Error).message, 'err');
-      setBusy(false);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function onUnlock() {
-    if (lockState === 'locked') return;
-    setBusy(true);
-    setLockState('busy');
-    say('Entsperre (Argon2id)…');
-    try {
-      const newDek = await unlockBoundVault(passphrase);
-      setLockState('unlocking');
-      setPassphrase('');
-      window.setTimeout(() => {
-        setDek(newDek);
-        setPhase('open');
-        say('');
-      }, 500);
+        setLockState('idle');
+      }, 260);
     } catch (e) {
       if (e instanceof LockedOutError) {
         beginLockoutCountdown(e.remainingMs);
-        say('', 'err');
+        say('');
       } else if (e instanceof DeviceBindingMissingError) {
         setLockState('tamper');
         say(e.message, 'err');
@@ -126,10 +103,9 @@ export function App() {
     setDek(null);
     setPhase('unlock');
     setLockState('idle');
-    say('Gesperrt. DEK aus dem RAM entfernt.');
+    say('Gesperrt.');
   }, []);
 
-  // Auto-lock on inactivity while unlocked.
   useEffect(() => {
     if (phase !== 'open') return;
     let timer = window.setTimeout(lock, IDLE_LOCK_MS);
@@ -155,47 +131,54 @@ export function App() {
   }
 
   const seconds = Math.ceil(lockRemaining / 1000);
+  const showForm = (phase === 'create' || phase === 'unlock') && lockState !== 'fatal';
 
   return (
     <>
-      <h1>SCYTALE</h1>
-      <p className="sub">Ende-zu-Ende verschlüsselt · Client-Side</p>
+      <div className="lock">
+        <img className="lock-logo" src="/scytale-logo.png" alt="SCYTALE" />
+        <div className="lock-brand">SCYTALE</div>
+        <p className="lock-sub">Ende-zu-Ende verschlüsselt · client-side</p>
 
-      <CipherVault state={lockState} />
-
-      {lockState === 'fatal' ? (
-        <div className="panel">
-          <div className="status err">{status}</div>
-        </div>
-      ) : (
-        (phase === 'create' || phase === 'unlock') && (
-          <div className="panel">
-            <label htmlFor="pp">
-              {phase === 'create' ? 'Neue Passphrase (min. 8 Zeichen)' : 'Passphrase'}
-            </label>
-            <input
-              id="pp"
-              type="password"
-              value={passphrase}
-              autoComplete={phase === 'create' ? 'new-password' : 'current-password'}
-              disabled={lockState === 'locked'}
-              onChange={(e) => setPassphrase(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && (phase === 'create' ? onCreate() : onUnlock())}
-            />
+        {showForm && (
+          <div className="lock-form">
+            <div className="field-lbl">Passphrase</div>
+            <div className={`pass-field ${lockState === 'deny' ? 'deny' : ''}`}>
+              <span className="glyph">
+                <IconLock size={15} />
+              </span>
+              <input
+                type="password"
+                value={passphrase}
+                autoComplete={phase === 'create' ? 'new-password' : 'current-password'}
+                placeholder="············"
+                disabled={lockState === 'locked'}
+                onChange={(e) => setPassphrase(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && void submit()}
+              />
+            </div>
             <button
-              onClick={phase === 'create' ? onCreate : onUnlock}
+              className="btn btn-primary btn-tall"
+              onClick={() => void submit()}
               disabled={busy || lockState === 'locked'}
             >
-              {phase === 'create' ? 'Tresor erstellen' : 'Entsperren'}
+              {phase === 'create' ? 'Tresor erstellen' : 'Tresor entsperren'}
             </button>
             {lockState === 'locked' ? (
-              <div className="status err">Gesperrt — noch {seconds}s (zu viele Fehlversuche).</div>
+              <div className="lock-status err">Gesperrt — noch {seconds}s (zu viele Fehlversuche).</div>
             ) : (
-              <div className={`status ${statusKind}`}>{status}</div>
+              <div className={`lock-status ${statusKind}`}>{status}</div>
             )}
           </div>
-        )
-      )}
+        )}
+
+        {lockState === 'fatal' && <div className="lock-status err" style={{ marginTop: 24 }}>{status}</div>}
+
+        <div className="lock-foot">
+          <span className="d" />
+          Argon2id · 256 MiB · non-extractable DEK
+        </div>
+      </div>
       <ReloadPrompt />
     </>
   );

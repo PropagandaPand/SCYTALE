@@ -6,6 +6,31 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### UI-Redesign: „Vertraut" (Signal-artig, ruhig & vertrauenswürdig)
+
+Vollständiger Presentation-Layer-Austausch nach externem Design-Handoff. Krypto,
+Relay und Storage (`src/lib`, `src/crypto`, `worker`) **unverändert** — nur das
+Rendering von `App.tsx`/`Messenger.tsx` und `app.css` neu.
+
+#### Geändert
+- Terminal-/Monospace-Look → **ruhiges, vertrautes Messenger-UI** (Dark, Teal
+  `#12a488`, IBM Plex Sans/Mono **self-hosted** via `@fontsource` → CSP bleibt
+  `default-src 'self'`). Light-Theme-Tokens vorbereitet.
+- **Lockscreen** neu: Logo, Wordmark, Passphrase-Feld mit Schloss-Glyph,
+  Footer-Chip; behält alle Zustände (busy/deny/locked/tamper/fatal).
+- **Chatliste**: Identicon-Avatare + Status-Dot, Alias, Verified-Shield,
+  Zeitstempel, letzte Nachricht, Unread-Pill, E2E-Zeile.
+- **Chat**: Bubbles (mine/theirs, Doppel-Haken), Verschlüsselt-Pill,
+  Pill-Composer, Verify-Affordance im Header.
+
+#### Hinzugefügt
+- **Teilen/Verbinden**-Screen (QR + Link + Bundle-Paste + Honesty-Note).
+- **Safety-Number-Screen**: pairwise 60-stellige Safety Number (12×5 Ziffern,
+  ordnungs-unabhängig, symmetrisch verifiziert) als QR + Grid, lokaler
+  **Verified-Flag** pro Kontakt (verschlüsselt persistiert).
+- Deterministische **Identicons**, IBM-Plex-Fonts, Logo als App-Icon/Favicon/
+  PWA-Manifest.
+
 ### Nachrichtenverlauf persistent
 
 #### Hinzugefügt

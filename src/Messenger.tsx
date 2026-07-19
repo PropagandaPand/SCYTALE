@@ -204,6 +204,9 @@ export function Messenger({ dek, onLock }: Props) {
   const [notifBusy, setNotifBusy] = useState(false);
   const [qrFull, setQrFull] = useState(false); // own QR blown up full-screen for scanning
   const [cropFile, setCropFile] = useState<File | null>(null); // avatar being cropped
+  const [swipeDx, setSwipeDx] = useState(0); // edge-swipe-back drag distance
+  const [swiping, setSwiping] = useState(false);
+  const swipeStart = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     activeRoomRef.current = activeRoom;
@@ -700,6 +703,37 @@ export function Messenger({ dek, onLock }: Props) {
     bump();
   }
 
+  // Edge-swipe back: drag from the left screen edge toward the middle to leave a
+  // chat (iOS-style). Live-follows the finger; past a threshold it goes to the list.
+  function onSwipeDown(e: React.PointerEvent) {
+    if (e.pointerType === 'mouse' || e.clientX > 30) return; // touch/pen, from the edge
+    swipeStart.current = { x: e.clientX, y: e.clientY };
+  }
+  function onSwipeMove(e: React.PointerEvent) {
+    const s = swipeStart.current;
+    if (!s) return;
+    const dx = e.clientX - s.x;
+    const dy = e.clientY - s.y;
+    if (dx <= 0) {
+      setSwipeDx(0);
+      return;
+    }
+    if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 14) {
+      swipeStart.current = null; // vertical intent → let the chat scroll
+      setSwipeDx(0);
+      return;
+    }
+    setSwiping(true);
+    setSwipeDx(Math.min(dx, window.innerWidth));
+  }
+  function onSwipeUp() {
+    const triggered = !!swipeStart.current && swipeDx > 90;
+    swipeStart.current = null;
+    setSwiping(false);
+    setSwipeDx(0);
+    if (triggered) setView('list');
+  }
+
   function startRename() {
     const c = contactsRef.current.find((x) => x.roomId === activeRoom);
     setRenameInput(c?.nickname ?? '');
@@ -1183,7 +1217,17 @@ export function Messenger({ dek, onLock }: Props) {
     const msgs = messages[activeContact.roomId] ?? [];
     const verified = !!activeContact.verified;
     return (
-      <div className="chat">
+      <div
+        className="chat"
+        onPointerDown={onSwipeDown}
+        onPointerMove={onSwipeMove}
+        onPointerUp={onSwipeUp}
+        onPointerCancel={onSwipeUp}
+        style={{
+          transform: swipeDx ? `translateX(${swipeDx}px)` : undefined,
+          transition: swiping ? 'none' : 'transform 0.22s ease',
+        }}
+      >
         <div className="chat-top">
           <button className="chat-back" onClick={() => setView('list')}>
             <IconBack />
@@ -1303,7 +1347,17 @@ export function Messenger({ dek, onLock }: Props) {
   if (view === 'chat' && activeGroupData) {
     const msgs = messages[activeGroupData.id] ?? [];
     return (
-      <div className="chat">
+      <div
+        className="chat"
+        onPointerDown={onSwipeDown}
+        onPointerMove={onSwipeMove}
+        onPointerUp={onSwipeUp}
+        onPointerCancel={onSwipeUp}
+        style={{
+          transform: swipeDx ? `translateX(${swipeDx}px)` : undefined,
+          transition: swiping ? 'none' : 'transform 0.22s ease',
+        }}
+      >
         <div className="chat-top">
           <button className="chat-back" onClick={() => { setActiveGroup(null); setView('list'); }}>
             <IconBack />

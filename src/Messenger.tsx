@@ -286,7 +286,13 @@ export function Messenger({ dek, onLock }: Props) {
       const arr = messagesRef.current[roomId];
       const idx = arr.findIndex((m) => m.mid === mid);
       if (idx >= 0) {
-        if (arr[idx].status === status) return;
+        const cur = arr[idx].status;
+        if (cur === status) return;
+        // INVARIANT: once 'sent' (relay durably has it), always 'sent'. A late
+        // nack/timeout must never downgrade a confirmed delivery — that would
+        // make the checkmark lie in the other direction. Only failed → sent
+        // (recovery after a reconnect flush) is allowed.
+        if (cur === 'sent') return;
         arr[idx] = { ...arr[idx], status };
         void saveMessages(dek, roomId, arr);
         commitMessages();

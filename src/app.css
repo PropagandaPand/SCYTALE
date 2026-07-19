@@ -329,6 +329,18 @@ select {
   font-size: 20px;
   letter-spacing: 0.06em;
 }
+.list-brand .ver {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--muted);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 5px;
+  vertical-align: middle;
+}
 .list-brand .fp {
   font-family: var(--font-mono);
   font-size: 10.5px;

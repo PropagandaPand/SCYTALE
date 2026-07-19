@@ -6,6 +6,12 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Feature: Versionsanzeige im Header
+
+- Neben „SCYTALE" wird der Build-Commit-Hash angezeigt (zur Build-Zeit
+  eingebacken). So sieht man pro Gerät sofort, ob der Service Worker die
+  neueste Version geladen hat — gleicher Hash = gleicher Stand.
+
 ### Feature: Kontakt-Detail-Tab + Bild-Lightbox
 
 - Neuer Kontakt-Tab (Tap auf das Avatar in der Chat-Kopfzeile): großes

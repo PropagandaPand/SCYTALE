@@ -1,9 +1,25 @@
 import { defineConfig } from 'vite';
+import { execSync } from 'node:child_process';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 
+// Build-time version stamp so every device can show which build it's running —
+// makes a stale (un-updated) Service Worker obvious at a glance. Prefer the git
+// short hash (identical across devices once updated); fall back to a timestamp.
+function buildVersion(): string {
+  try {
+    return execSync('git rev-parse --short HEAD').toString().trim();
+  } catch {
+    const d = new Date();
+    return `b${d.toISOString().slice(2, 16).replace(/[-:T]/g, '')}`;
+  }
+}
+
 // https://vite.dev/config/
 export default defineConfig({
+  define: {
+    __APP_VERSION__: JSON.stringify(buildVersion()),
+  },
   plugins: [
     react(),
     VitePWA({

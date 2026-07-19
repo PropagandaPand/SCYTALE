@@ -1012,7 +1012,9 @@ export function Messenger({ dek, onLock }: Props) {
                   <img src="/scytale-icon.svg" alt="" />
                 )}
                 <div>
-                  <div className="t">SCYTALE</div>
+                  <div className="t">
+                    SCYTALE <span className="ver">{__APP_VERSION__}</span>
+                  </div>
                   <div className="fp">{shortFp(fingerprint)}</div>
                 </div>
               </button>

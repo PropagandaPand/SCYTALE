@@ -6,6 +6,20 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### App-Icon: SVG + optimierte Install-Icons
+
+#### Hinzugefügt
+- **`scytale-icon.svg`** — flache Vektor-Version des Logos (Teal-Scytale-
+  Silhouette per potrace getraced, Verlauf, 4,7 KB). Genutzt als Favicon und
+  In-App-Logo (gestochen scharf, skaliert unendlich).
+
+#### Geändert
+- **PWA-Install-Icons** neu generiert: weiße Ecken des Quell-Logos per Floodfill
+  entfernt, echte `pwa-192`/`pwa-512` + **`pwa-maskable-512` mit Safe-Zone** (80 %
+  auf schwarzem Grund) — palette-komprimiert (959 KB → ~50 KB gesamt).
+- **Fonts** auf Latin-Subset reduziert (34 → 6 woff2, 504 → 128 KB) → Precache
+  1460 → 1140 KiB.
+
 ### UI-Redesign: „Vertraut" (Signal-artig, ruhig & vertrauenswürdig)
 
 Vollständiger Presentation-Layer-Austausch nach externem Design-Handoff. Krypto,

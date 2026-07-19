@@ -292,7 +292,7 @@ export function Messenger({ dek, onLock }: Props) {
           <div className="list-top">
             <div className="list-head">
               <div className="list-brand">
-                <img src="/scytale-logo.png" alt="" />
+                <img src="/scytale-icon.svg" alt="" />
                 <div>
                   <div className="t">SCYTALE</div>
                   <div className="fp">{shortFp(fingerprint)}</div>

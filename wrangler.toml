@@ -1,0 +1,19 @@
+name = "scytale"
+main = "worker/index.ts"
+compatibility_date = "2025-06-01"
+
+# Serve the built PWA (dist/) directly from the Worker. Non-asset routes fall
+# through to the Worker's fetch handler (which owns /api/relay).
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+# The relay lives in a Durable Object. SQLite-backed DOs run on the free tier.
+[[durable_objects.bindings]]
+name = "RELAY"
+class_name = "RelayRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelayRoom"]

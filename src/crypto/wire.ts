@@ -24,6 +24,9 @@ interface RatchetMessageWire {
   ct: string;
 }
 interface InitialHeaderWire {
+  mp: string; // masterPub
+  ep: number; // epoch
+  dc: string; // deviceCert
   isp: string;
   idp: string;
   ek: string;
@@ -46,6 +49,9 @@ async function decMsg(o: RatchetMessageWire): Promise<RatchetMessage> {
 
 export async function encodeInitialHeader(h: InitialMessageHeader): Promise<InitialHeaderWire> {
   return {
+    mp: await b64encode(h.masterPub),
+    ep: h.epoch,
+    dc: await b64encode(h.deviceCert),
     isp: await b64encode(h.identitySignPub),
     idp: await b64encode(h.identityDhPub),
     ek: await b64encode(h.ephemeralPub),
@@ -55,6 +61,9 @@ export async function encodeInitialHeader(h: InitialMessageHeader): Promise<Init
 }
 export async function decodeInitialHeader(o: InitialHeaderWire): Promise<InitialMessageHeader> {
   return {
+    masterPub: await b64decode(o.mp),
+    epoch: o.ep,
+    deviceCert: await b64decode(o.dc),
     identitySignPub: await b64decode(o.isp),
     identityDhPub: await b64decode(o.idp),
     ephemeralPub: await b64decode(o.ek),
@@ -86,20 +95,26 @@ export async function decodeEnvelope(bytes: Bytes): Promise<Envelope> {
 // --- Prekey bundle token: compact binary pack, base64url (short, URL-safe) ---
 //
 // Fixed layout (all keys are fixed length):
-//   version(1) | idSignPub(32) | idDhPub(32) | spkId(4) | spkPub(32)
-//     | spkSig(64) | hasOpk(1) | [opkId(4) | opkPub(32)]
-// ~202 bytes -> ~270 base64url chars, roughly half the old JSON token.
+//   version(1) | masterPub(32) | epoch(4) | deviceCert(64)
+//     | idSignPub(32) | idDhPub(32) | spkId(4) | spkPub(32) | spkSig(64)
+//     | hasOpk(1) | [opkId(4) | opkPub(32)]
 
-const BUNDLE_VERSION = 1;
+const BUNDLE_VERSION = 2;
 
 export async function encodeBundle(bundle: PreKeyBundle): Promise<string> {
   const s = await getSodium();
   const hasOpk = bundle.oneTimePreKey ? 1 : 0;
-  const size = 1 + 32 + 32 + 4 + 32 + 64 + 1 + (hasOpk ? 36 : 0);
+  const size = 1 + 32 + 4 + 64 + 32 + 32 + 4 + 32 + 64 + 1 + (hasOpk ? 36 : 0);
   const buf = new Uint8Array(size);
   const view = new DataView(buf.buffer);
   let o = 0;
   buf[o++] = BUNDLE_VERSION;
+  buf.set(bundle.masterPub, o);
+  o += 32;
+  view.setUint32(o, bundle.epoch, false);
+  o += 4;
+  buf.set(bundle.deviceCert, o);
+  o += 64;
   buf.set(bundle.identitySignPub, o);
   o += 32;
   buf.set(bundle.identityDhPub, o);
@@ -125,12 +140,16 @@ export async function decodeBundle(token: string): Promise<PreKeyBundle> {
   const buf = new Uint8Array(s.from_base64(token.trim(), s.base64_variants.URLSAFE_NO_PADDING));
   const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   let o = 0;
-  if (buf[o++] !== BUNDLE_VERSION) throw new Error('Unbekanntes Bundle-Format.');
+  if (buf[o++] !== BUNDLE_VERSION) throw new Error('Unbekanntes Bundle-Format (neue Version nötig).');
   const take = (n: number): Bytes => {
     const r = buf.slice(o, o + n);
     o += n;
     return r;
   };
+  const masterPub = take(32);
+  const epoch = view.getUint32(o, false);
+  o += 4;
+  const deviceCert = take(64);
   const identitySignPub = take(32);
   const identityDhPub = take(32);
   const spkId = view.getUint32(o, false);
@@ -145,6 +164,9 @@ export async function decodeBundle(token: string): Promise<PreKeyBundle> {
     oneTimePreKey = { id: opkId, pub: take(32) };
   }
   return {
+    masterPub,
+    epoch,
+    deviceCert,
     identitySignPub,
     identityDhPub,
     signedPreKey: { id: spkId, pub: spkPub, signature: spkSig },

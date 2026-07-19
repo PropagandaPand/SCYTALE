@@ -13,7 +13,7 @@ import {
   decodeBundle,
   decodeEnvelope,
   openInbound,
-  pairwiseSafetyNumber,
+  masterSafetyNumber,
   identityFingerprint,
   sign,
   type Bytes,
@@ -30,6 +30,7 @@ import {
   sendGroupRemove,
   sendGroupLeave,
   receiveEnvelope,
+  MasterChangedError,
   inboxRoom,
   computeRoomId,
   type Contact,
@@ -335,7 +336,18 @@ export function Messenger({ dek, onLock }: Props) {
       }
 
       const wasNew = contact.ratchet === null;
-      const content = await receiveEnvelope(id, contact, env, lookup);
+      let content;
+      try {
+        content = await receiveEnvelope(id, contact, env, lookup);
+      } catch (e) {
+        if (e instanceof MasterChangedError) {
+          // Hard warning + persist the verified reset, Signal-style. Message dropped.
+          await saveContact(dek, contact);
+          setError(`⚠ Sicherheit: Der Identitätsschlüssel von ${displayName(contact)} hat sich geändert — möglicher MITM. Bitte neu verifizieren.`);
+          bump();
+        }
+        throw e; // drop the message (don't process the unpinned master)
+      }
       if (content.kind === 'profile') {
         contact.peerName = content.name;
         contact.peerAvatarB64 = content.avatar ? bytesToB64(content.avatar) : undefined;
@@ -526,6 +538,10 @@ export function Messenger({ dek, onLock }: Props) {
     if (existing) return existing;
     const contact: Contact = {
       roomId,
+      // Group rosters carry v2 bundles (with the master); fall back to the device
+      // sign key if a legacy member has none (bundle-less members can't be messaged).
+      peerMasterPub: m.bundle?.masterPub ?? m.signPub,
+      peerEpoch: m.bundle?.epoch ?? 1,
       peerSignPub: m.signPub,
       peerDhPub: m.dhPub,
       peerFingerprint: await identityFingerprint(m.signPub, m.dhPub),
@@ -1062,7 +1078,7 @@ export function Messenger({ dek, onLock }: Props) {
     const id = identityRef.current;
     setView('verify');
     if (!c || !id) return;
-    const sn = await pairwiseSafetyNumber(id.sign.publicKey, id.dh.publicKey, c.peerSignPub, c.peerDhPub);
+    const sn = await masterSafetyNumber(id.master.publicKey, c.peerMasterPub);
     setSafetyNumber(sn);
     makeQr('SCYTALE-SN:' + sn.replace(/ /g, '')).then(setSafetyQr).catch(() => undefined);
   }

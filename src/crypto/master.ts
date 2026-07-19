@@ -29,8 +29,9 @@ export interface MasterIdentity {
   epoch: number; // monotonic; starts at 1
 }
 
-/** 8-byte big-endian epoch, so the signed context is unambiguous. */
-function epochBytes(epoch: number): Bytes {
+/** 8-byte big-endian epoch, so the signed context is unambiguous. Also used to
+ *  bind the epoch into the X3DH associated data. */
+export function epochBytes(epoch: number): Bytes {
   const out = new Uint8Array(8);
   let v = BigInt(Math.trunc(epoch));
   for (let i = 7; i >= 0; i--) {

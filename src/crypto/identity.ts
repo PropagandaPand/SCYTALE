@@ -11,6 +11,7 @@
  */
 import { getSodium } from './sodium';
 import { b64encode, b64decode, concatBytes } from './codec';
+import { signDeviceCert } from './master';
 import type { Bytes } from './types';
 
 export interface KeyPair {
@@ -19,8 +20,11 @@ export interface KeyPair {
 }
 
 export interface IdentityKeys {
-  sign: KeyPair; // Ed25519
-  dh: KeyPair; // X25519
+  master: KeyPair; // Ed25519 cross-signing master (the stable user identity)
+  epoch: number; // monotonic; device cert + safety number hang off this
+  deviceCert: Bytes; // master's signature over (epoch, sign.pub, dh.pub)
+  sign: KeyPair; // Ed25519 device
+  dh: KeyPair; // X25519 device
   createdAt: number;
 }
 
@@ -29,13 +33,15 @@ const b = (x: Uint8Array): Bytes => new Uint8Array(x);
 
 export async function generateIdentity(): Promise<IdentityKeys> {
   const s = await getSodium();
+  const master = s.crypto_sign_keypair();
   const sign = s.crypto_sign_keypair();
   const dh = s.crypto_box_keypair();
-  return {
-    sign: { publicKey: b(sign.publicKey), privateKey: b(sign.privateKey) },
-    dh: { publicKey: b(dh.publicKey), privateKey: b(dh.privateKey) },
-    createdAt: Date.now(),
-  };
+  const masterKp = { publicKey: b(master.publicKey), privateKey: b(master.privateKey) };
+  const signKp = { publicKey: b(sign.publicKey), privateKey: b(sign.privateKey) };
+  const dhKp = { publicKey: b(dh.publicKey), privateKey: b(dh.privateKey) };
+  const epoch = 1;
+  const deviceCert = await signDeviceCert(masterKp.privateKey, epoch, signKp.publicKey, dhKp.publicKey);
+  return { master: masterKp, epoch, deviceCert, sign: signKp, dh: dhKp, createdAt: Date.now() };
 }
 
 /** Ed25519 detached signature. */
@@ -58,8 +64,12 @@ export async function dhAgree(privateKey: Bytes, publicKey: Bytes): Promise<Byte
 // --- Persistence (plaintext form is only ever handed to the vault's seal()) ---
 
 interface IdentityWire {
-  v: 1;
+  v: 2;
   createdAt: number;
+  epoch: number;
+  masterPub: string;
+  masterPriv: string;
+  deviceCert: string;
   signPub: string;
   signPriv: string;
   dhPub: string;
@@ -68,8 +78,12 @@ interface IdentityWire {
 
 export async function serializeIdentity(id: IdentityKeys): Promise<Bytes> {
   const wire: IdentityWire = {
-    v: 1,
+    v: 2,
     createdAt: id.createdAt,
+    epoch: id.epoch,
+    masterPub: await b64encode(id.master.publicKey),
+    masterPriv: await b64encode(id.master.privateKey),
+    deviceCert: await b64encode(id.deviceCert),
     signPub: await b64encode(id.sign.publicKey),
     signPriv: await b64encode(id.sign.privateKey),
     dhPub: await b64encode(id.dh.publicKey),
@@ -80,8 +94,15 @@ export async function serializeIdentity(id: IdentityKeys): Promise<Bytes> {
 
 export async function deserializeIdentity(bytes: Bytes): Promise<IdentityKeys> {
   const wire = JSON.parse(utf8Decode(bytes)) as IdentityWire;
+  // v2 introduced the master/cross-signing model. A v1 identity predates it and
+  // is not upgradable in place (its contacts pin device keys, not a master) — a
+  // clean regenerate is expected during the multi-device format break.
+  if (wire.v !== 2) throw new Error('Veraltetes Identitätsformat — Neuaufbau nötig.');
   return {
     createdAt: wire.createdAt,
+    epoch: wire.epoch,
+    master: { publicKey: await b64decode(wire.masterPub), privateKey: await b64decode(wire.masterPriv) },
+    deviceCert: await b64decode(wire.deviceCert),
     sign: { publicKey: await b64decode(wire.signPub), privateKey: await b64decode(wire.signPriv) },
     dh: { publicKey: await b64decode(wire.dhPub), privateKey: await b64decode(wire.dhPriv) },
   };
@@ -144,5 +165,16 @@ export async function pairwiseSafetyNumber(
   const a = concatBytes(aSign, aDh);
   const b = concatBytes(bSign, bDh);
   const [x, y] = cmpBytes(a, b) <= 0 ? [a, b] : [b, a];
+  return digits(s.crypto_generichash(60, concatBytes(x, y), null), 12);
+}
+
+/**
+ * Master safety number — over the two MASTER keys, so it stays stable across a
+ * user's devices (device keys change per device; the master doesn't). This is
+ * the anchor compared out-of-band / via SAS.
+ */
+export async function masterSafetyNumber(aMaster: Bytes, bMaster: Bytes): Promise<string> {
+  const s = await getSodium();
+  const [x, y] = cmpBytes(aMaster, bMaster) <= 0 ? [aMaster, bMaster] : [bMaster, aMaster];
   return digits(s.crypto_generichash(60, concatBytes(x, y), null), 12);
 }

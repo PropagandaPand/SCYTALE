@@ -30,10 +30,15 @@ export interface OneTimePreKey {
   keyPair: KeyPair;
 }
 
-/** Public, server-published bundle. Contains no private keys. */
+/** Public, shared bundle. Contains no private keys. Carries the cross-signing
+ *  master + epoch + device cert so a peer can pin the master and verify that
+ *  this device belongs to it BEFORE using any of its DH material. */
 export interface PreKeyBundle {
-  identitySignPub: Bytes; // Ed25519
-  identityDhPub: Bytes; // X25519
+  masterPub: Bytes; // Ed25519 cross-signing master
+  epoch: number;
+  deviceCert: Bytes; // master sig over (epoch, identitySignPub, identityDhPub)
+  identitySignPub: Bytes; // Ed25519 device
+  identityDhPub: Bytes; // X25519 device
   signedPreKey: { id: number; pub: Bytes; signature: Bytes };
   oneTimePreKey?: { id: number; pub: Bytes };
 }
@@ -62,6 +67,9 @@ export function buildBundle(
   opk?: OneTimePreKey,
 ): PreKeyBundle {
   return {
+    masterPub: identity.master.publicKey,
+    epoch: identity.epoch,
+    deviceCert: identity.deviceCert,
     identitySignPub: identity.sign.publicKey,
     identityDhPub: identity.dh.publicKey,
     signedPreKey: { id: spk.id, pub: spk.keyPair.publicKey, signature: spk.signature },

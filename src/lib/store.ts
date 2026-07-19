@@ -41,7 +41,12 @@ export async function loadContacts(dek: CryptoKey): Promise<Contact[]> {
   const out: Contact[] = [];
   for (const id of ids) {
     const rec = await loadRecord(`contact:${id}`);
-    if (rec) out.push(await deserializeContact(await open(dek, rec, contactAad(id))));
+    if (!rec) continue;
+    try {
+      out.push(await deserializeContact(await open(dek, rec, contactAad(id))));
+    } catch {
+      /* pre-master-format contact from before the multi-device break → skip */
+    }
   }
   return out;
 }

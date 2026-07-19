@@ -16,6 +16,7 @@ import {
   decodeEnvelope,
   sealTo,
   openInbound,
+  verifyDeviceCert,
   encodeBundle,
   decodeBundle,
   encodeInitialHeader,
@@ -36,8 +37,10 @@ import { bytesToB64, b64ToBytes } from './bytes';
 
 export interface Contact {
   roomId: string;
-  peerSignPub: Bytes;
-  peerDhPub: Bytes;
+  peerMasterPub: Bytes; // pinned cross-signing master (the stable identity)
+  peerEpoch: number; // highest master epoch seen for this contact
+  peerSignPub: Bytes; // current device sign key
+  peerDhPub: Bytes; // current device DH key
   peerFingerprint: string;
   nickname?: string; // user-chosen local name for this peer (overrides everything)
   peerName?: string; // display name the peer shared via their profile
@@ -47,6 +50,15 @@ export interface Contact {
   bundle?: PreKeyBundle; // present when WE hold their code (needed to initiate)
   ratchet: RatchetState | null; // null until the session is established
   pendingHeader: InitialMessageHeader | null; // initiator attaches until first reply arrives
+}
+
+/** A pinned contact presented a different master without a valid rotation chain
+ *  — a possible MITM. The message is dropped and the contact drops verified. */
+export class MasterChangedError extends Error {
+  constructor() {
+    super('Master-Schlüssel dieses Kontakts hat sich geändert — möglicher MITM. Neu verifizieren.');
+    this.name = 'MasterChangedError';
+  }
 }
 
 /** Responder-side lookup into the local prekey store. */
@@ -82,30 +94,51 @@ export async function inboxRoom(signPub: Bytes): Promise<string> {
   return hex;
 }
 
-/** Initiator side: we hold their code (bundle). */
+/** Initiator side: we hold their code (bundle). Verify the device cert against
+ *  the master BEFORE trusting any of the bundle's keys, then pin the master. */
 export async function makeContact(myDhPub: Bytes, bundle: PreKeyBundle): Promise<Contact> {
+  const certOk = await verifyDeviceCert(
+    bundle.masterPub,
+    bundle.epoch,
+    bundle.identitySignPub,
+    bundle.identityDhPub,
+    bundle.deviceCert,
+  );
+  if (!certOk) throw new Error('Device-Zertifikat ungültig — Gerät nicht vom Master signiert (möglicher MITM).');
   return {
     roomId: await computeRoomId(myDhPub, bundle.identityDhPub),
+    peerMasterPub: bundle.masterPub,
+    peerEpoch: bundle.epoch,
     peerSignPub: bundle.identitySignPub,
     peerDhPub: bundle.identityDhPub,
-    peerFingerprint: await identityFingerprint(bundle.identitySignPub, bundle.identityDhPub),
+    peerFingerprint: await identityFingerprint(bundle.masterPub, bundle.masterPub),
     bundle,
     ratchet: null,
     pendingHeader: null,
   };
 }
 
-/** Responder side: a stranger who holds OUR code just messaged us. We learn
- *  their identity from the prekey header — no bundle of theirs required. */
+/** Responder side: a stranger who holds OUR code just messaged us. Verify their
+ *  device cert against their master, then TOFU-pin the master. */
 export async function makeContactFromHeader(
   myDhPub: Bytes,
   header: InitialMessageHeader,
 ): Promise<Contact> {
+  const certOk = await verifyDeviceCert(
+    header.masterPub,
+    header.epoch,
+    header.identitySignPub,
+    header.identityDhPub,
+    header.deviceCert,
+  );
+  if (!certOk) throw new Error('Device-Zertifikat des Absenders ungültig (möglicher MITM).');
   return {
     roomId: await computeRoomId(myDhPub, header.identityDhPub),
+    peerMasterPub: header.masterPub,
+    peerEpoch: header.epoch,
     peerSignPub: header.identitySignPub,
     peerDhPub: header.identityDhPub,
-    peerFingerprint: await identityFingerprint(header.identitySignPub, header.identityDhPub),
+    peerFingerprint: await identityFingerprint(header.masterPub, header.masterPub),
     bundle: undefined,
     ratchet: null,
     pendingHeader: null,
@@ -317,6 +350,20 @@ export async function receiveEnvelope(
   envelope: Envelope,
   lookup: PreKeyLookup,
 ): Promise<MessageContent> {
+  // Master pinning (TOFU): a prekey claiming a DIFFERENT master for an already-
+  // pinned contact is rejected outright. A bare master change — without a valid,
+  // dual-signed rotation chain from the pinned master — is a possible MITM, so a
+  // higher epoch alone must never override the pin. Drop verified, Signal-style.
+  // (Rotation-chain acceptance arrives with the rotation flow.)
+  if (
+    envelope.type === 'prekey' &&
+    contact.peerMasterPub &&
+    cmp(envelope.x3dh.masterPub, contact.peerMasterPub) !== 0
+  ) {
+    contact.verified = false;
+    throw new MasterChangedError();
+  }
+
   // Simultaneous initiation: we started a session and haven't heard back
   // (pendingHeader set) AND the peer also sent a prekey. Both can't keep their
   // own session — pick one deterministically by identity order: the lower key
@@ -350,6 +397,8 @@ export async function receiveEnvelope(
 
 interface ContactWire {
   roomId: string;
+  peerMasterPub: string;
+  peerEpoch: number;
   peerSignPub: string;
   peerDhPub: string;
   peerFingerprint: string;
@@ -375,6 +424,8 @@ async function unb64(str: string): Promise<Bytes> {
 export async function serializeContact(c: Contact): Promise<Bytes> {
   const wire: ContactWire = {
     roomId: c.roomId,
+    peerMasterPub: await b64(c.peerMasterPub),
+    peerEpoch: c.peerEpoch,
     peerSignPub: await b64(c.peerSignPub),
     peerDhPub: await b64(c.peerDhPub),
     peerFingerprint: c.peerFingerprint,
@@ -394,6 +445,8 @@ export async function deserializeContact(bytes: Bytes): Promise<Contact> {
   const wire = JSON.parse(utf8.decode(bytes)) as ContactWire;
   return {
     roomId: wire.roomId,
+    peerMasterPub: await unb64(wire.peerMasterPub),
+    peerEpoch: wire.peerEpoch ?? 1,
     peerSignPub: await unb64(wire.peerSignPub),
     peerDhPub: await unb64(wire.peerDhPub),
     peerFingerprint: wire.peerFingerprint,

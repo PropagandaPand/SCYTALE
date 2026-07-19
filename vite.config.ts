@@ -1,24 +1,20 @@
 import { defineConfig } from 'vite';
-import { execSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 
-// Build-time version stamp so every device can show which build it's running —
-// makes a stale (un-updated) Service Worker obvious at a glance. Prefer the git
-// short hash (identical across devices once updated); fall back to a timestamp.
-function buildVersion(): string {
-  try {
-    return execSync('git rev-parse --short HEAD').toString().trim();
-  } catch {
-    const d = new Date();
-    return `b${d.toISOString().slice(2, 16).replace(/[-:T]/g, '')}`;
-  }
-}
+// Single source of truth for the app version: package.json "version". Baked in
+// at build time so every device shows exactly the build its Service Worker runs
+// — a stale (un-updated) SW is then obvious at a glance. SemVer bump rules:
+//   x.0.0  großer Sprung   ·   0.x.0  Feature   ·   0.0.x  jeder Push
+const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as {
+  version: string;
+};
 
 // https://vite.dev/config/
 export default defineConfig({
   define: {
-    __APP_VERSION__: JSON.stringify(buildVersion()),
+    __APP_VERSION__: JSON.stringify(pkg.version),
   },
   plugins: [
     react(),

@@ -8,9 +8,12 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ### Feature: Versionsanzeige im Header
 
-- Neben „SCYTALE" wird der Build-Commit-Hash angezeigt (zur Build-Zeit
-  eingebacken). So sieht man pro Gerät sofort, ob der Service Worker die
-  neueste Version geladen hat — gleicher Hash = gleicher Stand.
+- Neben „SCYTALE" wird die **SemVer-Version** (`v0.9.0`) angezeigt, zur
+  Build-Zeit aus `package.json` eingebacken. So sieht man pro Gerät sofort, ob
+  der Service Worker die neueste Version geladen hat — gleiche Nummer = gleicher
+  Stand.
+- Bump-Regel: `0.0.x` jeder Push · `0.x.0` Feature · `x.0.0` großer Sprung.
+  Baseline auf `0.9.0` gesetzt (Stand nach den bisherigen Feature-Meilensteinen).
 
 ### Feature: Kontakt-Detail-Tab + Bild-Lightbox
 

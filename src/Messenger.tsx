@@ -1013,7 +1013,7 @@ export function Messenger({ dek, onLock }: Props) {
                 )}
                 <div>
                   <div className="t">
-                    SCYTALE <span className="ver">{__APP_VERSION__}</span>
+                    SCYTALE <span className="ver">v{__APP_VERSION__}</span>
                   </div>
                   <div className="fp">{shortFp(fingerprint)}</div>
                 </div>

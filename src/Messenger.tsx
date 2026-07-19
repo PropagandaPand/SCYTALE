@@ -677,7 +677,7 @@ export function Messenger({ dek, onLock }: Props) {
                     alt={m.file.name}
                   />
                 ) : m.file.mime.startsWith('audio/') ? (
-                  <AudioPlayer src={`data:${m.file.mime};base64,${m.file.dataB64}`} />
+                  <AudioPlayer dataB64={m.file.dataB64} mime={m.file.mime} />
                 ) : (
                   <button className="file-chip" onClick={() => downloadFile(m.file!)}>
                     <IconAttach size={16} />

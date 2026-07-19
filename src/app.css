@@ -827,17 +827,26 @@ select {
   background: var(--accent);
   color: var(--accent-ink);
 }
-.audio-bar {
+.wave {
   flex: 1;
-  height: 4px;
-  border-radius: 2px;
-  background: color-mix(in srgb, currentColor 22%, transparent);
-  overflow: hidden;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  cursor: pointer;
+  touch-action: none;
 }
-.audio-fill {
-  height: 100%;
+.wbar {
+  flex: 1 1 0;
+  min-width: 2px;
+  max-width: 4px;
+  border-radius: 2px;
+  background: color-mix(in srgb, currentColor 28%, transparent);
+  transition: background 80ms linear;
+}
+.wbar.on {
   background: currentColor;
-  opacity: 0.75;
+  opacity: 0.92;
 }
 .audio-dur {
   font-family: var(--font-mono);

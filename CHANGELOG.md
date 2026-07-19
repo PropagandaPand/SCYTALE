@@ -13,7 +13,12 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
   bestes verfügbares Format: mp4/aac oder webm/opus) → Stop/Senden oder Abbrechen,
   mit Timer + Auto-Stop bei 3 min. Verschickt als Audio-Anhang durch dieselbe
   E2E-Pipeline; Inline-Player (`AudioPlayer.tsx`) mit Play/Pause, Fortschritt,
-  Dauer (inkl. Opus-Duration-Infinity-Workaround).
+  Dauer.
+- **Waveform-Player** (WhatsApp-Stil): das Audio wird per Web Audio API dekodiert,
+  RMS-Lautstärke pro Segment als Balkengraph gerendert; abgespielter Teil färbt
+  sich ein. **Spulbar** per Tippen/Ziehen auf der Waveform (Pointer-Capture).
+  Exakte Dauer aus dem dekodierten Buffer. Fallback-Waveform, wenn der Codec
+  lokal nicht dekodierbar ist.
 - **Permissions-Policy**: `microphone=(self)` ergänzt (nur same-origin).
 
 #### Grenzen

@@ -1,6 +1,6 @@
 {
   "name": "scytale",
-  "version": "0.15.1",
+  "version": "0.15.2",
   "description": "Ende-zu-Ende verschlüsselter Messenger als PWA — gegen Massenüberwachung.",
   "type": "module",
   "private": true,

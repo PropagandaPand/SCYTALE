@@ -57,14 +57,16 @@ sie hält auch dann, wenn niemand mehr weiß, warum die Zeile im Spec stand.
 |---|---|---|
 | `bearer-usage.xfail` | Ein `deviceCert` allein genügt nicht — nötig ist Cert **und** Präsenz in einer aktuellen Geräteliste. Bis dahin existiert Revocation praktisch nicht. | 3c, Listenprüfung auf dem Empfangspfad |
 | `migration-roomid.xfail` | Nach dem `roomId`-Umbau findet eine bestehende Konversation ihren Verlauf wieder (Round-Trip, idempotent, beide Seiten leiten dieselbe ID ab). | 3c, `migrateContactRoomId` |
-| `sas-binds-master.xfail` | Der Emoji-Vergleich beim Koppeln wird über den **masterPub** gebildet — ein untergeschobener Master erzeugt andere Emoji. `verifyLinkGrant` ist notwendig selbstbezüglich; die SAS ist das Einzige, was den Master wirklich authentifiziert. | 3b-UI, `linkingSas` |
 
 **Wird eine xfail-Suite grün, muss die Datei umbenannt werden** (`.xfail.`
 entfernen) — sonst schützt sie nichts mehr, weil der Runner ihr Scheitern
 weiterhin toleriert. Der Runner warnt in diesem Fall.
 
 Die Ziel-APIs in diesen Dateien sind **Design-Lock, kein Vorschlag**:
-`Contact.peerDeviceList`, `migrateContactRoomId(contact)` und `linkingSas({…})`.
+`Contact.peerDeviceList` und `migrateContactRoomId(contact)`.
+
+`linkingSas({…})` war die dritte und ist seit v0.17.4 erfüllt — die Suite heisst
+jetzt `sas-binds-master.test.mjs` und schützt die Eigenschaft regulär.
 
 ## Negativkontrolle gegen den Produktionscode, nicht gegen eine Testkopie
 

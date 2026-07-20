@@ -35,3 +35,15 @@ export function concatBytes(...parts: Uint8Array[]): Bytes {
   }
   return out;
 }
+
+/**
+ * Constant-time byte comparison. Length is not secret, but content is — so we
+ * fold the whole array into one accumulator and never early-return on a byte
+ * mismatch. Use for anything comparing key material or MAC-adjacent values.
+ */
+export function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  let d = 0;
+  for (let i = 0; i < a.length; i++) d |= a[i] ^ b[i];
+  return d === 0;
+}

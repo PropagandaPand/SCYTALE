@@ -19,7 +19,7 @@
 import { getSodium } from './sodium';
 import { sign, verify } from './identity';
 import type { KeyPair } from './identity';
-import { concatBytes, utf8 } from './codec';
+import { concatBytes, utf8, bytesEqual} from './codec';
 import type { Bytes } from './types';
 
 const b = (x: Uint8Array): Bytes => new Uint8Array(x);
@@ -41,12 +41,6 @@ export function epochBytes(epoch: number): Bytes {
   return out;
 }
 
-function bytesEqual(a: Bytes, x: Bytes): boolean {
-  if (a.length !== x.length) return false;
-  let d = 0;
-  for (let i = 0; i < a.length; i++) d |= a[i] ^ x[i];
-  return d === 0;
-}
 
 export async function generateMaster(): Promise<MasterIdentity> {
   const s = await getSodium();

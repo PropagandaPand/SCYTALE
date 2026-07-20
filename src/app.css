@@ -1685,6 +1685,24 @@ select {
   height: 32px;
   padding: 0 12px;
   font-size: 12.5px;
+  width: auto;
+}
+/* The door is an ACTION the user takes, not an alarm about the past — tint it
+   with the accent so it reads as "do this", distinct from the danger notice. */
+.contact-warn.door {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+}
+.contact-warn.door b {
+  color: var(--accent);
+}
+.contact-warn.door .btn.sm {
+  align-self: stretch;
+  width: 100%;
+  height: 38px;
 }
 
 .contact-fields {
@@ -2012,4 +2030,138 @@ select {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* ==== DEVICE LINKING ================================================== */
+.link-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  animation: scyfade 0.2s ease;
+}
+.link-card {
+  position: relative;
+  width: 100%;
+  max-width: 380px;
+  max-height: 90dvh;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: 26px 22px 22px;
+  text-align: center;
+  animation: link-pop 0.24s var(--ease-out) both;
+}
+@keyframes link-pop {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.97);
+  }
+}
+.link-x {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 50%;
+}
+.link-head {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.link-sub {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--muted);
+  margin: 0 0 18px;
+}
+.link-btn-note {
+  display: block;
+  font-size: 11px;
+  font-weight: 400;
+  opacity: 0.8;
+  margin-top: 3px;
+}
+.link-qr {
+  width: 220px;
+  height: 220px;
+  margin: 0 auto 16px;
+  background: var(--qr-bg);
+  border-radius: var(--r-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+}
+.link-qr img {
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+.link-scan {
+  border-radius: var(--r-md);
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+.link-wait {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+  margin: 8px 0 0;
+}
+.sas-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 16px 10px;
+  margin: 0 0 18px;
+}
+.sas-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.sas-emoji {
+  font-size: 26px;
+  line-height: 1;
+}
+.sas-name {
+  font-size: 8.5px;
+  color: var(--muted);
+  text-align: center;
+  line-height: 1.1;
+  word-break: break-word;
+}
+.link-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.link-done-icon {
+  color: var(--verified);
+  display: flex;
+  justify-content: center;
+  margin-bottom: 12px;
 }

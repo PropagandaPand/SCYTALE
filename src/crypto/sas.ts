@@ -17,7 +17,7 @@ import { getSodium } from './sodium';
 import { hkdfSha256 } from './kdf';
 import { concatBytes, utf8 } from './codec';
 import type { KeyPair } from './identity';
-import type { Bytes } from './types';
+import type { Bytes, MasterPub } from './types';
 
 const b = (x: Uint8Array): Bytes => new Uint8Array(x);
 
@@ -105,4 +105,33 @@ export async function computeSas(
   const info = concatBytes(utf8.encode('SCYTALE-SAS-v1'), e1, e2, i1, i2);
   const sas = await hkdfSha256(shared, new Uint8Array(0), info, 18);
   return { emoji: emojiIndices(sas).map((i) => SAS_EMOJI[i]), decimal: decimals(sas) };
+}
+
+/**
+ * The SAS for DEVICE LINKING — bound to the two MASTER keys, not the device keys.
+ *
+ * This is the single point where the emoji comparison gets its meaning.
+ * `verifyLinkGrant` is necessarily self-referential: the new device has no
+ * pinned master yet, it is *learning* one, so every check there is relative to
+ * the master the grant asserts. A wholly forged grant passes all of them. The
+ * only thing that actually authenticates the master is the human comparing
+ * emoji — and that only works if the master is what the emoji are derived from.
+ *
+ * Hence `MasterPub` rather than `Bytes`: a UI that passed a device key here
+ * would compile fine, produce matching emoji on both sides, and authenticate
+ * nothing. The brand turns that from a silent hole into a compile error.
+ */
+export async function linkingSas(args: {
+  myEph: KeyPair;
+  theirEphPub: Bytes;
+  myMasterPub: MasterPub;
+  theirMasterPub: MasterPub;
+}): Promise<SasResult> {
+  return computeSas(
+    args.myEph.privateKey,
+    args.myEph.publicKey,
+    args.theirEphPub,
+    args.myMasterPub,
+    args.theirMasterPub,
+  );
 }

@@ -2,7 +2,7 @@
 
 SCYTALE ist gegen **anlasslose Massenüberwachung** gebaut (Chatkontrolle /
 CSAR). Dieses Dokument ist die genaue Aufschlüsselung aller Mechanismen und
-sagt ehrlich, was geschützt ist — und was nicht. Stand: v0.17.2.
+sagt ehrlich, was geschützt ist — und was nicht. Stand: v0.18.0.
 
 **Leitprinzipien:** niemals eigene Krypto erfinden (vetted Primitiven +
 etablierte Protokolle: X3DH, Double Ratchet); der Server ist ein **dummer

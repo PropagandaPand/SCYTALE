@@ -1,7 +1,5 @@
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  ZIELVORGABE (xfail) — der Emoji-Vergleich muss den MASTER authentifizieren║
-// ║  Dieser Test ist HEUTE ROT, weil der Linking-Flow noch nicht existiert.   ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
+// Der Emoji-Vergleich beim Koppeln authentifiziert den MASTER.
+// (War bis v0.17.3 eine xfail-Zielvorgabe; seit linkingSas existiert, grün.)
 //
 // EIGENSCHAFT:
 //   Im Kopplungs-Flow wird die SAS über den masterPub der Gegenseite gebildet.
@@ -19,7 +17,7 @@
 //   stimmen überein — und die Selbstbezüglichkeit von verifyLinkGrant wird zu
 //   einem echten Loch. Der Fehler wäre unsichtbar, weil nichts fehlschlägt.
 //
-// ZIEL-API, die dieser Test festschreibt (Design-Lock):
+// API (Design-Lock, jetzt implementiert):
 //   linkingSas({ myEph, theirEphPub, myMasterPub, theirMasterPub }): SasResult
 //     — eine benannte Funktion für genau diesen Zweck, damit die Bindung nicht
 //       davon abhängt, dass eine UI-Stelle die richtigen Argumente sortiert.
@@ -34,13 +32,14 @@
 import * as S from './.bundle/entry.js';
 
 let pass = 0, fail = 0;
-const ok = (n, c) => { if (c) { pass++; console.log('  ok  ', n); } else { fail++; console.log('  OFFEN', n); } };
+const ok = (n, c) => { if (c) { pass++; console.log('  ok  ', n); } else { fail++; console.log('  FAIL', n); } };
 const sodium = await S.getSodium();
 const chars = (r) => r.emoji.map((e) => e.char).join(' ');
 
 console.log('\n[Zielvorgabe: SAS bindet den Master, nicht nur die Geräte-Keys]');
 
 ok('linkingSas existiert', typeof S.linkingSas === 'function');
+if (typeof S.linkingSas !== 'function') { console.log('\n0 ok, 1 fail'); process.exit(1); }
 
 if (typeof S.linkingSas === 'function') {
   const pEph = sodium.crypto_box_keypair();

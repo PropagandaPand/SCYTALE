@@ -40,16 +40,22 @@ ok('richtige Version, falsche Länge -> ungültig', /Ungültiger Kopplungs-Code/
 // --- Offer ------------------------------------------------------------------
 console.log('\n[LinkOffer: SAS vor Credential]');
 const pEph = sodium.crypto_box_keypair();
-const offerBytes = L.encodeLinkOffer({ sasEphPub: pEph.publicKey });
-ok('Offer ist 33 Bytes (Version + Ephemeral)', offerBytes.length === 33);
+// v2 offer: ephemeral + master public + epoch. The master is here on purpose —
+// the SAS is derived over it, so N needs it BEFORE the human confirms. It is
+// public material, not a credential (issuing certs needs the private half).
+const pMaster = sodium.crypto_sign_keypair();
+const offerBytes = L.encodeLinkOffer({ sasEphPub: pEph.publicKey, masterPub: pMaster.publicKey, epoch: 1 });
+ok('Offer ist 69 Bytes (Version + Ephemeral + Master + Epoch)', offerBytes.length === 69);
 const offer = L.decodeLinkOffer(offerBytes);
-ok('Offer-Roundtrip', sodium.to_hex(offer.sasEphPub) === sodium.to_hex(pEph.publicKey));
+ok('Offer-Roundtrip Ephemeral', sodium.to_hex(offer.sasEphPub) === sodium.to_hex(pEph.publicKey));
+ok('Offer-Roundtrip Master', sodium.to_hex(offer.masterPub) === sodium.to_hex(pMaster.publicKey));
 
 // The critical property: the offer carries NOTHING but the ephemeral.
-const offerHex = sodium.to_hex(offerBytes);
-ok('Offer enthält keinen Master-Key', true); // structurally: only 33 bytes exist
+// The offer carries a master PUBLIC key but never anything bearer-grade: no
+// cert, no signature, nothing that lets the holder act as us.
+ok('Offer enthält KEIN Credential (nur Public-Material)', offerBytes.length === 69);
 let ov = '';
-const badOffer = new Uint8Array(33); badOffer[0] = 9;
+const badOffer = new Uint8Array(69); badOffer[0] = 9;
 try { L.decodeLinkOffer(badOffer); } catch (e) { ov = e.message; }
 ok('Offer-Version wird geprüft', /Format-Version 9/.test(ov));
 

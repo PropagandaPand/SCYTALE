@@ -40,10 +40,13 @@ import {
   signDeviceList,
   verifyDeviceList,
   deviceInList,
+  encodeDeviceList,
+  decodeDeviceList,
   type DeviceList,
   type DeviceEntry,
 } from './devicelist';
 import { getSodium } from './sodium';
+import { utf8 } from './codec';
 import type { Bytes } from './types';
 
 /** N → P, carried in a QR code. */
@@ -54,12 +57,23 @@ export interface LinkRequest {
 }
 
 /**
- * P → N, sealed. Deliberately contains NOTHING but P's SAS ephemeral: it travels
- * BEFORE the user has compared the emojis, so it must not grant anything to a
- * device that turns out to be an attacker's. An ephemeral public key is inert.
+ * P → N, sealed. Carries ONLY inert public material: P's SAS ephemeral and P's
+ * master PUBLIC key. It travels BEFORE the user compares the emoji, so it must
+ * grant nothing to a device that turns out to be an attacker's — and neither of
+ * these does. A master *public* key is not a credential; issuing certs needs the
+ * private half, which never leaves P.
+ *
+ * `masterPub` is here out of necessity, not convenience: the SAS is derived over
+ * it (see linkingSas), so N cannot compute the emoji without it. Deferring it to
+ * the grant would mean the emoji were compared *before* the master was known —
+ * i.e. they would authenticate nothing, and a substituted master would sail
+ * through. With it in the offer, a wrong master produces different emoji and the
+ * human sees it, which is the entire security of this flow.
  */
 export interface LinkOffer {
   sasEphPub: Bytes;
+  masterPub: Bytes;
+  epoch: number;
 }
 
 /** P → N, sealed — sent ONLY after both users confirmed the SAS matches. */
@@ -71,13 +85,19 @@ export interface LinkGrant {
 }
 
 const REQ_VERSION = 1;
-const OFFER_VERSION = 1;
+// v2: gained masterPub + epoch, because the SAS must commit to the master
+// before the user confirms. A v1 decoder sees the new length and reports a
+// version mismatch ("update both devices") rather than a bogus parse.
+const OFFER_VERSION = 2;
+const OFFER_LEN = 1 + 32 + 32 + 4;
 
-/** Offer wire: version(1) | sasEphPub(32). */
+/** Offer wire: version(1) | sasEphPub(32) | masterPub(32) | epoch(4, BE). */
 export function encodeLinkOffer(offer: LinkOffer): Bytes {
-  const buf = new Uint8Array(1 + 32);
+  const buf = new Uint8Array(OFFER_LEN);
   buf[0] = OFFER_VERSION;
   buf.set(offer.sasEphPub, 1);
+  buf.set(offer.masterPub, 33);
+  new DataView(buf.buffer).setUint32(65, offer.epoch);
   return buf;
 }
 
@@ -88,8 +108,12 @@ export function decodeLinkOffer(bytes: Bytes): LinkOffer {
       `Kopplungs-Antwort hat Format-Version ${bytes[0]}, diese App versteht nur ${OFFER_VERSION} — bitte beide Geräte aktualisieren.`,
     );
   }
-  if (bytes.length !== 33) throw new Error('Ungültige Kopplungs-Antwort.');
-  return { sasEphPub: bytes.slice(1, 33) };
+  if (bytes.length !== OFFER_LEN) throw new Error('Ungültige Kopplungs-Antwort.');
+  return {
+    sasEphPub: bytes.slice(1, 33),
+    masterPub: bytes.slice(33, 65),
+    epoch: new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(65),
+  };
 }
 
 /** Compact QR payload: version(1) | signPub(32) | dhPub(32) | sasEphPub(32). */
@@ -171,7 +195,7 @@ export async function createLinkGrant(
  * therefore: **the SAS MUST be computed over P's masterPub.** If the linking UI
  * ever passes a device key instead, the emoji stop authenticating the identity
  * and this function's self-reference becomes a real hole. Locked as a
- * requirement for the stage-3b UI; see tests/sas-binds-master.xfail.test.mjs.
+ * requirement for the stage-3b UI; see tests/sas-binds-master.test.mjs.
  */
 export async function verifyLinkGrant(
   grant: LinkGrant,
@@ -194,4 +218,54 @@ export async function verifyLinkGrant(
   // produces different emoji. See the SAS requirement in verifyLinkGrant's doc.
   if (!(await verifyDeviceList(list, grant.masterPub, grant.epoch))) return false;
   return deviceInList(list, myDeviceSignPub);
+}
+
+// --- Grant wire format ------------------------------------------------------
+
+const GRANT_VERSION = 1;
+
+interface GrantWire {
+  v: number;
+  masterPub: string;
+  epoch: number;
+  deviceCert: string;
+  deviceList: string; // b64 of encodeDeviceList
+}
+
+/** Sealed to the new device's X25519 key and dropped in its inbox. */
+export async function encodeLinkGrant(grant: LinkGrant): Promise<Bytes> {
+  const s = await getSodium();
+  const b64 = (b: Bytes) => s.to_base64(b, s.base64_variants.ORIGINAL);
+  const wire: GrantWire = {
+    v: GRANT_VERSION,
+    masterPub: b64(grant.masterPub),
+    epoch: grant.epoch,
+    deviceCert: b64(grant.deviceCert),
+    deviceList: b64(await encodeDeviceList(grant.deviceList)),
+  };
+  return utf8.encode(JSON.stringify(wire));
+}
+
+export async function decodeLinkGrant(bytes: Bytes): Promise<LinkGrant> {
+  const s = await getSodium();
+  const unb64 = (x: string) => new Uint8Array(s.from_base64(x, s.base64_variants.ORIGINAL));
+  let wire: GrantWire;
+  try {
+    wire = JSON.parse(utf8.decode(bytes)) as GrantWire;
+  } catch {
+    throw new Error('Kopplungs-Nachweis unlesbar.');
+  }
+  // Version before shape, same reason as the QR decoder: a future v2 must say
+  // "app too old", not "invalid" — otherwise the user hunts the wrong bug.
+  if (wire?.v !== GRANT_VERSION) {
+    throw new Error(
+      `Kopplungs-Nachweis hat Format-Version ${wire?.v}, diese App versteht nur ${GRANT_VERSION} — bitte beide Geräte aktualisieren.`,
+    );
+  }
+  return {
+    masterPub: unb64(wire.masterPub),
+    epoch: wire.epoch,
+    deviceCert: unb64(wire.deviceCert),
+    deviceList: await decodeDeviceList(unb64(wire.deviceList)),
+  };
 }

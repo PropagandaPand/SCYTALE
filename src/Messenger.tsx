@@ -14,12 +14,26 @@ import {
   decodeEnvelope,
   openPayload,
   SEALED_ENVELOPE,
+  SEALED_LINK_OFFER,
+  SEALED_LINK_GRANT,
   masterSafetyNumber,
   identityFingerprint,
+  isPrimaryDevice,
+  decodeLinkGrant,
   sign,
   type Bytes,
   type IdentityKeys,
+  type SasResult,
 } from './crypto';
+import {
+  startLinkOnN,
+  offerReceivedOnN,
+  completeLinkOnN,
+  beginLinkOnP,
+  completeLinkOnP,
+  type LinkSession,
+} from './lib/linkflow';
+import { loadOrCreateOwnDeviceList } from './lib/devices';
 import {
   makeContact,
   makeContactFromHeader,
@@ -31,6 +45,8 @@ import {
   sendGroupRemove,
   sendGroupLeave,
   receiveEnvelope,
+  acceptMasterChange,
+  reconnectContact,
   MasterChangedError,
   RetiredIdentityError,
   inboxRoom,
@@ -223,6 +239,21 @@ export function Messenger({ dek, onLock }: Props) {
   const [stickers, setStickers] = useState<Sticker[]>([]);
   const [stickerPanel, setStickerPanel] = useState(false);
   const [backupMode, setBackupMode] = useState<'export' | 'import' | null>(null);
+  // ── Device linking ────────────────────────────────────────────────
+  // 'menu'  : choose join-as-new vs add-a-device
+  // 'qr'    : N shows its QR, waits for the offer
+  // 'scan'  : P scans N's QR
+  // 'sas'   : both compare the 7 emoji
+  // 'done'  : linked
+  const [linkView, setLinkView] = useState<'menu' | 'qr' | 'scan' | 'sas' | 'done' | null>(null);
+  const [linkQr, setLinkQr] = useState(''); // N's QR image
+  const [linkSas, setLinkSas] = useState<SasResult | null>(null);
+  const [linkBusy, setLinkBusy] = useState(false);
+  const linkSessionRef = useRef<LinkSession | null>(null);
+  // N holds a grant that arrived before the user confirmed the emoji. It is
+  // installed only after confirmation — an unconfirmed grant is never applied.
+  const linkPendingGrantRef = useRef<Bytes | null>(null);
+  const linkConfirmedRef = useRef(false); // N confirmed the SAS locally
   const [swipeDx, setSwipeDx] = useState(0); // edge-swipe-back drag distance
   const [swiping, setSwiping] = useState(false);
   const swipeStart = useRef<{ x: number; y: number } | null>(null);
@@ -277,6 +308,20 @@ export function Messenger({ dek, onLock }: Props) {
     client.connect();
   }
 
+  // Send raw sealed bytes to an arbitrary inbox (derived from a device's sign
+  // key). Used by the linking flow, whose recipient is our own other device and
+  // has no Contact/roomId. Reuses an open relay for that room if one exists.
+  async function sendToInbox(recipientSignPub: Bytes, sealed: Bytes): Promise<void> {
+    const room = await inboxRoom(recipientSignPub);
+    let client = relaysRef.current.get(room);
+    if (!client) {
+      client = new RelayClient(room, {});
+      relaysRef.current.set(room, client);
+      client.connect();
+    }
+    client.send(sealed);
+  }
+
   // Delivery tracking. A 1:1 message is 'pending' until the relay acks the insert
   // ('sent'); a nack or an ack timeout flips it to 'failed'. So the checkmark
   // never claims delivery the relay didn't confirm.
@@ -321,6 +366,156 @@ export function Messenger({ dek, onLock }: Props) {
     }
   }
 
+  // ── Device linking ──────────────────────────────────────────────────
+  // Reset all transient linking state — the total abort. Nothing was persisted
+  // before the grant is installed, so dropping these refs IS the rollback.
+  function resetLink() {
+    linkSessionRef.current = null;
+    linkPendingGrantRef.current = null;
+    linkConfirmedRef.current = false;
+    setLinkSas(null);
+    setLinkQr('');
+    setLinkBusy(false);
+  }
+
+  // N starts: show our QR, then wait for P's offer on our inbox.
+  async function startJoinAsNewDevice() {
+    const id = identityRef.current;
+    if (!id) return;
+    setError('');
+    const { session, qrToken } = await startLinkOnN(id);
+    linkSessionRef.current = session;
+    linkConfirmedRef.current = false;
+    linkPendingGrantRef.current = null;
+    setLinkQr(await makeQr(qrToken).catch(() => ''));
+    setLinkView('qr');
+  }
+
+  // N received P's offer → derive and show the emoji.
+  async function onLinkOffer(payload: Bytes) {
+    const session = linkSessionRef.current;
+    if (!session || session.role !== 'new') return; // not linking, or wrong role
+    try {
+      const sas = await offerReceivedOnN(session, payload);
+      setLinkSas(sas);
+      setLinkView('sas');
+    } catch (e) {
+      setError('Kopplung fehlgeschlagen: ' + (e as Error).message);
+      resetLink();
+      setLinkView(null);
+    }
+  }
+
+  // N received P's grant. Held until the user confirms the emoji here too — an
+  // unconfirmed grant is never installed.
+  async function onLinkGrant(payload: Bytes) {
+    const session = linkSessionRef.current;
+    if (!session || session.role !== 'new') return;
+    linkPendingGrantRef.current = payload;
+    if (linkConfirmedRef.current) await installGrant();
+  }
+
+  // N confirmed the emoji. Install now if the grant already arrived, else mark
+  // confirmed and show a waiting state until onLinkGrant installs it.
+  async function onNConfirmSas() {
+    linkConfirmedRef.current = true;
+    if (linkPendingGrantRef.current) await installGrant();
+    else setLinkBusy(true); // waiting for the primary device to confirm
+  }
+
+  async function installGrant() {
+    const id = identityRef.current;
+    const session = linkSessionRef.current;
+    const payload = linkPendingGrantRef.current;
+    if (!id || !session || !payload) return;
+    setLinkBusy(true);
+    try {
+      const grant = await decodeLinkGrant(payload);
+      // Farewell BEFORE the identity swap: our contacts still pin the OLD master,
+      // and once we install, sending is blocked (staleIdentity). So the goodbye
+      // must ride out over the still-valid old session, or never.
+      const farewell = async () => {
+        for (const c of contactsRef.current) {
+          try {
+            await sendEnvelopeTo(
+              c,
+              await encryptAndPersist(c, () =>
+                sendMessage(id, c, '🔗 Ich habe ein neues Gerät gekoppelt — meine Identität ändert sich. Bitte bestätige die neue Identität, wenn du gefragt wirst.'),
+              ),
+            );
+          } catch {
+            /* one unreachable contact must not block the link */
+          }
+        }
+      };
+      const linked = await completeLinkOnN(dek, id, session, grant, farewell);
+      identityRef.current = linked;
+      setFingerprint(await fingerprintOf(linked));
+      // Our shared code encoded the OLD master; regenerate it so anyone scanning
+      // now reaches us under the identity we actually hold.
+      const pre = prekeysRef.current;
+      if (pre) {
+        const token = await encodeBundle(currentBundle(linked, pre));
+        const link = `${location.origin}/#add=${token}`;
+        setShareLink(link);
+        makeQr(link).then(setQrDataUrl).catch(() => undefined);
+      }
+      // Every existing contact still knows our old identity. Mark them stale so
+      // we don't send over a session built under the old master; the user
+      // reconnects each, which runs a fresh X3DH the peer then accepts.
+      for (const c of contactsRef.current) {
+        c.staleIdentity = true;
+        await saveContact(dek, c);
+      }
+      resetLink();
+      setLinkView('done');
+      bump();
+    } catch (e) {
+      setError('Kopplung fehlgeschlagen: ' + (e as Error).message);
+      resetLink();
+      setLinkView(null);
+    }
+  }
+
+  // P scanned N's QR → send the inert offer and show the emoji.
+  async function onScanNewDevice(qrToken: string) {
+    const id = identityRef.current;
+    if (!id) return;
+    setError('');
+    setLinkBusy(true);
+    try {
+      const { session, sas } = await beginLinkOnP(id, qrToken, sendToInbox);
+      linkSessionRef.current = session;
+      setLinkSas(sas);
+      setLinkView('sas');
+    } catch (e) {
+      setError('Kopplung fehlgeschlagen: ' + (e as Error).message);
+      resetLink();
+      setLinkView('menu');
+    } finally {
+      setLinkBusy(false);
+    }
+  }
+
+  // P confirmed the emoji → issue the grant, send it, then persist the list.
+  async function onPConfirmSas() {
+    const id = identityRef.current;
+    const session = linkSessionRef.current;
+    if (!id || !session) return;
+    setLinkBusy(true);
+    try {
+      const currentList = await loadOrCreateOwnDeviceList(dek, id);
+      if (!currentList) throw new Error('Geräteliste nicht verfügbar.');
+      await completeLinkOnP(dek, id, session, currentList, sendToInbox);
+      resetLink();
+      setLinkView('done');
+    } catch (e) {
+      setError('Kopplung fehlgeschlagen: ' + (e as Error).message);
+      resetLink();
+      setLinkView(null);
+    }
+  }
+
   async function onInbox(bytes: Bytes, ackId: number) {
     const id = identityRef.current;
     const lookup = lookupRef.current;
@@ -339,7 +534,17 @@ export function Messenger({ dek, onLock }: Props) {
         // linking grant, which has no ratchet session behind it).
         const opened = await openPayload(id, bytes);
         if (!opened) return; // not sealed for us
-        if (opened.type !== SEALED_ENVELOPE) return; // e.g. link grant — handled by the linking flow
+        // Device-linking payloads (N side): the offer carries P's SAS ephemeral
+        // + master so N can show the emoji; the grant arrives after P confirms.
+        if (opened.type === SEALED_LINK_OFFER) {
+          await onLinkOffer(opened.payload);
+          return;
+        }
+        if (opened.type === SEALED_LINK_GRANT) {
+          await onLinkGrant(opened.payload);
+          return;
+        }
+        if (opened.type !== SEALED_ENVELOPE) return; // unknown tag — drop
         env = await decodeEnvelope(opened.payload);
       } catch {
         return; // handled in finally (ack + drop)
@@ -1264,6 +1469,34 @@ export function Messenger({ dek, onLock }: Props) {
     bump();
   }
 
+  // ── The door, peer side ─────────────────────────────────────────────
+  // This contact presented a new master (pendingMaster) and the user chose to
+  // accept it. Re-pins to the new identity, drops the session, forces a fresh
+  // safety-number comparison. Deliberate user action only.
+  async function acceptNewIdentity() {
+    const c = contactsRef.current.find((x) => x.roomId === activeRoom);
+    if (!c || !c.pendingMaster) return;
+    if (!confirm('Neue Identität dieses Kontakts übernehmen? Danach musst du die Sicherheitsnummer erneut vergleichen.'))
+      return;
+    await acceptMasterChange(c);
+    await saveContact(dek, c);
+    setError('');
+    bump();
+  }
+
+  // ── The door, our side ──────────────────────────────────────────────
+  // We linked a device, so this contact still pins our old master and sending
+  // is blocked. Reconnecting resets the session; the next message runs a fresh
+  // X3DH under our current identity, which the peer then has to accept.
+  async function reconnectStaleContact() {
+    const c = contactsRef.current.find((x) => x.roomId === activeRoom);
+    if (!c) return;
+    reconnectContact(c);
+    await saveContact(dek, c);
+    setError('');
+    bump();
+  }
+
   // Full-screen image viewer (avatars, later chat images). Tap anywhere closes.
   const lightbox = zoomImg ? (
     <div className="lightbox" onClick={() => setZoomImg(null)} role="dialog" aria-label="Bild">
@@ -1271,6 +1504,128 @@ export function Messenger({ dek, onLock }: Props) {
       <button className="lightbox-close" onClick={() => setZoomImg(null)} aria-label="Schließen">
         ×
       </button>
+    </div>
+  ) : null;
+
+  const closeLink = () => {
+    resetLink();
+    setLinkView(null);
+  };
+  const linkRole = linkSessionRef.current?.role;
+  const linkOverlay = linkView ? (
+    <div className="link-overlay" role="dialog" aria-label="Gerät koppeln">
+      <div className="link-card">
+        <button className="link-x" onClick={closeLink} aria-label="Schließen">
+          ×
+        </button>
+
+        {linkView === 'menu' && (
+          <>
+            <div className="link-head">Gerät koppeln</div>
+            <p className="link-sub">Welche Rolle hat dieses Gerät?</p>
+            <button className="btn btn-primary btn-tall" onClick={() => void startJoinAsNewDevice()}>
+              Dieses Gerät verbinden
+              <span className="link-btn-note">Zeigt einen QR-Code, den das Hauptgerät scannt</span>
+            </button>
+            <button
+              className="btn btn-outline btn-tall"
+              style={{ marginTop: 12 }}
+              onClick={() => {
+                const id = identityRef.current;
+                if (id && !isPrimaryDevice(id)) {
+                  setError('Dieses Gerät ist selbst gekoppelt — nur das Hauptgerät kann weitere hinzufügen.');
+                  return;
+                }
+                setLinkView('scan');
+              }}
+            >
+              Neues Gerät hinzufügen
+              <span className="link-btn-note">Scannt den QR-Code des neuen Geräts</span>
+            </button>
+          </>
+        )}
+
+        {linkView === 'qr' && (
+          <>
+            <div className="link-head">Auf dem Hauptgerät scannen</div>
+            <p className="link-sub">
+              Öffne auf deinem Hauptgerät <b>Profil → Gerät koppeln → Neues Gerät hinzufügen</b> und scanne diesen
+              Code.
+            </p>
+            <div className="link-qr">{linkQr ? <img src={linkQr} alt="Kopplungs-QR" /> : <span className="ph">…</span>}</div>
+            <p className="link-wait">
+              <span className="rec-dot" /> Warte auf das Hauptgerät…
+            </p>
+          </>
+        )}
+
+        {linkView === 'scan' && (
+          <>
+            <div className="link-head">QR-Code des neuen Geräts scannen</div>
+            <div className="link-scan">
+              <QrScanner
+                onResult={(text) => {
+                  if (linkBusy || linkSessionRef.current) return;
+                  void onScanNewDevice(text.trim());
+                }}
+                onClose={closeLink}
+              />
+            </div>
+          </>
+        )}
+
+        {linkView === 'sas' && linkSas && (
+          <>
+            <div className="link-head">Stimmen die Emojis überein?</div>
+            <p className="link-sub">
+              Vergleiche diese sieben Zeichen mit dem <b>anderen Gerät</b>. Nur wenn sie exakt gleich sind, ist die
+              Verbindung frei von einem Angreifer in der Mitte.
+            </p>
+            <div className="sas-grid">
+              {linkSas.emoji.map((e, i) => (
+                <div key={i} className="sas-cell">
+                  <span className="sas-emoji">{e.char}</span>
+                  <span className="sas-name">{e.name}</span>
+                </div>
+              ))}
+            </div>
+            {linkBusy ? (
+              <p className="link-wait">
+                <span className="rec-dot" /> Warte auf Bestätigung des Hauptgeräts…
+              </p>
+            ) : (
+              <div className="link-actions">
+                <button className="btn btn-danger" onClick={closeLink}>
+                  Stimmt nicht
+                </button>
+                <button
+                  className="btn btn-primary"
+                  onClick={() => (linkRole === 'primary' ? void onPConfirmSas() : void onNConfirmSas())}
+                >
+                  Stimmt überein
+                </button>
+              </div>
+            )}
+          </>
+        )}
+
+        {linkView === 'done' && (
+          <>
+            <div className="link-done-icon">
+              <IconShield size={30} filled />
+            </div>
+            <div className="link-head">Gerät gekoppelt</div>
+            <p className="link-sub">
+              {linkRole === 'primary'
+                ? 'Das neue Gerät gehört jetzt zu deiner Identität.'
+                : 'Dieses Gerät nutzt jetzt deine bestehende Identität. Bestehende Kontakte müssen die neue Identität bestätigen — schreibe ihnen, um das auszulösen.'}
+            </p>
+            <button className="btn btn-primary btn-tall" onClick={() => setLinkView(null)}>
+              Fertig
+            </button>
+          </>
+        )}
+      </div>
     </div>
   ) : null;
 
@@ -1981,6 +2336,38 @@ export function Messenger({ dek, onLock }: Props) {
             </div>
           )}
 
+          {c.pendingMaster && (
+            <div className="contact-warn door">
+              <div className="cw-text">
+                <b>Neue Identität behauptet</b>
+                <span>
+                  Dieser Kontakt meldet sich mit einem neuen Identitätsschlüssel — etwa nach einem Gerätewechsel.
+                  Übernimm ihn nur, wenn du sicher bist, dass es wirklich diese Person ist. Danach ist ein neuer
+                  Sicherheitsnummer-Vergleich fällig.
+                </span>
+              </div>
+              <button className="btn btn-primary sm" onClick={() => void acceptNewIdentity()}>
+                Neue Identität akzeptieren
+              </button>
+            </div>
+          )}
+
+          {c.staleIdentity && (
+            <div className="contact-warn door">
+              <div className="cw-text">
+                <b>Verbindung veraltet</b>
+                <span>
+                  Du hast ein Gerät gekoppelt, seitdem hat sich deine Identität geändert. Dieser Kontakt kennt noch
+                  die alte. „Neu verbinden“ baut die Sitzung frisch auf — die Gegenseite sieht dann eine
+                  Identitätswarnung und muss dich neu bestätigen.
+                </span>
+              </div>
+              <button className="btn btn-primary sm" onClick={() => void reconnectStaleContact()}>
+                Neu verbinden
+              </button>
+            </div>
+          )}
+
           <div className="contact-fields">
             {renaming ? (
               <div className="contact-field">
@@ -2114,6 +2501,28 @@ export function Messenger({ dek, onLock }: Props) {
             </div>
           )}
 
+          <div className="sect-lbl" style={{ marginTop: 22 }}>Geräte</div>
+          <div className="backup-actions">
+            <button
+              className="btn btn-ghost"
+              onClick={() => {
+                resetLink();
+                setLinkView('menu');
+              }}
+            >
+              Gerät koppeln
+            </button>
+          </div>
+          <div className="info-note" style={{ textAlign: 'left' }}>
+            <span className="g">
+              <IconInfo />
+            </span>
+            <p>
+              Verbinde ein zweites Gerät mit deiner Identität — per QR-Code, mit einem <b>Emoji-Abgleich</b> gegen
+              Man-in-the-Middle. Der Hauptschlüssel verlässt dabei nie dein Hauptgerät.
+            </p>
+          </div>
+
           <div className="sect-lbl" style={{ marginTop: 22 }}>Backup &amp; Wiederherstellung</div>
           <div className="backup-actions">
             <button className="btn btn-ghost" onClick={() => setBackupMode('export')}>
@@ -2135,6 +2544,7 @@ export function Messenger({ dek, onLock }: Props) {
 
           {backupMode && <BackupModal mode={backupMode} dek={dek} onClose={() => setBackupMode(null)} />}
         </div>
+        {linkOverlay}
       </div>
     );
   }

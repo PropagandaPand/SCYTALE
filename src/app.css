@@ -881,9 +881,14 @@ select {
   border-top: 1px solid var(--border);
   flex: none;
   background: var(--bg);
+  max-width: 100%;
 }
 .composer-pill {
   flex: 1;
+  /* Without this the pill keeps the input's intrinsic width (~180px) and, with
+     two icon buttons plus the send button, pushes the whole bar off-screen on
+     narrow phones. min-width:0 lets the flex item shrink below its content. */
+  min-width: 0;
   display: flex;
   align-items: center;
   background: var(--surface);
@@ -898,6 +903,7 @@ select {
 }
 .composer-pill input {
   flex: 1;
+  min-width: 0; /* same reason as the pill: let it shrink instead of overflowing */
   background: transparent;
   border: 0;
   outline: none;
@@ -1290,6 +1296,15 @@ select {
 }
 .share-card .btn {
   margin-top: 10px;
+}
+.share-actions {
+  display: grid;
+  grid-template-columns: 1.6fr 1fr;
+  gap: 10px;
+  width: 100%;
+}
+.share-actions .btn {
+  margin-top: 0;
 }
 .divider {
   display: flex;

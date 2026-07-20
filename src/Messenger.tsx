@@ -1435,6 +1435,59 @@ export function Messenger({ dek, onLock }: Props) {
     }
   }
 
+  // The share text carries the link (which contains add=<token>). extractToken
+  // finds the token even amid the surrounding instructions, so the SAME string
+  // works whether the recipient taps the link (Android link-capture) or, on iOS
+  // where a link only ever opens Safari, pastes it via "Aus Zwischenablage".
+  function contactShareText(): string {
+    return (
+      'Verbinde dich mit mir auf SCYTALE 🔐\n\n' +
+      shareLink +
+      '\n\nFalls sich nur der Browser öffnet: In SCYTALE auf „Verbinden“ → „Aus Zwischenablage verbinden“.'
+    );
+  }
+
+  // Sender affordance. navigator.share is the native sheet (works outgoing on
+  // iOS standalone PWAs); where it's absent (most desktops) fall back to copying
+  // the same text. A cancelled share sheet throws AbortError — swallowed, it is
+  // not an error the user needs to see.
+  async function shareContactCode() {
+    const text = contactShareText();
+    try {
+      if (typeof navigator !== 'undefined' && navigator.share) {
+        await navigator.share({ text });
+      } else {
+        await navigator.clipboard.writeText(text);
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      }
+    } catch {
+      /* share sheet cancelled, or share/clipboard unavailable — nothing to do */
+    }
+  }
+
+  // Receiver affordance. Reading the clipboard needs a user gesture (this is one)
+  // and may prompt on iOS — both fine. addBundle runs the SAME cert-verifying
+  // path as the QR scan and the manual box, so pasting is not a weaker channel;
+  // the bundle is public keys and the MitM backstop is the safety-number compare.
+  async function pasteAndAdd() {
+    setError('');
+    try {
+      if (!navigator.clipboard?.readText) {
+        setError('Zwischenablage nicht verfügbar — füge den Code unten ins Feld ein.');
+        return;
+      }
+      const text = await navigator.clipboard.readText();
+      if (!text.trim()) {
+        setError('Zwischenablage ist leer — kopiere zuerst den Verbindungscode deines Kontakts.');
+        return;
+      }
+      await addBundle(text);
+    } catch {
+      setError('Zugriff auf die Zwischenablage nicht möglich — füge den Code stattdessen unten ins Feld ein.');
+    }
+  }
+
   function openContact() {
     setChatMenu(false);
     setRenaming(false);
@@ -2176,14 +2229,19 @@ export function Messenger({ dek, onLock }: Props) {
               {qrDataUrl ? <img src={qrDataUrl} alt="QR-Code deines Kontakt-Links" /> : <span className="ph">QR…</span>}
             </button>
             <p className="share-hint">
-              Antippen für Vollbild zum Scannen — oder Link teilen.
+              <b>Persönlich:</b> Code antippen für Vollbild, der andere scannt ihn.
               <br />
-              Ein Tap fügt dich hinzu.
+              <b>Aus der Ferne:</b> teilen — der Kontakt fügt dich per „Aus Zwischenablage verbinden“ hinzu.
             </p>
             <div className="link-box">{shareLink}</div>
-            <button className="btn btn-primary" onClick={() => void copyLink()}>
-              {copied ? 'Kopiert ✓' : 'Link kopieren'}
-            </button>
+            <div className="share-actions">
+              <button className="btn btn-primary" onClick={() => void shareContactCode()}>
+                Verbindungscode teilen
+              </button>
+              <button className="btn btn-outline" onClick={() => void copyLink()}>
+                {copied ? 'Kopiert ✓' : 'Kopieren'}
+              </button>
+            </div>
           </div>
 
           <div className="divider">
@@ -2194,17 +2252,20 @@ export function Messenger({ dek, onLock }: Props) {
 
           <div className="sect-lbl">Kontakt hinzufügen</div>
           <div className="card pad16">
-            <button className="btn btn-primary scan-btn" onClick={() => setScanning(true)}>
+            <button className="btn btn-primary" onClick={() => void pasteAndAdd()}>
+              Aus Zwischenablage verbinden
+            </button>
+            <button className="btn btn-outline scan-btn" style={{ marginTop: 10 }} onClick={() => setScanning(true)}>
               <IconCamera /> QR-Code scannen
             </button>
-            <div className="or-tiny">oder Link / Token einfügen</div>
+            <div className="or-tiny">oder Link / Token manuell einfügen</div>
             <textarea
               className="paste-box"
-              placeholder="scy://add?… — Link oder Bundle-Token einfügen"
+              placeholder="Link oder Bundle-Token einfügen"
               value={addInput}
               onChange={(e) => setAddInput(e.target.value)}
             />
-            <button className="btn btn-outline" onClick={() => void addBundle(addInput)}>
+            <button className="btn btn-ghost" onClick={() => void addBundle(addInput)}>
               Hinzufügen
             </button>
           </div>

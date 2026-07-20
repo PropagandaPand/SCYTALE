@@ -2131,11 +2131,6 @@ select {
   height: 100%;
   image-rendering: pixelated;
 }
-.link-scan {
-  border-radius: var(--r-md);
-  overflow: hidden;
-  margin-bottom: 4px;
-}
 .link-wait {
   display: flex;
   align-items: center;

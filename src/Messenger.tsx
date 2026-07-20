@@ -1577,7 +1577,20 @@ export function Messenger({ dek, onLock }: Props) {
     setLinkView(null);
   };
   const linkRole = linkSessionRef.current?.role;
-  const linkOverlay = linkView ? (
+  const linkOverlay = linkView === 'scan' ? (
+    // Standalone full-screen scanner — deliberately NOT inside .link-card. That
+    // card runs a transform animation, and a transformed ancestor becomes the
+    // containing block for the scanner's position:fixed (especially sticky on
+    // iOS via the animation fill-mode), collapsing the camera to a thin strip.
+    // Rendered bare, its position:fixed resolves against the viewport as meant.
+    <QrScanner
+      onResult={(text) => {
+        if (linkBusy || linkSessionRef.current) return;
+        void onScanNewDevice(text.trim());
+      }}
+      onClose={closeLink}
+    />
+  ) : linkView ? (
     <div className="link-overlay" role="dialog" aria-label="Gerät koppeln">
       <div className="link-card">
         <button className="link-x" onClick={closeLink} aria-label="Schließen">
@@ -1624,20 +1637,6 @@ export function Messenger({ dek, onLock }: Props) {
           </>
         )}
 
-        {linkView === 'scan' && (
-          <>
-            <div className="link-head">QR-Code des neuen Geräts scannen</div>
-            <div className="link-scan">
-              <QrScanner
-                onResult={(text) => {
-                  if (linkBusy || linkSessionRef.current) return;
-                  void onScanNewDevice(text.trim());
-                }}
-                onClose={closeLink}
-              />
-            </div>
-          </>
-        )}
 
         {linkView === 'sas' && linkSas && (
           <>

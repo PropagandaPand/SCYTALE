@@ -14,30 +14,28 @@
  * Variante — dann MÜSSEN die Fälschungs-Fälle rot sein. Wird der Test dort
  * grün, prüft er nichts.
  *
- *   npx tsx tests/ratchet-commit.test.ts
- *   SCYTALE_NO_COMMIT_GUARD=1 npx tsx tests/ratchet-commit.test.ts
+ *   node tests/run.mjs ratchet-commit
+ *   SCYTALE_NO_COMMIT_GUARD=1 node tests/ratchet-commit.test.mjs
  */
 import {
   initRatchetInitiator,
   initRatchetResponder,
   ratchetEncrypt,
   ratchetDecrypt,
-  type RatchetState,
-  type RatchetMessage,
-} from '../src/crypto/ratchet';
-import { getSodium } from '../src/crypto/sodium';
-import type { Bytes } from '../src/crypto/types';
+  __decryptIntoUnsafeForTests,
+  getSodium,
+} from './.bundle/entry.js';
 
 const GUARD_OFF = process.env.SCYTALE_NO_COMMIT_GUARD === '1';
 
 const te = new TextEncoder();
 const td = new TextDecoder();
-const B = (x: Uint8Array): Bytes => new Uint8Array(x);
-const cp = (x: Bytes): Bytes => new Uint8Array(x);
+const B = (x) => new Uint8Array(x);
+const cp = (x) => new Uint8Array(x);
 
 let pass = 0;
 let fail = 0;
-function check(name: string, ok: boolean, detail = '') {
+function check(name, ok, detail = '') {
   if (ok) {
     pass++;
     console.log(`  ok   ${name}`);
@@ -48,41 +46,22 @@ function check(name: string, ok: boolean, detail = '') {
 }
 
 /**
- * Flache Kopie: `skipped`-Werte werden nie in-place mutiert (nur set/delete),
- * `AD` ist konstant. Beides macht `new Map(...)` bzw. die Referenz korrekt.
+ * Der Guard sitzt jetzt IM Produktionscode (ratchetDecrypt). Die
+ * Negativkontrolle ruft deshalb den ungeschützten Kern auf — sie darf den Fix
+ * nicht im Test nachbauen, sonst prüfte sie den Test statt die Bibliothek.
  */
-function cloneState(s: RatchetState): RatchetState {
-  return {
-    DHs: { publicKey: cp(s.DHs.publicKey), privateKey: cp(s.DHs.privateKey) },
-    DHr: s.DHr ? cp(s.DHr) : null,
-    RK: cp(s.RK),
-    CKs: s.CKs ? cp(s.CKs) : null,
-    CKr: s.CKr ? cp(s.CKr) : null,
-    Ns: s.Ns,
-    Nr: s.Nr,
-    PN: s.PN,
-    skipped: new Map(s.skipped),
-    AD: s.AD,
-  };
+async function decrypt(state, msg) {
+  return GUARD_OFF ? __decryptIntoUnsafeForTests(state, msg) : ratchetDecrypt(state, msg);
 }
 
-/** Der Fix in Testform — im Produktionscode gehört er IN ratchetDecrypt. */
-async function decrypt(state: RatchetState, msg: RatchetMessage): Promise<Bytes> {
-  if (GUARD_OFF) return ratchetDecrypt(state, msg);
-  const draft = cloneState(state);
-  const pt = await ratchetDecrypt(draft, msg); // wirft -> `state` unberührt
-  Object.assign(state, draft); // commit als letzte Aktion
-  return pt;
-}
-
-const enc = (s: RatchetState, t: string) => ratchetEncrypt(s, B(te.encode(t)));
-const dec = async (s: RatchetState, m: RatchetMessage) => td.decode(await decrypt(s, m));
-const hex = (x: Uint8Array) => Buffer.from(x).toString('hex');
+const enc = (s, t) => ratchetEncrypt(s, B(te.encode(t)));
+const dec = async (s, m) => td.decode(await decrypt(s, m));
+const hex = (x) => Array.from(x, (b) => b.toString(16).padStart(2, '0')).join('');
 
 /** Wie `dec`, gibt aber '' zurück statt zu werfen — für Checks NACH einem
  *  Angriff, die in der Negativkontrolle fehlschlagen SOLLEN, ohne den Lauf
  *  abzubrechen. */
-async function decOrEmpty(s: RatchetState, m: RatchetMessage): Promise<string> {
+async function decOrEmpty(s, m) {
   try {
     return await dec(s, m);
   } catch {
@@ -91,7 +70,7 @@ async function decOrEmpty(s: RatchetState, m: RatchetMessage): Promise<string> {
 }
 
 /** Nicht authentifizierbare Nachricht — kein Schlüsselmaterial nötig. */
-function forge(dh: Bytes, pn = 0, n = 0): RatchetMessage {
+function forge(dh, pn = 0, n = 0) {
   return { header: { dh, pn, n }, ciphertext: B(crypto.getRandomValues(new Uint8Array(48))) };
 }
 
@@ -126,7 +105,7 @@ async function main() {
   {
     const { s, alice, bob } = await freshPair();
     const evil = s.crypto_box_keypair();
-    const before = { RK: hex(bob.RK), DHr: hex(bob.DHr!), Ns: bob.Ns, PN: bob.PN };
+    const before = { RK: hex(bob.RK), DHr: hex(bob.DHr), Ns: bob.Ns, PN: bob.PN };
 
     let threw = false;
     try {
@@ -136,7 +115,7 @@ async function main() {
     }
     check('Fälschung wird abgelehnt', threw);
     check('RK unverändert', hex(bob.RK) === before.RK, `${before.RK.slice(0, 12)} -> ${hex(bob.RK).slice(0, 12)}`);
-    check('DHr unverändert', hex(bob.DHr!) === before.DHr);
+    check('DHr unverändert', hex(bob.DHr) === before.DHr);
     check('Ns/PN unverändert', bob.Ns === before.Ns && bob.PN === before.PN);
     check(
       'echte Folgenachricht kommt weiterhin an',
@@ -147,7 +126,7 @@ async function main() {
   // --- 2. Missgebildeter DH-Key (2 statt 32 Byte) ------------------------
   {
     const { alice, bob } = await freshPair();
-    const before = { RK: hex(bob.RK), DHr: hex(bob.DHr!), Ns: bob.Ns, Nr: bob.Nr, PN: bob.PN };
+    const before = { RK: hex(bob.RK), DHr: hex(bob.DHr), Ns: bob.Ns, Nr: bob.Nr, PN: bob.PN };
     try {
       await decrypt(bob, forge(B(new Uint8Array([1, 2]))));
     } catch {
@@ -157,7 +136,7 @@ async function main() {
     // allein wäre also auch ohne Guard grün und würde nichts prüfen. DHr/Ns/Nr/PN
     // werden dagegen vor dem Wurf gesetzt: das ist der scharfe Detektor.
     check('kurzer DH-Key: RK unverändert', hex(bob.RK) === before.RK);
-    check('kurzer DH-Key: DHr unverändert', hex(bob.DHr!) === before.DHr);
+    check('kurzer DH-Key: DHr unverändert', hex(bob.DHr) === before.DHr);
     check(
       'kurzer DH-Key: Zähler unverändert',
       bob.Ns === before.Ns && bob.Nr === before.Nr && bob.PN === before.PN,

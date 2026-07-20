@@ -176,7 +176,75 @@ export async function ratchetEncrypt(state: RatchetState, plaintext: Bytes): Pro
   return { header, ciphertext };
 }
 
+/**
+ * Shallow clone of the ratchet state.
+ *
+ * Shallow is correct and deliberate: `skipped` values are never mutated in
+ * place (only set/delete), so a fresh Map with the same message-key references
+ * is enough, and `AD` is constant for the session. Byte arrays that DO get
+ * replaced (RK, CK*, DH*) are copied so a discarded draft cannot alias them.
+ */
+function cloneState(s: RatchetState): RatchetState {
+  const cp = (x: Bytes): Bytes => new Uint8Array(x);
+  return {
+    DHs: { publicKey: cp(s.DHs.publicKey), privateKey: cp(s.DHs.privateKey) },
+    DHr: s.DHr ? cp(s.DHr) : null,
+    RK: cp(s.RK),
+    CKs: s.CKs ? cp(s.CKs) : null,
+    CKr: s.CKr ? cp(s.CKr) : null,
+    Ns: s.Ns,
+    Nr: s.Nr,
+    PN: s.PN,
+    skipped: new Map(s.skipped),
+    AD: s.AD,
+  };
+}
+
+/**
+ * Decrypt an inbound ratchet message.
+ *
+ * ⚠️ COMMIT DISCIPLINE — the state advances ONLY on a message that
+ * authenticates. The work happens on a draft copy and is committed as the last
+ * action; anything that throws leaves `state` untouched.
+ *
+ * Why this is not optional: delivery into an inbox is deliberately
+ * unauthenticated (that is what lets a stranger holding our code reach us), and
+ * the inbox id is derivable from public material. Without the draft, a random
+ * 32-byte X25519 public key as `header.dh` plus 48 bytes of garbage is enough to
+ * turn the DH ratchet — no key material required. `dhRatchet` would overwrite
+ * DHr/RK/CKr/CKs and reset the counters, and only afterwards would the AEAD tag
+ * check fail. The session would be permanently dead in both directions, the
+ * damage would be written to disk by the next `encryptAndPersist`, and the
+ * sender would still see full delivery ticks because the relay accepted
+ * everything. A remote, unauthenticated, persistent session kill.
+ *
+ * It also closes the skipped-key case: a forgery replaying the header of a
+ * delayed real message would otherwise consume (delete) that message's key for
+ * good, so the genuine message could never be read.
+ */
 export async function ratchetDecrypt(state: RatchetState, msg: RatchetMessage): Promise<Bytes> {
+  const draft = cloneState(state);
+  const plaintext = await decryptInto(draft, msg); // throws → `state` untouched
+  Object.assign(state, draft); // commit, last action
+  return plaintext;
+}
+
+/**
+ * The unguarded core. NOT for application code — it mutates as it goes and
+ * leaves the state wrecked when a message fails to authenticate.
+ *
+ * Exported solely so the negative control in tests/ratchet-commit.test.mjs can
+ * run the pre-fix behaviour and prove the guard is what makes the suite green.
+ * `tests/no-unsafe-import.test.mjs` fails the build if src/ ever imports it.
+ */
+export async function __decryptIntoUnsafeForTests(
+  state: RatchetState,
+  msg: RatchetMessage,
+): Promise<Bytes> {
+  return decryptInto(state, msg);
+}
+
+async function decryptInto(state: RatchetState, msg: RatchetMessage): Promise<Bytes> {
   const fromSkipped = await trySkipped(state, msg);
   if (fromSkipped) return fromSkipped;
 

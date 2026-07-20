@@ -45,3 +45,32 @@ export async function unseal(myDh: KeyPair, sealed: Bytes): Promise<Bytes | null
 export async function openInbound(me: IdentityKeys, bytes: Bytes): Promise<Bytes> {
   return (await unseal(me.dh, bytes)) ?? bytes;
 }
+
+// --- Tagged sealed payloads -------------------------------------------------
+//
+// Not everything that arrives in an inbox is a ratchet Envelope: a device
+// LINKING GRANT is sealed to a device that has no session with the sender (it's
+// the same user's other device). So the sealed plaintext carries a 1-byte type
+// tag, and the receiver dispatches on it.
+
+export const SEALED_ENVELOPE = 0;
+export const SEALED_LINK_GRANT = 1;
+
+export async function sealPayload(recipientDhPub: Bytes, type: number, payload: Bytes): Promise<Bytes> {
+  const tagged = new Uint8Array(1 + payload.length);
+  tagged[0] = type;
+  tagged.set(payload, 1);
+  return sealTo(recipientDhPub, tagged);
+}
+
+export interface OpenedPayload {
+  type: number;
+  payload: Bytes;
+}
+
+/** Open a tagged sealed payload; null if it isn't sealed for us or is empty. */
+export async function openPayload(me: IdentityKeys, bytes: Bytes): Promise<OpenedPayload | null> {
+  const opened = await unseal(me.dh, bytes);
+  if (!opened || opened.length < 1) return null;
+  return { type: opened[0], payload: opened.slice(1) };
+}

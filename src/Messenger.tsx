@@ -12,7 +12,8 @@ import {
   encodeBundle,
   decodeBundle,
   decodeEnvelope,
-  openInbound,
+  openPayload,
+  SEALED_ENVELOPE,
   masterSafetyNumber,
   identityFingerprint,
   sign,
@@ -319,9 +320,13 @@ export function Messenger({ dek, onLock }: Props) {
     try {
       let env;
       try {
-        // Sealed Sender: open the anonymous outer box first (falls back to raw
-        // for any legacy unsealed message still in flight), then decode.
-        env = await decodeEnvelope(await openInbound(id, bytes));
+        // Sealed Sender: open the anonymous outer box, then dispatch on the
+        // payload tag — an inbox also receives non-envelope payloads (a device
+        // linking grant, which has no ratchet session behind it).
+        const opened = await openPayload(id, bytes);
+        if (!opened) return; // not sealed for us
+        if (opened.type !== SEALED_ENVELOPE) return; // e.g. link grant — handled by the linking flow
+        env = await decodeEnvelope(opened.payload);
       } catch {
         return; // handled in finally (ack + drop)
       }

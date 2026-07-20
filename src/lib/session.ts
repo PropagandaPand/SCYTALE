@@ -14,8 +14,9 @@ import {
   deserializeState,
   encodeEnvelope,
   decodeEnvelope,
-  sealTo,
-  openInbound,
+  sealPayload,
+  openPayload,
+  SEALED_ENVELOPE,
   verifyDeviceCert,
   encodeBundle,
   decodeBundle,
@@ -286,7 +287,8 @@ async function sendContent(me: IdentityKeys, contact: Contact, content: MessageC
     : ({ type: 'msg', conv, message } as const);
   // Sealed Sender: wrap the whole envelope in an anonymous box to the recipient,
   // so the relay never sees the sender's X3DH identity keys or the conv id.
-  return sealTo(contact.peerDhPub, await encodeEnvelope(envelope));
+  // Tagged, because an inbox can also receive non-envelope payloads (link grants).
+  return sealPayload(contact.peerDhPub, SEALED_ENVELOPE, await encodeEnvelope(envelope));
 }
 
 export async function sendMessage(me: IdentityKeys, contact: Contact, text: string): Promise<Bytes> {
@@ -341,7 +343,11 @@ export async function receiveMessage(
   bytes: Bytes,
   lookup: PreKeyLookup,
 ): Promise<MessageContent> {
-  return receiveEnvelope(me, contact, await decodeEnvelope(await openInbound(me, bytes)), lookup);
+  const opened = await openPayload(me, bytes);
+  if (!opened || opened.type !== SEALED_ENVELOPE) {
+    throw new Error('Kein Nachrichten-Envelope (falscher Nutzlast-Typ).');
+  }
+  return receiveEnvelope(me, contact, await decodeEnvelope(opened.payload), lookup);
 }
 
 export async function receiveEnvelope(

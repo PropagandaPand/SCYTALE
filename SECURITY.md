@@ -2,7 +2,7 @@
 
 SCYTALE ist gegen **anlasslose Massenüberwachung** gebaut (Chatkontrolle /
 CSAR). Dieses Dokument ist die genaue Aufschlüsselung aller Mechanismen und
-sagt ehrlich, was geschützt ist — und was nicht. Stand: v0.14.0.
+sagt ehrlich, was geschützt ist — und was nicht. Stand: v0.16.0.
 
 **Leitprinzipien:** niemals eigene Krypto erfinden (vetted Primitiven +
 etablierte Protokolle: X3DH, Double Ratchet); der Server ist ein **dummer
@@ -86,7 +86,28 @@ Primitiven beim Start.
 
 - **Ed25519** (Signatur) + **X25519** (DH) via libsodium.
 - **Pairwise Safety Number** + **Identicon** zum Out-of-Band-Abgleich gegen MITM;
-  Kontakt als *verifiziert* markierbar.
+  Kontakt als *verifiziert* markierbar (über den **Master**, stabil über Geräte).
+- **Identitätswechsel eines Kontakts** wird nie automatisch übernommen: der
+  behauptete Master wird nur als **Vorschlag** festgehalten (und nur, wenn sein
+  Device-Cert unter ihm verifiziert) und braucht eine bewusste Nutzeraktion plus
+  **erneuten Safety-Number-Vergleich**.
+- **Denylist verlassener Master (bewusst endgültig):** akzeptiert der Nutzer
+  einen Wechsel, landet der ersetzte Master auf einer Sperrliste des Kontakts und
+  wird **nie wieder angeboten**. Begründung: ein verlassener Master ist der
+  *wahrscheinlichste kompromittierte Schlüssel im System* — er liegt in alten
+  Backups und auf verworfenen Geräten, meist genau deshalb wurde er verlassen.
+  Ein Downgrade-Angebot darauf wäre der erste Versuch eines Angreifers mit
+  Altbeständen, und die **alte Safety Number wirkt beim Vergleich vertraut
+  statt alarmierend** („stimmt doch mit früher überein") — die bewusste
+  Bestätigung würde also gerade das Falsche bestätigen. Eine Nachricht unter
+  einem gesperrten Master wird **sichtbar abgelehnt** (nicht still verworfen)
+  und lässt `verified` **unberührt**, damit ein alter Schlüssel das Vertrauen in
+  die aktuelle Identität nicht degradieren kann. Die Sperrliste ist Teil des
+  Kontakt-Datensatzes und damit auch im Recovery-Export enthalten — ein Restore
+  ohne sie würde den Downgrade-Pfad wieder öffnen.
+  *Gewollte Konsequenz:* der Weg zurück zu einem verlassenen Master ist
+  **endgültig zu**, auch für den legitimen Nutzer, der es sich anders überlegt.
+  Der Rückweg ist ein frischer Identitätsaufbau. Das ist der Schutz, kein Bug.
 
 ---
 

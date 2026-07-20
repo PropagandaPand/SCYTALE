@@ -64,6 +64,17 @@ export interface Contact {
    * claimed master); never applied automatically.
    */
   pendingMaster?: { masterPub: Bytes; epoch: number; signPub: Bytes; dhPub: Bytes };
+  /**
+   * Masters this contact has DEMONSTRABLY left behind (base64 of the pub key),
+   * appended whenever we accept a replacement. An abandoned master is the most
+   * likely compromised key in the whole system — it lingers in old backups and
+   * on discarded devices, which is usually why it was abandoned. So it is never
+   * offered again: a downgrade back to it is the first thing an attacker with
+   * access to old material would try, and the safety number would look
+   * *familiar* to the user rather than alarming. Growth is one entry per real
+   * identity change of this contact.
+   */
+  retiredMasters?: string[];
   bundle?: PreKeyBundle; // present when WE hold their code (needed to initiate)
   ratchet: RatchetState | null; // null until the session is established
   pendingHeader: InitialMessageHeader | null; // initiator attaches until first reply arrives
@@ -91,6 +102,20 @@ export class HandshakeMismatchError extends Error {
       'Handshake passt nicht zusammen (vermutlich verbrauchter oder veralteter Prekey) — Verbindung muss neu aufgebaut werden.',
     );
     this.name = 'HandshakeMismatchError';
+  }
+}
+
+/**
+ * A message arrived under a master this contact has already left behind. Never
+ * offered for acceptance again: the abandoned key is the most likely
+ * compromised one, and its old safety number would look reassuringly familiar
+ * to the user. Surfaced (not swallowed) — it is either an attack worth knowing
+ * about, or the contact must learn that only a fresh identity setup works.
+ */
+export class RetiredIdentityError extends Error {
+  constructor() {
+    super('Nachricht einer früheren, bereits ersetzten Identität dieses Kontakts — abgelehnt.');
+    this.name = 'RetiredIdentityError';
   }
 }
 
@@ -196,6 +221,12 @@ export async function makeContactFromHeader(
 export async function acceptMasterChange(contact: Contact): Promise<boolean> {
   const p = contact.pendingMaster;
   if (!p) return false;
+  // The master we are replacing is now abandoned — remember it so it can never
+  // be offered again (see Contact.retiredMasters).
+  const retired = await b64(contact.peerMasterPub);
+  contact.retiredMasters = [...(contact.retiredMasters ?? []), retired].filter(
+    (v, i, arr) => arr.indexOf(v) === i,
+  );
   contact.peerMasterPub = p.masterPub;
   contact.peerEpoch = p.epoch;
   contact.peerSignPub = p.signPub;
@@ -456,11 +487,20 @@ export async function receiveEnvelope(
     contact.peerMasterPub &&
     cmp(envelope.x3dh.masterPub, contact.peerMasterPub) !== 0
   ) {
+    const x = envelope.x3dh;
+
+    // Retired master? Refuse outright and — importantly — WITHOUT touching
+    // `verified`. Otherwise anyone holding the abandoned key could degrade our
+    // trust in the contact's CURRENT identity just by sending. This is a dead
+    // end by design: the way back is a fresh identity setup, not this key.
+    if (contact.retiredMasters?.includes(await b64(x.masterPub))) {
+      throw new RetiredIdentityError();
+    }
+
     contact.verified = false;
     // Remember the claimed identity so the user can deliberately accept it, but
     // ONLY if it is internally consistent (device cert verifies under the
     // claimed master). An inconsistent claim isn't even worth offering.
-    const x = envelope.x3dh;
     if (await verifyDeviceCert(x.masterPub, x.epoch, x.identitySignPub, x.identityDhPub, x.deviceCert)) {
       contact.pendingMaster = {
         masterPub: x.masterPub,
@@ -534,6 +574,7 @@ interface ContactWire {
   hidden: boolean;
   staleIdentity: boolean;
   pendingMaster: { masterPub: string; epoch: number; signPub: string; dhPub: string } | null;
+  retiredMasters: string[];
   bundle: string | null; // bundle token (null if we only hold their identity)
   ratchet: string | null; // base64 of serializeState output
   pendingHeader: unknown | null;
@@ -570,6 +611,7 @@ export async function serializeContact(c: Contact): Promise<Bytes> {
           dhPub: await b64(c.pendingMaster.dhPub),
         }
       : null,
+    retiredMasters: c.retiredMasters ?? [],
     bundle: c.bundle ? await encodeBundle(c.bundle) : null,
     ratchet: c.ratchet ? await b64(await serializeState(c.ratchet)) : null,
     pendingHeader: c.pendingHeader ? await encodeInitialHeader(c.pendingHeader) : null,
@@ -600,6 +642,7 @@ export async function deserializeContact(bytes: Bytes): Promise<Contact> {
           dhPub: await unb64(wire.pendingMaster.dhPub),
         }
       : undefined,
+    retiredMasters: wire.retiredMasters?.length ? wire.retiredMasters : undefined,
     bundle: wire.bundle ? await decodeBundle(wire.bundle) : undefined,
     ratchet: wire.ratchet ? await deserializeState(await unb64(wire.ratchet)) : null,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

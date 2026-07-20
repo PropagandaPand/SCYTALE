@@ -16,7 +16,7 @@
  */
 import { sign, verify } from './identity';
 import { verifyDeviceCert, epochBytes } from './master';
-import { concatBytes, utf8 } from './codec';
+import { concatBytes, utf8, b64encode, b64decode } from './codec';
 import type { Bytes } from './types';
 
 export interface DeviceEntry {
@@ -85,4 +85,51 @@ export function isNewerDeviceList(
 /** Is this device part of the (authoritative) list? Cert-validity is separate. */
 export function deviceInList(list: DeviceList, deviceSignPub: Bytes): boolean {
   return list.devices.some((d) => cmpBytes(d.signPub, deviceSignPub) === 0);
+}
+
+// --- (de)serialisation — used for vault storage AND for wire distribution ---
+
+interface DeviceListWire {
+  v: 1;
+  masterPub: string;
+  epoch: number;
+  version: number;
+  devices: { signPub: string; dhPub: string; deviceCert: string }[];
+  listSig: string;
+}
+
+export async function encodeDeviceList(list: DeviceList): Promise<Bytes> {
+  const wire: DeviceListWire = {
+    v: 1,
+    masterPub: await b64encode(list.masterPub),
+    epoch: list.epoch,
+    version: list.version,
+    devices: await Promise.all(
+      list.devices.map(async (d) => ({
+        signPub: await b64encode(d.signPub),
+        dhPub: await b64encode(d.dhPub),
+        deviceCert: await b64encode(d.deviceCert),
+      })),
+    ),
+    listSig: await b64encode(list.listSig),
+  };
+  return utf8.encode(JSON.stringify(wire));
+}
+
+export async function decodeDeviceList(bytes: Bytes): Promise<DeviceList> {
+  const wire = JSON.parse(utf8.decode(bytes)) as DeviceListWire;
+  if (wire.v !== 1) throw new Error('Unbekanntes DeviceList-Format.');
+  return {
+    masterPub: await b64decode(wire.masterPub),
+    epoch: wire.epoch,
+    version: wire.version,
+    devices: await Promise.all(
+      wire.devices.map(async (d) => ({
+        signPub: await b64decode(d.signPub),
+        dhPub: await b64decode(d.dhPub),
+        deviceCert: await b64decode(d.deviceCert),
+      })),
+    ),
+    listSig: await b64decode(wire.listSig),
+  };
 }

@@ -20,12 +20,20 @@ export interface KeyPair {
 }
 
 export interface IdentityKeys {
-  master: KeyPair; // Ed25519 cross-signing master (the stable user identity)
+  /** Ed25519 cross-signing master. On a LINKED (non-primary) device the
+   *  privateKey is empty — the master key never leaves the primary device. */
+  master: KeyPair;
   epoch: number; // monotonic; device cert + safety number hang off this
   deviceCert: Bytes; // master's signature over (epoch, sign.pub, dh.pub)
   sign: KeyPair; // Ed25519 device
   dh: KeyPair; // X25519 device
   createdAt: number;
+}
+
+/** Only the primary device holds the master private key, so only it can
+ *  cross-sign new devices, publish device lists or rotate the master. */
+export function isPrimaryDevice(id: IdentityKeys): boolean {
+  return id.master.privateKey.length > 0;
 }
 
 // libsodium hands back plain Uint8Arrays; copy into ArrayBuffer-backed views.

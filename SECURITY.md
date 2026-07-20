@@ -103,7 +103,15 @@ Primitiven beim Start.
   Akzeptieren auf dessen Platz pinnen lassen. Rotation und Geräte-Kopplung
   passieren die Prüfung (die Device-Keys bleiben, nur der Master wechselt); ein
   Peer mit wirklich neuen Device-Keys erscheint als **neuer Kontakt** — das ist
-  die ehrliche Darstellung, kein Rückschritt.
+  die ehrliche Darstellung, kein Rückschritt. Die Prüfung steht **ganz oben in
+  `receiveEnvelope` und gilt für jedes Prekey**, nicht nur im Zweig für
+  Master-Wechsel: passt der Master zufällig, wird dieser Zweig übersprungen und
+  einziger verbleibender Wächter wäre die Cert-Prüfung in `respondX3DH` — die
+  fängt zwar eine Fälschung, aber erst nachdem wir das Envelope bereits als
+  hierher gehörend akzeptiert haben. Verteidigung darf nicht davon abhängen,
+  welchen Zweig eine Nachricht nimmt. Nebeneffekt: ein Zweitgerät des Peers kann
+  die Session nicht mehr stillschweigend überschreiben — Per-Device-Sessions
+  sind Aufgabe von Stufe 3c, kein Zufallsprodukt dieses Pfads.
 - **`verified` fällt nur durch eine Nutzeraktion**, nie durch Eingehendes. Eine
   Behauptung setzt das Flag **nicht** zurück; erst `acceptMasterChange` — also
   das bewusste Umpinnen — löscht es. Andernfalls könnte jeder, der unsere Inbox

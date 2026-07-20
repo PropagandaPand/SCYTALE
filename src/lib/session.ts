@@ -494,6 +494,37 @@ export async function receiveEnvelope(
   envelope: Envelope,
   lookup: PreKeyLookup,
 ): Promise<MessageContent> {
+  // ── Bind the envelope to THIS conversation, for EVERY prekey ──────────────
+  // `conv` is a pure routing field: the sender picks it freely and the relay
+  // accepts unauthenticated sends into any inbox. So the fact that this envelope
+  // was matched to `contact` proves nothing on its own. The device cert proves
+  // nothing about *whose* keys these are either — anyone can generate a master
+  // and self-sign a cert over arbitrary public keys (a cert carries no proof of
+  // possession).
+  //
+  // What IS binding: our roomId is derived from our DH key and the peer's, so a
+  // prekey that legitimately concerns this contact must re-derive exactly this
+  // roomId from the identity it presents.
+  //
+  // This sits at the TOP, not inside the master-mismatch branch below, so that
+  // the contact-selection is validated on every path rather than one. When the
+  // masters happen to match, the mismatch branch is skipped entirely and the
+  // only remaining guard would be the cert check inside respondX3DH — which
+  // catches a forgery, but only after we have already accepted the envelope as
+  // belonging here. Defence should not depend on which branch a message takes.
+  //
+  // Legitimate cases pass: an ordinary prekey, a master rotation and a
+  // device-linking swap all keep the device keys. A peer whose device keys
+  // really changed arrives as a NEW contact — the honest outcome. (That also
+  // stops a second device of the peer from silently clobbering this session;
+  // per-device sessions are stage 3c's job, not an accident of this path.)
+  if (envelope.type === 'prekey') {
+    const claimed = envelope.x3dh.identityDhPub;
+    if ((await computeRoomId(me.dh.publicKey, claimed)) !== contact.roomId) {
+      throw new Error('Nachricht gehört nicht zu dieser Unterhaltung — verworfen.');
+    }
+  }
+
   // Master pinning (TOFU): a prekey claiming a DIFFERENT master for an already-
   // pinned contact is rejected outright. A bare master change — without a valid,
   // dual-signed rotation chain from the pinned master — is a possible MITM, so a
@@ -506,28 +537,9 @@ export async function receiveEnvelope(
   ) {
     const x = envelope.x3dh;
 
-    // ── Bind the claim to THIS conversation before touching anything ────────
-    // `conv` is a pure routing field: the sender picks it freely and the relay
-    // accepts unauthenticated sends into any inbox. So the fact that this
-    // envelope was matched to `contact` proves nothing. And the device cert
-    // proves nothing about *whose* keys these are either — anyone can generate a
-    // master and self-sign a cert over arbitrary public keys (there is no proof
-    // of possession in a cert).
-    //
-    // What IS binding: our roomId is derived from our DH key and the peer's. A
-    // claim that legitimately concerns this contact must therefore re-derive
-    // exactly this roomId from the identity key it presents. An attacker who
-    // substitutes their OWN device keys fails this check — which is precisely
-    // the injection that would otherwise let a group co-member get a contact
-    // re-pinned onto themselves via acceptMasterChange.
-    //
-    // The legitimate cases still pass: a master rotation and a device-linking
-    // swap both keep the device keys (only the master changes). A peer whose
-    // device keys really changed arrives as a NEW contact instead — which is the
-    // honest outcome, not a regression.
-    if ((await computeRoomId(me.dh.publicKey, x.identityDhPub)) !== contact.roomId) {
-      throw new Error('Identitätswechsel-Behauptung gehört nicht zu dieser Unterhaltung — verworfen.');
-    }
+    // (Conversation binding is enforced at the TOP of this function, for every
+    // prekey — an identity-change claim that does not derive this roomId never
+    // reaches this branch.)
 
     // Retired master? Refuse outright and — importantly — WITHOUT touching
     // `verified`. Otherwise anyone holding the abandoned key could degrade our

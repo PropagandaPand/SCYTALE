@@ -7,12 +7,15 @@ import {
   serializeIdentity,
   deserializeIdentity,
   identityFingerprint,
+  verifyLinkGrant,
   seal,
   open,
   utf8,
   type IdentityKeys,
+  type LinkGrant,
 } from '../crypto';
 import { loadRecord, saveRecord } from './db';
+import { saveOwnDeviceList } from './devices';
 
 const KEY = 'identity';
 // AAD binds this ciphertext to the identity slot + schema version.
@@ -42,4 +45,34 @@ export function fingerprintOf(id: IdentityKeys): Promise<string> {
 /** Persist an identity (used by backup restore to install the recovered one). */
 export async function saveIdentity(dek: CryptoKey, id: IdentityKeys): Promise<void> {
   await saveRecord(KEY, await seal(dek, await serializeIdentity(id), AAD));
+}
+
+/**
+ * Adopt a linking grant: this device keeps its OWN device keypair (so its inbox
+ * and running sessions are unaffected) and swaps only its identity anchor — the
+ * master public key, epoch and cross-signing cert — plus the granted device list.
+ *
+ * TRANSACTIONAL by construction: the grant is fully verified against our device
+ * keys BEFORE anything is written, and the new identity is persisted BEFORE the
+ * old master key is dropped from the returned object. A failed or mismatching
+ * grant leaves the previous identity untouched — never a device with neither.
+ */
+export async function installLinkedIdentity(
+  dek: CryptoKey,
+  current: IdentityKeys,
+  grant: LinkGrant,
+): Promise<IdentityKeys> {
+  if (!(await verifyLinkGrant(grant, current.sign.publicKey, current.dh.publicKey))) {
+    throw new Error('Kopplungs-Nachweis ungültig — Identität unverändert.');
+  }
+  const linked: IdentityKeys = {
+    ...current,
+    // master PUBLIC only: the private key stays on the primary device.
+    master: { publicKey: grant.masterPub, privateKey: new Uint8Array(0) },
+    epoch: grant.epoch,
+    deviceCert: grant.deviceCert,
+  };
+  await saveIdentity(dek, linked); // write new identity first …
+  await saveOwnDeviceList(dek, grant.deviceList); // … then its device list
+  return linked;
 }

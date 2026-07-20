@@ -80,6 +80,8 @@ export function App() {
         setPhase('open');
         say('');
         setLockState('idle');
+        setBusy(false); // clear on SUCCESS too — otherwise busy leaks true for
+        // the whole session and disables the button after the next auto-lock.
       }, 260);
     } catch (e) {
       if (e instanceof LockedOutError) {
@@ -103,6 +105,8 @@ export function App() {
     setDek(null);
     setPhase('unlock');
     setLockState('idle');
+    setBusy(false); // a fresh lock screen must always be interactable, whatever
+    // state we came from — never leave the unlock button disabled.
     say('Gesperrt.');
   }, []);
 

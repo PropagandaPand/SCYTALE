@@ -56,6 +56,14 @@ export interface Contact {
    * Receiving stays open: their identity is unchanged, their messages are real.
    */
   staleIdentity?: boolean;
+  /**
+   * A DIFFERENT identity was claimed for this contact and rejected by the
+   * pinning rule. Kept here so the user can deliberately accept it — a block
+   * without a path to acceptance would make the door one-sided. Only recorded
+   * when the claim is internally consistent (its device cert verifies under the
+   * claimed master); never applied automatically.
+   */
+  pendingMaster?: { masterPub: Bytes; epoch: number; signPub: Bytes; dhPub: Bytes };
   bundle?: PreKeyBundle; // present when WE hold their code (needed to initiate)
   ratchet: RatchetState | null; // null until the session is established
   pendingHeader: InitialMessageHeader | null; // initiator attaches until first reply arrives
@@ -161,6 +169,48 @@ export async function makeContactFromHeader(
     ratchet: null,
     pendingHeader: null,
   };
+}
+
+/**
+ * PEER SIDE of the door: deliberately accept a claimed new identity for this
+ * contact (explicit user action only). Re-pins the master, drops the session so
+ * a fresh X3DH runs under the new identity, and clears `verified` — the safety
+ * number MUST be compared again. Returns false if nothing was pending.
+ */
+export async function acceptMasterChange(contact: Contact): Promise<boolean> {
+  const p = contact.pendingMaster;
+  if (!p) return false;
+  contact.peerMasterPub = p.masterPub;
+  contact.peerEpoch = p.epoch;
+  contact.peerSignPub = p.signPub;
+  contact.peerDhPub = p.dhPub;
+  contact.peerFingerprint = await identityFingerprint(p.masterPub, p.masterPub);
+  contact.bundle = undefined; // the stored bundle belonged to the old identity
+  contact.ratchet = null; // force a fresh handshake
+  contact.pendingHeader = null;
+  contact.verified = false; // re-verification is mandatory
+  contact.pendingMaster = undefined;
+  return true;
+}
+
+/**
+ * OUR SIDE of the door: leave the stale-identity state after a device linking
+ * swap. Drops the session so the next message runs a fresh X3DH under our
+ * CURRENT (linked) master and lifts the send block. The peer will see an
+ * identity warning and must accept us — that is the pinning working, not a bug.
+ */
+export function reconnectContact(contact: Contact): void {
+  contact.staleIdentity = undefined;
+  contact.ratchet = null;
+  contact.pendingHeader = null;
+  // The stored bundle's ONE-TIME prekey was consumed by the session we are
+  // resetting. Reusing it would make us derive DH1–DH4 while the peer (who no
+  // longer holds that key) derives DH1–DH3 — different shared secrets, and the
+  // handshake fails silently. Drop it and fall back to the standard no-OPK
+  // X3DH, exactly as Signal does when a peer has no one-time prekeys left.
+  if (contact.bundle?.oneTimePreKey) {
+    contact.bundle = { ...contact.bundle, oneTimePreKey: undefined };
+  }
 }
 
 /** Encrypt outgoing text into a wire envelope; establishes the session if needed. */
@@ -391,6 +441,18 @@ export async function receiveEnvelope(
     cmp(envelope.x3dh.masterPub, contact.peerMasterPub) !== 0
   ) {
     contact.verified = false;
+    // Remember the claimed identity so the user can deliberately accept it, but
+    // ONLY if it is internally consistent (device cert verifies under the
+    // claimed master). An inconsistent claim isn't even worth offering.
+    const x = envelope.x3dh;
+    if (await verifyDeviceCert(x.masterPub, x.epoch, x.identitySignPub, x.identityDhPub, x.deviceCert)) {
+      contact.pendingMaster = {
+        masterPub: x.masterPub,
+        epoch: x.epoch,
+        signPub: x.identitySignPub,
+        dhPub: x.identityDhPub,
+      };
+    }
     throw new MasterChangedError();
   }
 
@@ -438,6 +500,7 @@ interface ContactWire {
   verified: boolean;
   hidden: boolean;
   staleIdentity: boolean;
+  pendingMaster: { masterPub: string; epoch: number; signPub: string; dhPub: string } | null;
   bundle: string | null; // bundle token (null if we only hold their identity)
   ratchet: string | null; // base64 of serializeState output
   pendingHeader: unknown | null;
@@ -466,6 +529,14 @@ export async function serializeContact(c: Contact): Promise<Bytes> {
     verified: c.verified ?? false,
     hidden: c.hidden ?? false,
     staleIdentity: c.staleIdentity ?? false,
+    pendingMaster: c.pendingMaster
+      ? {
+          masterPub: await b64(c.pendingMaster.masterPub),
+          epoch: c.pendingMaster.epoch,
+          signPub: await b64(c.pendingMaster.signPub),
+          dhPub: await b64(c.pendingMaster.dhPub),
+        }
+      : null,
     bundle: c.bundle ? await encodeBundle(c.bundle) : null,
     ratchet: c.ratchet ? await b64(await serializeState(c.ratchet)) : null,
     pendingHeader: c.pendingHeader ? await encodeInitialHeader(c.pendingHeader) : null,
@@ -488,6 +559,14 @@ export async function deserializeContact(bytes: Bytes): Promise<Contact> {
     verified: wire.verified ?? false,
     hidden: wire.hidden || undefined,
     staleIdentity: wire.staleIdentity || undefined,
+    pendingMaster: wire.pendingMaster
+      ? {
+          masterPub: await unb64(wire.pendingMaster.masterPub),
+          epoch: wire.pendingMaster.epoch,
+          signPub: await unb64(wire.pendingMaster.signPub),
+          dhPub: await unb64(wire.pendingMaster.dhPub),
+        }
+      : undefined,
     bundle: wire.bundle ? await decodeBundle(wire.bundle) : undefined,
     ratchet: wire.ratchet ? await deserializeState(await unb64(wire.ratchet)) : null,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

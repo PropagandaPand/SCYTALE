@@ -48,9 +48,26 @@ export interface Contact {
   peerAvatarB64?: string; // avatar the peer shared via their profile
   verified?: boolean; // local flag: safety number compared out-of-band
   hidden?: boolean; // group-member-only contact — kept out of the 1:1 list
+  /**
+   * This contact predates a device-linking identity swap: they still have our
+   * OLD master pinned. Sending is blocked (see sendContent) because anything we
+   * send over the surviving session would implicitly claim an identity we no
+   * longer hold — the peer would attribute it to the old, *verified* master.
+   * Receiving stays open: their identity is unchanged, their messages are real.
+   */
+  staleIdentity?: boolean;
   bundle?: PreKeyBundle; // present when WE hold their code (needed to initiate)
   ratchet: RatchetState | null; // null until the session is established
   pendingHeader: InitialMessageHeader | null; // initiator attaches until first reply arrives
+}
+
+/** Sending to a contact that still pins our pre-linking master is refused: the
+ *  message would claim an identity we no longer hold. Re-connect first. */
+export class StaleIdentityError extends Error {
+  constructor() {
+    super('Dieser Kontakt kennt noch deine frühere Identität — bitte neu verbinden, bevor du schreibst.');
+    this.name = 'StaleIdentityError';
+  }
 }
 
 /** A pinned contact presented a different master without a valid rotation chain
@@ -268,6 +285,13 @@ function unframeContent(bytes: Bytes): MessageContent {
 }
 
 async function sendContent(me: IdentityKeys, contact: Contact, content: MessageContent): Promise<Bytes> {
+  // Enforced HERE, not in the UI: after a device-linking identity swap the peer
+  // still has our OLD master pinned, so any message over the surviving session
+  // would assert an identity we no longer hold — a false authenticity claim, not
+  // just a stale label. Receiving remains allowed.
+  if (contact.staleIdentity) {
+    throw new StaleIdentityError();
+  }
   if (!contact.ratchet) {
     if (!contact.bundle) {
       throw new Error('Für den ersten Schritt braucht ihr den Code dieses Kontakts.');
@@ -413,6 +437,7 @@ interface ContactWire {
   peerAvatarB64: string | null;
   verified: boolean;
   hidden: boolean;
+  staleIdentity: boolean;
   bundle: string | null; // bundle token (null if we only hold their identity)
   ratchet: string | null; // base64 of serializeState output
   pendingHeader: unknown | null;
@@ -440,6 +465,7 @@ export async function serializeContact(c: Contact): Promise<Bytes> {
     peerAvatarB64: c.peerAvatarB64 ?? null,
     verified: c.verified ?? false,
     hidden: c.hidden ?? false,
+    staleIdentity: c.staleIdentity ?? false,
     bundle: c.bundle ? await encodeBundle(c.bundle) : null,
     ratchet: c.ratchet ? await b64(await serializeState(c.ratchet)) : null,
     pendingHeader: c.pendingHeader ? await encodeInitialHeader(c.pendingHeader) : null,
@@ -461,6 +487,7 @@ export async function deserializeContact(bytes: Bytes): Promise<Contact> {
     peerAvatarB64: wire.peerAvatarB64 ?? undefined,
     verified: wire.verified ?? false,
     hidden: wire.hidden || undefined,
+    staleIdentity: wire.staleIdentity || undefined,
     bundle: wire.bundle ? await decodeBundle(wire.bundle) : undefined,
     ratchet: wire.ratchet ? await deserializeState(await unb64(wire.ratchet)) : null,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

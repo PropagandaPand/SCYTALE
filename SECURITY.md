@@ -91,6 +91,28 @@ Primitiven beim Start.
   behauptete Master wird nur als **Vorschlag** festgehalten (und nur, wenn sein
   Device-Cert unter ihm verifiziert) und braucht eine bewusste Nutzeraktion plus
   **erneuten Safety-Number-Vergleich**.
+- **Bindung der Behauptung an die Unterhaltung:** das `conv`-Feld ist reines
+  Routing — der Absender wählt es frei, und das Relay nimmt unauthentifizierte
+  Sends an jede Inbox an. Ein Device-Cert beweist ebenfalls **nichts über den
+  Besitz** der enthaltenen Keys: jeder kann sich ein Master-Keypair erzeugen und
+  ein Cert über *beliebige* Public Keys selbst ausstellen. Deshalb wird vor jeder
+  Zustandsänderung geprüft, dass die behauptete Identität **dieselbe `roomId`
+  ableitet** (`computeRoomId(eigenerDH, behaupteterDH)`). Ohne das könnte ein
+  Gruppen-Mitglied, das `dhPub` eines anderen aus dem Roster kennt, einen
+  Identitätswechsel für einen *fremden* Kontakt einschleusen und sich beim
+  Akzeptieren auf dessen Platz pinnen lassen. Rotation und Geräte-Kopplung
+  passieren die Prüfung (die Device-Keys bleiben, nur der Master wechselt); ein
+  Peer mit wirklich neuen Device-Keys erscheint als **neuer Kontakt** — das ist
+  die ehrliche Darstellung, kein Rückschritt.
+- **`verified` fällt nur durch eine Nutzeraktion**, nie durch Eingehendes. Eine
+  Behauptung setzt das Flag **nicht** zurück; erst `acceptMasterChange` — also
+  das bewusste Umpinnen — löscht es. Andernfalls könnte jeder, der unsere Inbox
+  erreicht, das Verifikations-Flag beliebiger Kontakte beliebig oft abbrennen:
+  ein Verifikations-DoS, der die MITM-Warnung abtrainiert und damit genau die
+  Vorbedingung für ein späteres Fehl-Akzept schafft. `verified` beschreibt die
+  Identität, die wir **gepinnt** haben — eine unangenommene Behauptung hat daran
+  nichts geändert. Auch hier warnt die UI nur bei einer **neuen** Behauptung
+  (Dedup auf den Inhalt, nicht auf ein Flag).
 - **Denylist verlassener Master (bewusst endgültig):** akzeptiert der Nutzer
   einen Wechsel, landet der ersetzte Master auf einer Sperrliste des Kontakts und
   wird **nie wieder angeboten**. Begründung: ein verlassener Master ist der
@@ -187,6 +209,16 @@ SK  = HKDF-SHA256( 0xFF·32 || DH1||DH2||DH3||DH4 ,  info="SCYTALE_X3DH_v1" )
   gedeckelt gegen DoS: **1000 pro Sprung** (`MAX_SKIP`) **und 2000 gesamt pro
   Session** (`MAX_SKIP_SESSION`, älteste werden verworfen) — ein Strom von
   Hoch-N-Nachrichten kann den Tresor nicht unbegrenzt wachsen lassen.
+- **Der IV wird abgeleitet, nicht übertragen** (`HKDF(MK)` → Key ‖ IV, 44 Byte).
+  Das spart Bandbreite, macht die Persistenz des Chain-Keys aber
+  **sicherheitskritisch**: derselbe Message-Key ergibt denselben Key *und*
+  denselben Nonce. Ein Rollback des Sende-Chain-Keys ist damit kein harmloser
+  Replay, sondern ein **Two-Time-Pad** — es leakt das XOR beider Klartexte und
+  erlaubt die Rekonstruktion des GHASH-Authentifizierungsschlüssels, also auch
+  **Fälschung**. `ratchetEncrypt` mutiert den Zustand in-place; deshalb läuft
+  jeder ausgehende Pfad über `encryptAndPersist`, das den fortgeschrittenen
+  Zustand **vor** dem Versand schreibt. Ein Absturz in der Lücke kostet dann
+  höchstens eine ungesendete Nachricht, nie einen wiederverwendeten Nonce.
 
 ---
 

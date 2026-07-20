@@ -349,9 +349,15 @@ export function Messenger({ dek, onLock }: Props) {
         content = await receiveEnvelope(id, contact, env, lookup);
       } catch (e) {
         if (e instanceof MasterChangedError) {
-          // Hard warning + persist the verified reset, Signal-style. Message dropped.
+          // Persist the pending claim; the message itself is dropped. `verified`
+          // stays as it was — the pin has NOT moved, and only a user-confirmed
+          // accept moves it. Alert only on a NEW claim (see firstOccurrence):
+          // the same claim can be replayed at will by anyone who can reach our
+          // inbox, and a warning per copy would blunt the user against it.
           await saveContact(dek, contact);
-          setError(`⚠ Sicherheit: Der Identitätsschlüssel von ${displayName(contact)} hat sich geändert — möglicher MITM. Bitte neu verifizieren.`);
+          if (e.firstOccurrence) {
+            setError(`⚠ Sicherheit: Für ${displayName(contact)} wird eine neue Identität behauptet — nicht übernommen. Prüfe sie in der Kontaktansicht, bevor du sie akzeptierst.`);
+          }
           bump();
         } else if (e instanceof RetiredIdentityError) {
           // Persist the attempt flag, but alert ONLY on the first one. Whoever
@@ -537,6 +543,29 @@ export function Messenger({ dek, onLock }: Props) {
     bump();
   }
 
+  /**
+   * Encrypt through the ratchet and persist the advanced state BEFORE the bytes
+   * go anywhere. Every outgoing path must go through here.
+   *
+   * ⚠️ WHY THIS IS NOT OPTIONAL: `ratchetEncrypt` mutates the sending chain in
+   * place (`state.CKs = ck; state.Ns += 1`). If the app dies before the contact
+   * is written — an iOS PWA freeze, a service-worker reload, a crash — the next
+   * load restores the OLD chain key, and the next send derives the SAME message
+   * key. The AES-GCM IV is derived from that message key rather than transmitted
+   * (see messageKeyMaterial), so an identical key comes with an identical IV:
+   * two different plaintexts under one (key, nonce) pair. That is a two-time pad
+   * — it leaks the XOR of both plaintexts and lets an attacker recover the GHASH
+   * authentication key, i.e. it breaks confidentiality AND lets them forge.
+   *
+   * Persisting BEFORE sending (not after) is deliberate: a crash in the gap must
+   * cost at most one unsent message, never a reused nonce.
+   */
+  async function encryptAndPersist(contact: Contact, produce: () => Promise<Bytes>): Promise<Bytes> {
+    const envelope = await produce();
+    await saveContact(dek, contact);
+    return envelope;
+  }
+
   // ── Groups ────────────────────────────────────────────────────────
   async function sendEnvelopeTo(contact: Contact, envelope: Bytes, mid?: string) {
     let room = sendRoomRef.current.get(contact.roomId);
@@ -591,7 +620,7 @@ export function Messenger({ dek, onLock }: Props) {
       const roster = [me, ...group.members.filter((x) => !eqBytes(x.dhPub, m.dhPub))];
       const invite: GroupInvite = await toInvite({ ...group, members: roster });
       try {
-        await sendEnvelopeTo(contact, await sendGroupInvite(id, contact, invite));
+        await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendGroupInvite(id, contact, invite)));
       } catch {
         /* retry when they come online */
       }
@@ -635,17 +664,28 @@ export function Messenger({ dek, onLock }: Props) {
     const id = identityRef.current;
     const g = groupsRef.current.find((x) => x.id === activeGroup);
     if (!id || !g) return;
-    try {
-      for (const m of g.members) {
+    // Per-member error handling: one unreachable member (stale identity, no
+    // bundle yet, ratchet not ready) must not silently cut off everyone behind
+    // them in the list — and must not swallow the local copy of a message the
+    // earlier members already received.
+    const failed: string[] = [];
+    for (const m of g.members) {
+      try {
         const contact = await ensureMemberContact(m);
         if (!contact) continue;
-        await sendEnvelopeTo(contact, await sendGroupMessage(id, contact, g.id, myProfileRef.current.name, inner));
+        await sendEnvelopeTo(
+          contact,
+          await encryptAndPersist(contact, () =>
+            sendGroupMessage(id, contact, g.id, myProfileRef.current.name, inner),
+          ),
+        );
+      } catch (e) {
+        failed.push(`${m.name || 'Unbekannt'}: ${(e as Error).message}`);
       }
-      await appendMessage(g.id, localMsg);
-      bump();
-    } catch (e) {
-      setError('Senden fehlgeschlagen: ' + (e as Error).message);
     }
+    await appendMessage(g.id, localMsg);
+    if (failed.length) setError(`An ${failed.length} Mitglied(er) nicht zugestellt — ${failed.join(' · ')}`);
+    bump();
   }
 
   async function deleteGroupAction(gid: string) {
@@ -733,7 +773,7 @@ export function Messenger({ dek, onLock }: Props) {
     const removed = await ensureMemberContact(member);
     if (removed) {
       try {
-        await sendEnvelopeTo(removed, await sendGroupRemove(id, removed, group.id));
+        await sendEnvelopeTo(removed, await encryptAndPersist(removed, () => sendGroupRemove(id, removed, group.id)));
       } catch {
         /* they'll just stop receiving; roster already dropped them */
       }
@@ -747,7 +787,7 @@ export function Messenger({ dek, onLock }: Props) {
         const c = await ensureMemberContact(m);
         if (c) {
           try {
-            await sendEnvelopeTo(c, await sendGroupLeave(id, c, group.id));
+            await sendEnvelopeTo(c, await encryptAndPersist(c, () => sendGroupLeave(id, c, group.id)));
           } catch {
             /* best effort */
           }
@@ -850,7 +890,7 @@ export function Messenger({ dek, onLock }: Props) {
     const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
     if (!contact) return;
     try {
-      const envelope = await sendMessage(id, contact, text);
+      const envelope = await encryptAndPersist(contact, () => sendMessage(id, contact, text));
       let room = sendRoomRef.current.get(contact.roomId);
       if (!room) {
         await connectSend(contact);
@@ -901,7 +941,7 @@ export function Messenger({ dek, onLock }: Props) {
       }
       const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
       if (!contact) return;
-      await sendEnvelopeTo(contact, await sendFile(id, contact, name, mime, data), mid);
+      await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendFile(id, contact, name, mime, data)), mid);
       await appendMessage(contact.roomId, { ...localMsg, status: 'pending' });
       startAckTimer(mid);
       await saveContact(dek, contact);
@@ -988,7 +1028,7 @@ export function Messenger({ dek, onLock }: Props) {
       }
       const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
       if (!contact) return;
-      await sendEnvelopeTo(contact, await sendFile(id, contact, name, mime, data), mid);
+      await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendFile(id, contact, name, mime, data)), mid);
       await appendMessage(contact.roomId, { ...localMsg, status: 'pending' });
       startAckTimer(mid);
       await saveContact(dek, contact);
@@ -1004,7 +1044,9 @@ export function Messenger({ dek, onLock }: Props) {
     if (!id || !contact.ratchet || profileSentRef.current.has(contact.roomId)) return;
     if (!p.name && !p.avatarB64) return;
     try {
-      const envelope = await sendProfile(id, contact, p.name, p.avatarB64 ? b64ToBytes(p.avatarB64) : undefined);
+      const envelope = await encryptAndPersist(contact, () =>
+        sendProfile(id, contact, p.name, p.avatarB64 ? b64ToBytes(p.avatarB64) : undefined),
+      );
       let room = sendRoomRef.current.get(contact.roomId);
       if (!room) {
         await connectSend(contact);

@@ -135,9 +135,13 @@ export class RetiredIdentityError extends Error {
 /** A pinned contact presented a different master without a valid rotation chain
  *  — a possible MITM. The message is dropped and the contact drops verified. */
 export class MasterChangedError extends Error {
-  constructor() {
-    super('Master-Schlüssel dieses Kontakts hat sich geändert — möglicher MITM. Neu verifizieren.');
+  /** False when this exact claim is already pending — the alert must fire on a
+   *  NEW claim, not once per delivered copy of the same one. */
+  readonly firstOccurrence: boolean;
+  constructor(firstOccurrence: boolean) {
+    super('Master-Schlüssel dieses Kontakts hat sich geändert — möglicher MITM. Nicht automatisch übernommen.');
     this.name = 'MasterChangedError';
+    this.firstOccurrence = firstOccurrence;
   }
 }
 
@@ -502,6 +506,29 @@ export async function receiveEnvelope(
   ) {
     const x = envelope.x3dh;
 
+    // ── Bind the claim to THIS conversation before touching anything ────────
+    // `conv` is a pure routing field: the sender picks it freely and the relay
+    // accepts unauthenticated sends into any inbox. So the fact that this
+    // envelope was matched to `contact` proves nothing. And the device cert
+    // proves nothing about *whose* keys these are either — anyone can generate a
+    // master and self-sign a cert over arbitrary public keys (there is no proof
+    // of possession in a cert).
+    //
+    // What IS binding: our roomId is derived from our DH key and the peer's. A
+    // claim that legitimately concerns this contact must therefore re-derive
+    // exactly this roomId from the identity key it presents. An attacker who
+    // substitutes their OWN device keys fails this check — which is precisely
+    // the injection that would otherwise let a group co-member get a contact
+    // re-pinned onto themselves via acceptMasterChange.
+    //
+    // The legitimate cases still pass: a master rotation and a device-linking
+    // swap both keep the device keys (only the master changes). A peer whose
+    // device keys really changed arrives as a NEW contact instead — which is the
+    // honest outcome, not a regression.
+    if ((await computeRoomId(me.dh.publicKey, x.identityDhPub)) !== contact.roomId) {
+      throw new Error('Identitätswechsel-Behauptung gehört nicht zu dieser Unterhaltung — verworfen.');
+    }
+
     // Retired master? Refuse outright and — importantly — WITHOUT touching
     // `verified`. Otherwise anyone holding the abandoned key could degrade our
     // trust in the contact's CURRENT identity just by sending. This is a dead
@@ -515,10 +542,23 @@ export async function receiveEnvelope(
       throw new RetiredIdentityError(first);
     }
 
-    contact.verified = false;
+    // NOTE: `verified` is deliberately NOT cleared here — see acceptMasterChange,
+    // which clears it at the moment the pin actually moves. Clearing it on
+    // receipt would let anyone who can reach our inbox burn the flag of an
+    // arbitrary contact, repeatedly and without holding any key: a verification
+    // DoS that trains the user to click the MITM warning away — exactly the
+    // precondition for a later false accept. `verified` describes the identity
+    // we have PINNED, and an unaccepted claim has not moved that pin.
+    //
     // Remember the claimed identity so the user can deliberately accept it, but
     // ONLY if it is internally consistent (device cert verifies under the
     // claimed master). An inconsistent claim isn't even worth offering.
+    // A claim we are already showing must not alert again: it is replayable at
+    // will, so one warning per delivered message is the same harassment lever as
+    // the retired-master case. Dedup on CONTENT (this exact master), not on a
+    // flag — a genuinely different claim deserves a fresh warning.
+    const sameAsPending =
+      !!contact.pendingMaster && cmp(contact.pendingMaster.masterPub, x.masterPub) === 0;
     if (await verifyDeviceCert(x.masterPub, x.epoch, x.identitySignPub, x.identityDhPub, x.deviceCert)) {
       contact.pendingMaster = {
         masterPub: x.masterPub,
@@ -527,7 +567,7 @@ export async function receiveEnvelope(
         dhPub: x.identityDhPub,
       };
     }
-    throw new MasterChangedError();
+    throw new MasterChangedError(!sameAsPending);
   }
 
   // Simultaneous initiation: we started a session and haven't heard back

@@ -32,6 +32,7 @@ import {
   sendGroupLeave,
   receiveEnvelope,
   MasterChangedError,
+  RetiredIdentityError,
   inboxRoom,
   computeRoomId,
   type Contact,
@@ -351,6 +352,16 @@ export function Messenger({ dek, onLock }: Props) {
           // Hard warning + persist the verified reset, Signal-style. Message dropped.
           await saveContact(dek, contact);
           setError(`⚠ Sicherheit: Der Identitätsschlüssel von ${displayName(contact)} hat sich geändert — möglicher MITM. Bitte neu verifizieren.`);
+          bump();
+        } else if (e instanceof RetiredIdentityError) {
+          // Persist the attempt flag, but alert ONLY on the first one. Whoever
+          // holds the abandoned key can replay endlessly; a toast per message
+          // would be a harassment lever and would blunt the user against real
+          // warnings. The state stays visible in the contact view.
+          await saveContact(dek, contact);
+          if (e.firstOccurrence) {
+            setError(`⚠ Sicherheit: Jemand hat sich als ${displayName(contact)} mit einer bereits ersetzten Identität gemeldet — abgelehnt.`);
+          }
           bump();
         }
         throw e; // drop the message (don't process the unpinned master)
@@ -1098,6 +1109,16 @@ export function Messenger({ dek, onLock }: Props) {
     bump();
   }
 
+  /** Acknowledge the retired-identity notice. Clears only the *notice*, never
+   *  the denylist itself — the rejection stays permanent, the banner does not. */
+  async function dismissRetiredNotice() {
+    const c = contactsRef.current.find((x) => x.roomId === activeRoom);
+    if (!c) return;
+    c.retiredAttempt = undefined;
+    await saveContact(dek, c);
+    bump();
+  }
+
   // Full-screen image viewer (avatars, later chat images). Tap anywhere closes.
   const lightbox = zoomImg ? (
     <div className="lightbox" onClick={() => setZoomImg(null)} role="dialog" aria-label="Bild">
@@ -1698,6 +1719,22 @@ export function Messenger({ dek, onLock }: Props) {
             <IconLock size={12} />
             {verified ? 'verifiziert' : 'nicht verifiziert · zum Prüfen antippen'}
           </button>
+
+          {c.retiredAttempt && (
+            <div className="contact-warn">
+              <div className="cw-text">
+                <b>Abgelehnter Anmeldeversuch</b>
+                <span>
+                  Es kamen Nachrichten unter einer früheren, bereits ersetzten Identität dieses Kontakts an. Sie
+                  wurden verworfen. Das ist normal, wenn ein altes Gerät noch läuft — kann aber auch bedeuten, dass
+                  jemand einen alten Schlüssel besitzt.
+                </span>
+              </div>
+              <button className="btn btn-ghost sm" onClick={() => void dismissRetiredNotice()}>
+                Verstanden
+              </button>
+            </div>
+          )}
 
           <div className="contact-fields">
             {renaming ? (

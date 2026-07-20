@@ -108,6 +108,48 @@ Primitiven beim Start.
   *Gewollte Konsequenz:* der Weg zurück zu einem verlassenen Master ist
   **endgültig zu**, auch für den legitimen Nutzer, der es sich anders überlegt.
   Der Rückweg ist ein frischer Identitätsaufbau. Das ist der Schutz, kein Bug.
+- **Warnung genau einmal (Schutz vor Warnmüdigkeit):** wer den verlassenen
+  Schlüssel besitzt, kann beliebig oft senden. Eine Warnung *pro Nachricht* wäre
+  damit ein **Belästigungs-Hebel** — und schlimmer als lästig: sie würde den
+  Nutzer darauf trainieren, Sicherheitshinweise wegzuklicken, bis eine echte
+  Warnung ungelesen bleibt. Warnmüdigkeit ist ein Angriff auf die *menschliche*
+  Komponente des Systems, nicht auf die Kryptografie. Der Hinweis erscheint
+  deshalb einmal beim Übergang und wird danach zu **Kontakt-Zustand**
+  (`retiredAttempt`), sichtbar in der Kontaktansicht. Bestätigt der Nutzer ihn,
+  verschwindet nur der *Hinweis* — die Sperrliste selbst bleibt unverändert.
+
+### Gerätekopplung (Device-Linking)
+
+Der **Master-Privatschlüssel verlässt das primäre Gerät nie** (Signal-Modell) —
+ein gekoppeltes Gerät kann folglich keine weiteren Geräte signieren. Der Ablauf
+ist bewusst **zweistufig**:
+
+1. **N → P (QR):** `LinkRequest { deviceSignPub, deviceDhPub, sasEphPub }`
+2. **P → N (versiegelt):** `LinkOffer { sasEphPub }` — **nur** das Ephemeral
+3. **Beide zeigen 7 Emoji (SAS). Der Nutzer vergleicht und bestätigt.**
+4. **Erst danach P → N:** `LinkGrant { masterPub, epoch, deviceCert(N), deviceList(v+1) }`
+5. N installiert, P schreibt die neue Liste fort.
+
+**Warum das Offer existiert:** ein `deviceCert` ist ein **Bearer-Credential**.
+Einmal signiert, ist es in der Welt — die neue Geräteliste *nicht* zu
+veröffentlichen widerruft es **nicht**, und ein Peer, der ein Bundle-Cert gegen
+den Master prüft, würde den Inhaber als uns akzeptieren. Würde P den Grant nur
+verschicken, damit N überhaupt ein SAS anzeigen kann, hielte ein Angreifer,
+dessen QR versehentlich gescannt wurde, auch nach „die Emojis stimmen nicht"
+ein gültiges Zertifikat unseres Masters in der Hand. Deshalb verlässt **nichts
+Bearer-Wertiges P vor der menschlichen Bestätigung**; ein Ephemeral allein
+gewährt nichts.
+
+*Folge für die UI:* ein Abbruch vor Schritt 4 hinterlässt auf **beiden Seiten
+null Zustand** — kein Zertifikat ausgestellt, keine Listenversion erhöht, nichts
+zurückzurollen. Der Commit ist die **letzte** Aktion, nie ein Schritt, der
+rückgängig gemacht werden muss (ein Rollback-Pfad, den niemand testet, ist
+schlechter als gar keiner).
+
+**Wire-Formate sind versioniert** (Versions-Byte an Position 0, bei QR *und*
+Offer) und der Decoder **verzweigt darauf vor der Längenprüfung** — sonst meldet
+ein künftiges v2-Format auf einem Altgerät „ungültiger Code" statt „App zu alt",
+und der Nutzer sucht einen Scanner-Fehler statt zu aktualisieren.
 
 ---
 

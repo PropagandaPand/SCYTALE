@@ -75,6 +75,15 @@ export interface Contact {
    * identity change of this contact.
    */
   retiredMasters?: string[];
+  /**
+   * A message under a retired master was rejected for this contact at least
+   * once. Persistent CONTACT STATE, not an event — whoever holds the abandoned
+   * key can replay forever, and one warning per delivered message would be a
+   * harassment lever: it either annoys the user or, worse, trains them to wave
+   * warnings away until a real one goes unread. Warning fatigue is an attack on
+   * the human part of the system. So the notice fires once, then lives here.
+   */
+  retiredAttempt?: boolean;
   bundle?: PreKeyBundle; // present when WE hold their code (needed to initiate)
   ratchet: RatchetState | null; // null until the session is established
   pendingHeader: InitialMessageHeader | null; // initiator attaches until first reply arrives
@@ -113,9 +122,13 @@ export class HandshakeMismatchError extends Error {
  * about, or the contact must learn that only a fresh identity setup works.
  */
 export class RetiredIdentityError extends Error {
-  constructor() {
+  /** False for every repeat — the UI must alert only on the transition, never
+   *  once per delivered message (see Contact.retiredAttempt). */
+  readonly firstOccurrence: boolean;
+  constructor(firstOccurrence: boolean) {
     super('Nachricht einer früheren, bereits ersetzten Identität dieses Kontakts — abgelehnt.');
     this.name = 'RetiredIdentityError';
+    this.firstOccurrence = firstOccurrence;
   }
 }
 
@@ -494,7 +507,12 @@ export async function receiveEnvelope(
     // trust in the contact's CURRENT identity just by sending. This is a dead
     // end by design: the way back is a fresh identity setup, not this key.
     if (contact.retiredMasters?.includes(await b64(x.masterPub))) {
-      throw new RetiredIdentityError();
+      // Record the attempt ONCE. The holder of the abandoned key can replay
+      // indefinitely, so this must be a contact state the user can look at, not
+      // a per-message alert — see Contact.retiredAttempt.
+      const first = !contact.retiredAttempt;
+      contact.retiredAttempt = true;
+      throw new RetiredIdentityError(first);
     }
 
     contact.verified = false;
@@ -575,6 +593,7 @@ interface ContactWire {
   staleIdentity: boolean;
   pendingMaster: { masterPub: string; epoch: number; signPub: string; dhPub: string } | null;
   retiredMasters: string[];
+  retiredAttempt: boolean;
   bundle: string | null; // bundle token (null if we only hold their identity)
   ratchet: string | null; // base64 of serializeState output
   pendingHeader: unknown | null;
@@ -612,6 +631,7 @@ export async function serializeContact(c: Contact): Promise<Bytes> {
         }
       : null,
     retiredMasters: c.retiredMasters ?? [],
+    retiredAttempt: c.retiredAttempt ?? false,
     bundle: c.bundle ? await encodeBundle(c.bundle) : null,
     ratchet: c.ratchet ? await b64(await serializeState(c.ratchet)) : null,
     pendingHeader: c.pendingHeader ? await encodeInitialHeader(c.pendingHeader) : null,
@@ -643,6 +663,7 @@ export async function deserializeContact(bytes: Bytes): Promise<Contact> {
         }
       : undefined,
     retiredMasters: wire.retiredMasters?.length ? wire.retiredMasters : undefined,
+    retiredAttempt: wire.retiredAttempt || undefined,
     bundle: wire.bundle ? await decodeBundle(wire.bundle) : undefined,
     ratchet: wire.ratchet ? await deserializeState(await unb64(wire.ratchet)) : null,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

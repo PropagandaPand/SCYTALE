@@ -55,6 +55,8 @@ export async function openInbound(me: IdentityKeys, bytes: Bytes): Promise<Bytes
 
 export const SEALED_ENVELOPE = 0;
 export const SEALED_LINK_GRANT = 1;
+/** Primary's SAS ephemeral, sent BEFORE any credential exists — see linking.ts. */
+export const SEALED_LINK_OFFER = 2;
 
 export async function sealPayload(recipientDhPub: Bytes, type: number, payload: Bytes): Promise<Bytes> {
   const tagged = new Uint8Array(1 + payload.length);

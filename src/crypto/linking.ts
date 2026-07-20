@@ -2,14 +2,33 @@
  * Device linking (Signal model) — the master private key NEVER leaves the
  * primary device.
  *
- *   N (new device)  --QR-->  P (primary, holds masterPriv)
- *     LinkRequest { deviceSignPub, deviceDhPub, sasEphPub }
+ *   1. N (new device)  --QR-->  P (primary, holds masterPriv)
+ *        LinkRequest { deviceSignPub, deviceDhPub, sasEphPub }
  *
- *   P  --sealed to N's inbox-->  N
- *     LinkGrant { masterPub, epoch, deviceCert(N), deviceList(v+1, incl. N), sasEphPub }
+ *   2. P  --sealed LinkOffer-->  N        ← NO credential, only P's SAS ephemeral
+ *        LinkOffer { sasEphPub }
  *
- * Both sides then derive the same 7-emoji SAS and the user compares them. Only
- * on a match does N accept the grant and P publish the new device list.
+ *   3. Both derive the same 7-emoji SAS. THE USER COMPARES AND CONFIRMS.
+ *
+ *   4. Only then: P  --sealed LinkGrant-->  N
+ *        LinkGrant { masterPub, epoch, deviceCert(N), deviceList(v+1, incl. N) }
+ *
+ *   5. N installs, P persists the new list.
+ *
+ * WHY THE OFFER EXISTS (this is the whole point of the two-message shape):
+ * a deviceCert is a BEARER CREDENTIAL. Once P signs one, it is in the world —
+ * refusing to publish the device list afterwards does NOT revoke it, and a peer
+ * that validates a bundle's cert against the master (see makeContact) would
+ * accept the holder as us. So if P sent the grant merely to *display* a SAS,
+ * an attacker whose QR the user scanned by mistake would walk away with a valid
+ * cert even after the user answered "the emojis don't match".
+ *
+ * Therefore: nothing bearer-grade leaves P before human confirmation. The offer
+ * carries only an ephemeral public key, which grants nothing on its own.
+ *
+ * The corollary for the UI: an abort at any point before step 4 must leave ZERO
+ * state on BOTH sides — no cert issued, no list version bumped, nothing to roll
+ * back. Commit is the last action, never a step that has to be undone.
  *
  * Consequence of not shipping masterPriv: N cannot sign further devices — there
  * is always one PRIMARY device. Moving the master to another device happens only
@@ -34,16 +53,44 @@ export interface LinkRequest {
   sasEphPub: Bytes; // new device's SAS ephemeral
 }
 
-/** P → N, sealed to the new device's X25519 key and dropped in its inbox. */
+/**
+ * P → N, sealed. Deliberately contains NOTHING but P's SAS ephemeral: it travels
+ * BEFORE the user has compared the emojis, so it must not grant anything to a
+ * device that turns out to be an attacker's. An ephemeral public key is inert.
+ */
+export interface LinkOffer {
+  sasEphPub: Bytes;
+}
+
+/** P → N, sealed — sent ONLY after both users confirmed the SAS matches. */
 export interface LinkGrant {
   masterPub: Bytes;
   epoch: number;
   deviceCert: Bytes; // master sig over (epoch, N.signPub, N.dhPub)
   deviceList: DeviceList; // updated list (version+1) that INCLUDES N
-  sasEphPub: Bytes; // primary device's SAS ephemeral
 }
 
 const REQ_VERSION = 1;
+const OFFER_VERSION = 1;
+
+/** Offer wire: version(1) | sasEphPub(32). */
+export function encodeLinkOffer(offer: LinkOffer): Bytes {
+  const buf = new Uint8Array(1 + 32);
+  buf[0] = OFFER_VERSION;
+  buf.set(offer.sasEphPub, 1);
+  return buf;
+}
+
+export function decodeLinkOffer(bytes: Bytes): LinkOffer {
+  if (bytes.length < 1) throw new Error('Ungültige Kopplungs-Antwort.');
+  if (bytes[0] !== OFFER_VERSION) {
+    throw new Error(
+      `Kopplungs-Antwort hat Format-Version ${bytes[0]}, diese App versteht nur ${OFFER_VERSION} — bitte beide Geräte aktualisieren.`,
+    );
+  }
+  if (bytes.length !== 33) throw new Error('Ungültige Kopplungs-Antwort.');
+  return { sasEphPub: bytes.slice(1, 33) };
+}
 
 /** Compact QR payload: version(1) | signPub(32) | dhPub(32) | sasEphPub(32). */
 export async function encodeLinkRequest(req: LinkRequest): Promise<string> {
@@ -58,8 +105,24 @@ export async function encodeLinkRequest(req: LinkRequest): Promise<string> {
 
 export async function decodeLinkRequest(token: string): Promise<LinkRequest> {
   const s = await getSodium();
-  const buf = new Uint8Array(s.from_base64(token.trim(), s.base64_variants.URLSAFE_NO_PADDING));
-  if (buf.length !== 97 || buf[0] !== REQ_VERSION) throw new Error('Ungültiger Kopplungs-Code.');
+  let buf: Uint8Array;
+  try {
+    buf = new Uint8Array(s.from_base64(token.trim(), s.base64_variants.URLSAFE_NO_PADDING));
+  } catch {
+    throw new Error('Ungültiger Kopplungs-Code.');
+  }
+  if (buf.length < 1) throw new Error('Ungültiger Kopplungs-Code.');
+  // Dispatch on the version byte BEFORE the length check. A future v2 payload
+  // will have a different length, so checking length first would report "invalid
+  // code" for what is really "your app is too old" — the user would hunt a
+  // scanner bug instead of updating. The version byte only pays off if the
+  // decoder actually branches on it; this is that branch.
+  if (buf[0] !== REQ_VERSION) {
+    throw new Error(
+      `Kopplungs-Code hat Format-Version ${buf[0]}, diese App versteht nur ${REQ_VERSION} — bitte beide Geräte aktualisieren.`,
+    );
+  }
+  if (buf.length !== 97) throw new Error('Ungültiger Kopplungs-Code.');
   return {
     deviceSignPub: buf.slice(1, 33),
     deviceDhPub: buf.slice(33, 65),
@@ -69,8 +132,12 @@ export async function decodeLinkRequest(token: string): Promise<LinkRequest> {
 
 /**
  * Primary side: cross-sign the new device and produce the updated device list.
- * Returns the grant to send AND the new list to persist/gossip (only after the
- * SAS has been confirmed).
+ *
+ * ⚠️ CALL ORDER IS SECURITY-RELEVANT: this issues a bearer credential. It must
+ * run only AFTER the user confirmed the SAS match (step 4 above), never to
+ * produce something to display. It deliberately persists nothing — the caller
+ * commits `newList` as its last action, so an abort before this call leaves no
+ * state to roll back.
  */
 export async function createLinkGrant(
   masterPriv: Bytes,
@@ -78,7 +145,6 @@ export async function createLinkGrant(
   epoch: number,
   currentList: DeviceList,
   req: LinkRequest,
-  primarySasEphPub: Bytes,
 ): Promise<{ grant: LinkGrant; newList: DeviceList }> {
   if (deviceInList(currentList, req.deviceSignPub)) {
     throw new Error('Dieses Gerät ist bereits gekoppelt.');
@@ -89,7 +155,7 @@ export async function createLinkGrant(
     ...currentList.devices,
     entry,
   ]);
-  return { grant: { masterPub, epoch, deviceCert, deviceList: newList, sasEphPub: primarySasEphPub }, newList };
+  return { grant: { masterPub, epoch, deviceCert, deviceList: newList }, newList };
 }
 
 /**

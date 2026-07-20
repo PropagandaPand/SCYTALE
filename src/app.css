@@ -1535,6 +1535,44 @@ select {
   padding: 4px 8px;
 }
 
+/* Persistent notice for a rejected retired-identity attempt. Deliberately a
+   calm panel, not a toast: it states a standing fact about the contact, and it
+   must not compete with the acute MITM warning for the user's alarm budget. */
+.contact-warn {
+  width: 100%;
+  margin-top: 14px;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 13px 14px;
+  border-radius: var(--r-md);
+  border: 1px solid color-mix(in srgb, var(--danger) 34%, var(--border));
+  background: color-mix(in srgb, var(--danger) 9%, transparent);
+  text-align: left;
+}
+.contact-warn .cw-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.contact-warn b {
+  font-size: 13px;
+  color: var(--danger);
+}
+.contact-warn span {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.contact-warn .btn.sm {
+  flex: none;
+  align-self: center;
+  height: 32px;
+  padding: 0 12px;
+  font-size: 12.5px;
+}
+
 .contact-fields {
   width: 100%;
   margin-top: 14px;

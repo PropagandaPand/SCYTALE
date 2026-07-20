@@ -1,6 +1,6 @@
 {
   "name": "scytale",
-  "version": "0.16.4",
+  "version": "0.16.5",
   "description": "Ende-zu-Ende verschlüsselter Messenger als PWA — gegen Massenüberwachung.",
   "type": "module",
   "private": true,
@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "deploy": "npm run build && wrangler deploy",
     "cf:dev": "wrangler dev",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "node tests/run.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260714.1",

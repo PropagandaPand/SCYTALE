@@ -39,5 +39,34 @@ ok('Quellbaum wurde tatsaechlich durchsucht', files.length > 10);
 const usesGuarded = files.some((f) => readFileSync(f, 'utf8').includes('ratchetDecrypt('));
 ok('ratchetDecrypt wird vom Anwendungscode benutzt', usesGuarded);
 
+// --- Same guard on the ARTEFACT ------------------------------------------
+// src/ is what we write; dist/ is what users execute. Guarding only the source
+// checks our intent, not the thing that ships — and it answers a second
+// question for free: whether the unused export is tree-shaken out at all.
+const dist = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist');
+let bundles = [];
+try {
+  const walkDist = (d) => {
+    for (const e of readdirSync(d)) {
+      const p = join(d, e);
+      if (statSync(p).isDirectory()) walkDist(p);
+      else if (p.endsWith('.js')) bundles.push(p);
+    }
+  };
+  walkDist(dist);
+} catch {
+  bundles = [];
+}
+
+console.log('\n[Artefakt: dist/ enthält den unsicheren Kern nicht]');
+if (bundles.length === 0) {
+  console.log('  --    dist/ nicht gebaut — übersprungen (npm run build zuerst)');
+} else {
+  const hits = bundles.filter((f) => readFileSync(f, 'utf8').includes(NAME));
+  ok(`kein dist/-Bundle enthält ${NAME}`, hits.length === 0);
+  if (hits.length) console.log('        ' + hits.join('\n        '));
+  ok('dist/ wurde tatsaechlich durchsucht', bundles.length > 0);
+}
+
 console.log(`\n${pass} ok, ${fail} fail`);
 process.exit(fail ? 1 : 0);

@@ -220,6 +220,35 @@ SK  = HKDF-SHA256( 0xFF·32 || DH1||DH2||DH3||DH4 ,  info="SCYTALE_X3DH_v1" )
 - Gleichzeitiger beidseitiger Aufbau wird deterministisch aufgelöst (Tie-Break
   nach Identitäts-Reihenfolge), damit die Ratchets konvergieren.
 
+### One-Time-Prekeys: bewusst NICHT im geteilten Code
+
+X3DHs One-Time-Prekey funktioniert nur, wenn ein Server jeden OPK **genau
+einmal** herausgibt und löscht. SCYTALE hat keinen Prekey-Server — der Code wird
+einmal erzeugt und **broadcast** (QR, Link, Gruppen-Roster). Jeder Empfänger
+bekäme also denselben OPK.
+
+Die Folge war messbar und lange unerklärt: der erste Initiator verbraucht den
+OPK, jeder spätere rechnet dann DH1–DH4, während wir nur DH1–DH3 bilden können —
+**seine erste Nachricht lässt sich nicht entschlüsseln.** Wer als Zweiter
+denselben Code benutzt, erreichte uns nie. Das erklärt vermutlich das lange
+rätselhafte „mal geht es, mal nicht" beim Austausch von Codes.
+
+Die Gegenrichtung — den OPK behalten statt verbrauchen — wäre schlimmer: er
+wäre einmalig nur dem Namen nach, von allen geteilt, und seine Kompromittierung
+öffnete die Erstnachricht **jedes** Kontakts. Gegenüber dem Signed Prekey
+gewinnt das nichts und behauptet eine Eigenschaft, die es nicht hat.
+
+**Entscheidung:** der geteilte Code trägt **keinen** OPK. Forward Secrecy der
+ersten Nachricht ruht damit auf dem **Signed Prekey** (rotierbar) und ab
+Nachricht zwei auf dem Ratchet. Echte OPK-Frische verlangt einen **Code pro
+Kontakt** — dann stimmt „ein Code, ein OPK" wieder, um den Preis, dass ein Code
+nicht mehr broadcast-fähig ist. Die Mechanik dafür bleibt im Code, und der
+Empfänger akzeptiert und verbraucht weiterhin einen OPK, falls der Code eines
+älteren Clients einen mitbringt.
+
+Geprüft in `tests/opk-reuse.test.mjs`: zwei verschiedene Personen initiieren
+gegen denselben Code, beide kommen an.
+
 ---
 
 ## 4. Nachrichten — Double Ratchet
@@ -237,7 +266,7 @@ SK  = HKDF-SHA256( 0xFF·32 || DH1||DH2||DH3||DH4 ,  info="SCYTALE_X3DH_v1" )
   gedeckelt gegen DoS: **1000 pro Sprung** (`MAX_SKIP`) **und 2000 gesamt pro
   Session** (`MAX_SKIP_SESSION`, älteste werden verworfen) — ein Strom von
   Hoch-N-Nachrichten kann den Tresor nicht unbegrenzt wachsen lassen.
-> ### Die tragende Invariante: **ein Message-Key wird genau einmal verwendet.**
+> ### Invariante I: **ein Message-Key wird genau einmal verwendet.**
 >
 > Alles Weitere in diesem Abschnitt ist Durchsetzung dieses einen Satzes. Die
 > Ableitung des IV aus dem Message-Key ist **kein** Schwachpunkt — sie ist
@@ -277,6 +306,25 @@ SK  = HKDF-SHA256( 0xFF·32 || DH1||DH2||DH3||DH4 ,  info="SCYTALE_X3DH_v1" )
   DH-Key wurde stillschweigend akzeptiert und bis in `dhRatchet` durchgereicht.
   Nicht-Ganzzahlen werden abgewiesen statt truncated: `epochBytes(-1)` ergäbe
   `ffffffffffffffff`, die Abbildung wäre also nicht injektiv.
+> ### Invariante II: **ein Ratchet-Zustandsübergang ist atomar.**
+>
+> Vollständig durchgeführt **und persistiert**, oder gar nicht. Kein
+> Zwischenzustand verlässt den Speicher, keiner überlebt einen Fehlschlag.
+>
+> Das ist keine Sammlung von drei Vorfällen, sondern eine Aussage mit bisher
+> vier Durchsetzungspunkten:
+>
+> | Übergang | Durchsetzung | Ohne sie |
+> |---|---|---|
+> | Senden | `encryptAndPersist` schreibt **vor** dem Versand | Nonce-Reuse nach Reload (v0.16.2) |
+> | Empfangen | Persist **unmittelbar nach** dem Entschlüsseln, vor jeder Inhaltsverarbeitung | Replay eines verbrauchten Skipped-Keys (v0.16.3) |
+> | Entschlüsseln | Draft-Kopie, Commit **nach** der AEAD-Prüfung | Ferngesteuerte Session-Zerstörung ohne Schlüsselmaterial (v0.17.1) |
+> | X3DH-Antwort | OPK-Verbrauch und Session-Erzeugung sind **ein** Schritt | Entweder unbearbeitbares Retransmit oder wiederverwendbarer OPK |
+>
+> Der Prüfauftrag für jeden künftigen Zustandsübergang — auch die, die Stufe 3c
+> mitbringt — ist damit mechanisch: *Wo genau wird committet, und was passiert,
+> wenn zwischen Mutation und Commit etwas fehlschlägt?*
+
 - **Der IV wird abgeleitet, nicht übertragen** (`HKDF(MK)` → Key ‖ IV, 44 Byte).
   Das spart Bandbreite, macht die Persistenz des Chain-Keys aber
   **sicherheitskritisch**: derselbe Message-Key ergibt denselben Key *und*

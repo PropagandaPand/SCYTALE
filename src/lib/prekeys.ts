@@ -121,9 +121,31 @@ export async function savePreKeys(dek: CryptoKey, st: PreKeyState): Promise<void
   await saveRecord(KEY, await seal(dek, await serialize(st), AAD));
 }
 
-/** Public bundle to hand out — includes the first available one-time prekey. */
+/**
+ * The public bundle we hand out — DELIBERATELY WITHOUT a one-time prekey.
+ *
+ * X3DH's one-time prekey only works when a server hands out each OPK exactly
+ * once and deletes it. We have no prekey server: the code is generated once and
+ * broadcast — QR, link, group roster — so every recipient would receive the SAME
+ * OPK. The first initiator consumes it; every later one then computes DH1–DH4
+ * while we can only compute DH1–DH3, and their very first message fails to
+ * decrypt. In other words: with an OPK in a shared code, the SECOND person who
+ * uses it can never reach us. (Measured — see tests/opk-reuse.test.mjs.)
+ *
+ * The alternative, keeping the OPK instead of consuming it, would make it
+ * one-time in name only: shared by everyone, its compromise opens the first
+ * message of every contact. It buys nothing over the signed prekey while
+ * claiming a property it does not have.
+ *
+ * So the broadcast code carries no OPK, and forward secrecy for the first
+ * message rests on the SIGNED prekey (which rotates) plus the ratchet from
+ * message two onwards. Real OPK-grade freshness needs a per-contact code —
+ * then "one code, one OPK" is true again, at the cost of not being broadcastable.
+ * The machinery below stays for exactly that path, and the responder still
+ * accepts and consumes an OPK if an older client's code carries one.
+ */
 export function currentBundle(identity: IdentityKeys, st: PreKeyState): PreKeyBundle {
-  return buildBundle(identity, st.signedPreKey, st.oneTimePreKeys[0]);
+  return buildBundle(identity, st.signedPreKey);
 }
 
 export function findSignedPreKey(st: PreKeyState, id: number): SignedPreKey | undefined {

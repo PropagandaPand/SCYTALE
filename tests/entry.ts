@@ -11,4 +11,4 @@
 export * from '../src/crypto/index';
 export * from '../src/crypto/sodium';
 export * from '../src/lib/session';
-export { findSignedPreKey, consumeOneTimePreKey } from '../src/lib/prekeys';
+export { findSignedPreKey, consumeOneTimePreKey, currentBundle } from '../src/lib/prekeys';

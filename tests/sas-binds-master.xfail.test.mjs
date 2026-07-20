@@ -23,6 +23,14 @@
 //   linkingSas({ myEph, theirEphPub, myMasterPub, theirMasterPub }): SasResult
 //     — eine benannte Funktion für genau diesen Zweck, damit die Bindung nicht
 //       davon abhängt, dass eine UI-Stelle die richtigen Argumente sortiert.
+//
+// Der Name allein trägt das aber NICHT: sind alle vier Parameter `Bytes`,
+// kompiliert eine UI-Stelle, die einen Geräteschlüssel als `theirMasterPub`
+// übergibt, weiterhin fehlerfrei — und die Emoji stimmen überein. Deshalb sind
+// die Master-Parameter als `MasterPub` typisiert (Branded Type in
+// crypto/types.ts): „Geräteschlüssel an Master-Parameter" ist dann ein
+// Compile-Fehler statt ein bestandener Emoji-Vergleich. Dieser Test prüft
+// danach die ABLEITUNG; die Verkabelung prüft der Compiler.
 import * as S from './.bundle/entry.js';
 
 let pass = 0, fail = 0;

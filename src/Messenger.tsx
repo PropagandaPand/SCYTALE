@@ -372,6 +372,16 @@ export function Messenger({ dek, onLock }: Props) {
         }
         throw e; // drop the message (don't process the unpinned master)
       }
+      // Persist the ADVANCED receive state immediately — before any content
+      // handling. `ratchetDecrypt` consumed a receive key: it advanced CKr/Nr,
+      // and `trySkipped` DELETED the skipped key it used. That deletion is what
+      // enforces "a message key is used exactly once" on the receive side. If a
+      // group handler below throws (the outer catch swallows it) or the app dies
+      // first, a reload restores the old state — the deleted key is back and the
+      // same message decrypts a second time. That reopens a replay window the
+      // ratchet closes by construction. Milder than the send-side nonce reuse,
+      // but the same root cause: the invariant held only in RAM.
+      await saveContact(dek, contact);
       if (content.kind === 'profile') {
         contact.peerName = content.name;
         contact.peerAvatarB64 = content.avatar ? bytesToB64(content.avatar) : undefined;
@@ -557,8 +567,16 @@ export function Messenger({ dek, onLock }: Props) {
    * — it leaks the XOR of both plaintexts and lets an attacker recover the GHASH
    * authentication key, i.e. it breaks confidentiality AND lets them forge.
    *
-   * Persisting BEFORE sending (not after) is deliberate: a crash in the gap must
-   * cost at most one unsent message, never a reused nonce.
+   * ⚠️ DO NOT "OPTIMISE" THE ORDER. Persist-before-send is not a preference,
+   * it is the only correct order, and the asymmetry is total:
+   *   - persist → send:  if the send fails, the chain has still advanced. The
+   *     next message uses a FRESH key and simply leaves a gap, which is exactly
+   *     what the recipient's skipped-key mechanism exists to absorb. Cost: at
+   *     most one message that never arrives.
+   *   - send → persist:  a crash in the gap rolls the chain back to a key that
+   *     has ALREADY been used on the wire. Cost: nonce reuse — the original bug,
+   *     merely with a narrower window.
+   * A lost message is recoverable. A reused (key, nonce) pair is not.
    */
   async function encryptAndPersist(contact: Contact, produce: () => Promise<Bytes>): Promise<Bytes> {
     const envelope = await produce();

@@ -209,6 +209,23 @@ SK  = HKDF-SHA256( 0xFF·32 || DH1||DH2||DH3||DH4 ,  info="SCYTALE_X3DH_v1" )
   gedeckelt gegen DoS: **1000 pro Sprung** (`MAX_SKIP`) **und 2000 gesamt pro
   Session** (`MAX_SKIP_SESSION`, älteste werden verworfen) — ein Strom von
   Hoch-N-Nachrichten kann den Tresor nicht unbegrenzt wachsen lassen.
+> ### Die tragende Invariante: **ein Message-Key wird genau einmal verwendet.**
+>
+> Alles Weitere in diesem Abschnitt ist Durchsetzung dieses einen Satzes. Die
+> Ableitung des IV aus dem Message-Key ist **kein** Schwachpunkt — sie ist
+> sauber, *solange die Invariante hält*, und erspart eine separate
+> Nonce-Buchführung. Gefährlich wird sie erst, wenn die Invariante **nur im
+> Arbeitsspeicher** gilt: dann macht jeder Zustandsverlust aus einem
+> wiederholten Key einen wiederholten Nonce. Genau das war der Fehler in den
+> Gruppen-Sendepfaden (v0.16.2). Die Invariante muss deshalb **über die
+> Persistenz hinweg** gelten, nicht nur innerhalb einer Sitzung.
+>
+> Durchsetzung: `encryptAndPersist` (Senden) schreibt den fortgeschrittenen
+> Zustand **vor** dem Versand; der Empfangspfad schreibt ihn **unmittelbar nach
+> dem Entschlüsseln**, vor jeder Inhaltsverarbeitung. Beim Empfang zählt dazu
+> das Löschen des verbrauchten Skipped-Keys — *das* ist die Einmal-Verwendung
+> auf der Empfangsseite.
+
 - **Der IV wird abgeleitet, nicht übertragen** (`HKDF(MK)` → Key ‖ IV, 44 Byte).
   Das spart Bandbreite, macht die Persistenz des Chain-Keys aber
   **sicherheitskritisch**: derselbe Message-Key ergibt denselben Key *und*
@@ -217,8 +234,21 @@ SK  = HKDF-SHA256( 0xFF·32 || DH1||DH2||DH3||DH4 ,  info="SCYTALE_X3DH_v1" )
   erlaubt die Rekonstruktion des GHASH-Authentifizierungsschlüssels, also auch
   **Fälschung**. `ratchetEncrypt` mutiert den Zustand in-place; deshalb läuft
   jeder ausgehende Pfad über `encryptAndPersist`, das den fortgeschrittenen
-  Zustand **vor** dem Versand schreibt. Ein Absturz in der Lücke kostet dann
-  höchstens eine ungesendete Nachricht, nie einen wiederverwendeten Nonce.
+  Zustand **vor** dem Versand schreibt. Die Reihenfolge ist keine Präferenz,
+  sondern die einzig korrekte, und die Asymmetrie ist total: schlägt der Versand
+  fehl, ist die Chain trotzdem fortgeschritten — die nächste Nachricht nutzt
+  einen frischen Key und hinterlässt nur eine Lücke, die der Skipped-Key-
+  Mechanismus des Empfängers genau dafür auffängt. Umgekehrt (Send vor Persist)
+  rollt ein Absturz auf einen Key zurück, der **schon auf der Leitung war**.
+  Eine verlorene Nachricht ist heilbar, ein wiederverwendetes (Key, Nonce)-Paar
+  nicht.
+- **Empfangsseite ebenso:** `ratchetDecrypt` verbraucht einen Empfangs-Key
+  (`CKr`/`Nr` wandern, und `trySkipped` **löscht** den benutzten Skipped-Key).
+  Der Zustand wird daher **sofort nach dem Entschlüsseln** geschrieben, vor
+  jeder Inhaltsverarbeitung — sonst stellt ein Reload den gelöschten Key wieder
+  her und dieselbe Nachricht entschlüsselt ein zweites Mal: ein Replay-Fenster,
+  das der Ratchet per Konstruktion schliesst. Milder als Nonce-Reuse, gleiche
+  Ursache.
 
 ---
 

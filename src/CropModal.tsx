@@ -7,18 +7,26 @@ import { useEffect, useRef, useState } from 'react';
  * which also strips EXIF/GPS metadata. Orientation is baked via createImageBitmap
  * so display and crop always agree.
  */
-const OUT = 256;
-const MAX_BYTES = 48 * 1024;
+const AVATAR = { out: 256, maxBytes: 48 * 1024, mime: 'image/jpeg' as const };
+// Stickers are square, larger, and go out as WebP so transparency survives —
+// a sticker on a JPEG background would carry a white box into every chat.
+const STICKER = { out: 320, maxBytes: 64 * 1024, mime: 'image/webp' as const };
 
 export function CropModal({
   file,
+  shape = 'circle',
   onCancel,
   onDone,
 }: {
   file: File;
+  /** 'circle' = avatar (JPEG, EXIF stripped); 'square' = sticker (WebP, alpha kept). */
+  shape?: 'circle' | 'square';
   onCancel: () => void;
-  onDone: (bytes: Uint8Array) => void;
+  onDone: (bytes: Uint8Array, mime: string) => void;
 }) {
+  const spec = shape === 'square' ? STICKER : AVATAR;
+  const OUT = spec.out;
+  const MAX_BYTES = spec.maxBytes;
   const [url, setUrl] = useState('');
   const bmpRef = useRef<ImageBitmap | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -144,12 +152,17 @@ export function CropModal({
       const ctx = canvas.getContext('2d')!;
       ctx.drawImage(bmp, sx, sy, sSize, sSize, 0, 0, OUT, OUT);
       let blob: Blob | null = null;
+      let mime: string = spec.mime;
       for (const q of [0.85, 0.7, 0.55, 0.4]) {
-        blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, 'image/jpeg', q));
+        blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, spec.mime, q));
         if (blob && blob.size <= MAX_BYTES) break;
       }
+      // Safari only learned WebP encoding in 14; on anything older toBlob falls
+      // back to PNG silently. Read the type back instead of assuming it, or the
+      // receiver gets a data URL whose declared mime doesn't match the bytes.
+      if (blob && blob.type) mime = blob.type;
       if (!blob) throw new Error('Kodierung fehlgeschlagen.');
-      onDone(new Uint8Array(await blob.arrayBuffer()));
+      onDone(new Uint8Array(await blob.arrayBuffer()), mime);
     } catch (e) {
       setErr((e as Error).message);
       setBusy(false);
@@ -157,8 +170,8 @@ export function CropModal({
   }
 
   return (
-    <div className="crop-modal" role="dialog" aria-label="Profilbild zuschneiden">
-      <div className="crop-head">Ausschnitt wählen</div>
+    <div className="crop-modal" role="dialog" aria-label={shape === 'square' ? 'Sticker zuschneiden' : 'Profilbild zuschneiden'}>
+      <div className="crop-head">{shape === 'square' ? 'Sticker-Ausschnitt wählen' : 'Ausschnitt wählen'}</div>
       <div
         className="crop-stage"
         ref={stageRef}
@@ -177,7 +190,7 @@ export function CropModal({
             style={{ width: dispW, height: dispH, transform: `translate(${tx}px, ${ty}px)` }}
           />
         )}
-        <div className="crop-ring" />
+        <div className={shape === 'square' ? 'crop-ring square' : 'crop-ring'} />
       </div>
       <input
         className="crop-zoom"

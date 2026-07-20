@@ -32,6 +32,7 @@ import { loadOrCreatePreKeys, savePreKeys, serializePreKeys, deserializePreKeys 
 import { loadContacts, saveContact } from './store';
 import { loadGroups, saveGroup, toInvite, fromInvite } from './groups';
 import { loadProfile, saveProfile, type MyProfile } from './profile';
+import { loadStickers, saveStickers, type Sticker } from './stickers';
 import { loadMessages, saveMessages, type ChatMessage } from './messages';
 
 // --- Encryption container (the downloadable file) --------------------------
@@ -88,6 +89,7 @@ interface BackupBlob {
   contacts: string[]; // b64 serializeContact each (incl. ratchet state)
   groups: GroupInvite[];
   messages: Record<string, ChatMessage[]>;
+  stickers?: Sticker[]; // optional: backups written before stickers existed
 }
 
 async function gather(dek: CryptoKey): Promise<Bytes> {
@@ -107,6 +109,7 @@ async function gather(dek: CryptoKey): Promise<Bytes> {
     contacts: await Promise.all(contacts.map(async (c) => b64encode(await serializeContact(c)))),
     groups: await Promise.all(groups.map((g) => toInvite(g))),
     messages,
+    stickers: await loadStickers(dek),
   };
   return utf8.encode(JSON.stringify(blob));
 }
@@ -130,6 +133,10 @@ async function restore(dek: CryptoKey, plaintext: Bytes): Promise<void> {
   }
   for (const inv of blob.groups) await saveGroup(dek, await fromInvite(inv));
   for (const roomId of Object.keys(blob.messages)) await saveMessages(dek, roomId, blob.messages[roomId]);
+  // Optional: a backup taken before stickers existed has no field. Restoring
+  // an empty array over an existing set would silently delete it, so only
+  // write when the backup actually carried one.
+  if (blob.stickers) await saveStickers(dek, blob.stickers);
 }
 
 // --- Public API ------------------------------------------------------------

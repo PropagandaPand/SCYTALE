@@ -170,3 +170,26 @@ export function IconInfo({ size = 16 }: { size?: number }) {
     </svg>
   );
 }
+
+/** Sticker: a rounded square with a peeled corner — the conventional glyph. */
+export function IconSticker({ size = 20 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 20 20" aria-hidden="true">
+      <path
+        d="M12.2 2.8H5.6A2.8 2.8 0 0 0 2.8 5.6v8.8a2.8 2.8 0 0 0 2.8 2.8h4.3l6.3-6.3V5.6a2.8 2.8 0 0 0-2.8-2.8Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M9.9 17.2v-4a2.3 2.3 0 0 1 2.3-2.3h4"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}

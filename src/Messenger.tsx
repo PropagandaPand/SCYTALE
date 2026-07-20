@@ -52,6 +52,14 @@ import {
 } from './lib/groups';
 import { saveContact, loadContacts, removeContact } from './lib/store';
 import { loadProfile, saveProfile, type MyProfile } from './lib/profile';
+import {
+  loadStickers,
+  saveStickers,
+  isSticker,
+  STICKER_FILENAME,
+  MAX_STICKERS,
+  type Sticker,
+} from './lib/stickers';
 import { pushSupported, enablePush, disablePush, currentSubscription } from './lib/push';
 import { loadMessages, saveMessages, clearMessages, type ChatMessage } from './lib/messages';
 import { RelayClient, type RelayStatus } from './lib/relay';
@@ -65,6 +73,7 @@ import { BackupModal } from './BackupModal';
 import { AudioPlayer } from './AudioPlayer';
 import {
   IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach, IconMic, IconTrash, IconDots, IconGroup,
+  IconSticker,
 } from './icons';
 
 const MAX_ATTACH = 600 * 1024; // inline cap — keeps the WS frame under Cloudflare's ~1 MiB limit
@@ -163,6 +172,7 @@ export function Messenger({ dek, onLock }: Props) {
   const inboxClientRef = useRef<RelayClient | null>(null);
   const seenIdsRef = useRef<Set<number>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const stickerInputRef = useRef<HTMLInputElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recChunksRef = useRef<Blob[]>([]);
   const recStreamRef = useRef<MediaStream | null>(null);
@@ -209,6 +219,9 @@ export function Messenger({ dek, onLock }: Props) {
   const [notifBusy, setNotifBusy] = useState(false);
   const [qrFull, setQrFull] = useState(false); // own QR blown up full-screen for scanning
   const [cropFile, setCropFile] = useState<File | null>(null); // avatar being cropped
+  const [stickerFile, setStickerFile] = useState<File | null>(null); // image becoming a sticker
+  const [stickers, setStickers] = useState<Sticker[]>([]);
+  const [stickerPanel, setStickerPanel] = useState(false);
   const [backupMode, setBackupMode] = useState<'export' | 'import' | null>(null);
   const [swipeDx, setSwipeDx] = useState(0); // edge-swipe-back drag distance
   const [swiping, setSwiping] = useState(false);
@@ -452,6 +465,7 @@ export function Messenger({ dek, onLock }: Props) {
 
       const prof = await loadProfile(dek);
       myProfileRef.current = prof;
+      setStickers(await loadStickers(dek));
       setMyAvatarB64(prof.avatarB64 ?? '');
       setProfileName(prof.name ?? '');
 
@@ -948,9 +962,21 @@ export function Messenger({ dek, onLock }: Props) {
         data = new Uint8Array(await file.arrayBuffer());
       }
       if (data.length > MAX_ATTACH) {
-        setError(`Zu groß (${Math.round(data.length / 1024)} KB) — inline gehen ~${Math.round(MAX_ATTACH / 1024)} KB.`);
+        const kb = Math.round(data.length / 1024);
+        const cap = Math.round(MAX_ATTACH / 1024);
+        // Videos deserve their own wording: "too big" alone leaves the user
+        // guessing whether a shorter clip would help or the format is wrong.
+        // There is no re-encoding step, so the honest answer is the duration.
+        setError(
+          mime.startsWith('video/')
+            ? `Video zu groß (${Math.round(kb / 1024)} MB). Es gibt keine Umkodierung — es passen nur sehr kurze Clips bis ~${cap} KB, in der Praxis wenige Sekunden. Kürze oder verkleinere es vorher.`
+            : `Zu groß (${kb} KB) — inline gehen ~${cap} KB.`,
+        );
         return;
       }
+      // A file literally named like our sticker marker would render chrome-free
+      // on the other side. Harmless but confusing, so rename it.
+      if (name === STICKER_FILENAME) name = 'datei';
       const mid = crypto.randomUUID();
       const localMsg: ChatMessage = { mine: true, ts: Date.now(), file: { name, mime, dataB64: bytesToB64(data) }, mid };
       if (activeGroup) {
@@ -966,6 +992,65 @@ export function Messenger({ dek, onLock }: Props) {
       bump();
     } catch (err) {
       setError('Anhang fehlgeschlagen: ' + (err as Error).message);
+    }
+  }
+
+  /** Turn a cropped square into a stored, reusable sticker. */
+  async function onStickerCropped(bytes: Uint8Array, mime: string) {
+    setStickerFile(null);
+    if (stickers.length >= MAX_STICKERS) {
+      setError(`Sticker-Grenze erreicht (${MAX_STICKERS}) — lösche erst einen.`);
+      return;
+    }
+    const next: Sticker[] = [
+      { id: crypto.randomUUID(), dataB64: bytesToB64(bytes), mime, ts: Date.now() },
+      ...stickers,
+    ];
+    setStickers(next);
+    await saveStickers(dek, next);
+  }
+
+  async function deleteSticker(id: string) {
+    const next = stickers.filter((s) => s.id !== id);
+    setStickers(next);
+    await saveStickers(dek, next);
+  }
+
+  /**
+   * Send a stored sticker. It goes out as an ordinary image attachment named
+   * STICKER_FILENAME — see lib/stickers.ts for why a new frame type would make
+   * stickers disappear on not-yet-updated devices instead of degrading.
+   */
+  async function sendSticker(st: Sticker) {
+    const id = identityRef.current;
+    if (!id || (!activeRoom && !activeGroup)) return;
+    setStickerPanel(false);
+    setError('');
+    try {
+      const data = b64ToBytes(st.dataB64);
+      const mid = crypto.randomUUID();
+      const localMsg: ChatMessage = {
+        mine: true,
+        ts: Date.now(),
+        file: { name: STICKER_FILENAME, mime: st.mime, dataB64: st.dataB64 },
+        mid,
+      };
+      if (activeGroup) {
+        await groupSend({ kind: 'file', name: STICKER_FILENAME, mime: st.mime, data }, localMsg);
+        return;
+      }
+      const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
+      if (!contact) return;
+      await sendEnvelopeTo(
+        contact,
+        await encryptAndPersist(contact, () => sendFile(id, contact, STICKER_FILENAME, st.mime, data)),
+        mid,
+      );
+      await appendMessage(contact.roomId, { ...localMsg, status: 'pending' });
+      startAckTimer(mid);
+      bump();
+    } catch (err) {
+      setError('Sticker fehlgeschlagen: ' + (err as Error).message);
     }
   }
 
@@ -1196,7 +1281,64 @@ export function Messenger({ dek, onLock }: Props) {
   const activeGroupData = groups.find((g) => g.id === activeGroup) ?? null;
   const st = (roomId: string) => statuses[roomId] ?? 'closed';
   const lastPreview = (m?: ChatMessage) =>
-    m ? m.text || (m.file ? '📎 Anhang' : '') : '';
+    m
+      ? m.text ||
+        (m.file
+          ? isSticker(m.file)
+            ? 'Sticker'
+            : m.file.mime.startsWith('video/')
+              ? '🎬 Video'
+              : m.file.mime.startsWith('image/')
+                ? '📷 Bild'
+                : m.file.mime.startsWith('audio/')
+                  ? '🎤 Sprachnachricht'
+                  : '📎 Anhang'
+          : '')
+      : '';
+
+  // The sticker cropper is rendered next to the panel, not in the profile view:
+  // the picker is reachable only from a chat, so the modal must live there too.
+  const stickerCropEl = stickerFile ? (
+    <CropModal
+      file={stickerFile}
+      shape="square"
+      onCancel={() => setStickerFile(null)}
+      onDone={(b, mime) => void onStickerCropped(b, mime)}
+    />
+  ) : null;
+
+  const stickerPanelEl = stickerPanel ? (
+    <div className="sticker-panel">
+      {stickers.length === 0 && (
+        <p className="sticker-empty">
+          Noch keine Sticker. Mach aus einem Bild einen — er bleibt verschlüsselt auf deinem Gerät.
+        </p>
+      )}
+      <div className="sticker-grid">
+        {stickers.map((st) => (
+          <div key={st.id} className="sticker-cell">
+            <button className="sticker-btn" onClick={() => void sendSticker(st)} aria-label="Sticker senden">
+              <img src={`data:${st.mime};base64,${st.dataB64}`} alt="" />
+            </button>
+            <button
+              className="sticker-del"
+              aria-label="Sticker löschen"
+              onClick={() => void deleteSticker(st.id)}
+            >
+              ×
+            </button>
+          </div>
+        ))}
+        <button
+          className="sticker-add"
+          onClick={() => stickerInputRef.current?.click()}
+          aria-label="Sticker hinzufügen"
+        >
+          +
+        </button>
+      </div>
+    </div>
+  ) : null;
 
   const composerEl = recording ? (
     <div className="composer recording">
@@ -1214,8 +1356,27 @@ export function Messenger({ dek, onLock }: Props) {
   ) : (
     <div className="composer">
       <input ref={fileInputRef} type="file" hidden onChange={(e) => void onPickFile(e)} />
+      <input
+        ref={stickerInputRef}
+        type="file"
+        accept="image/*"
+        hidden
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          e.target.value = '';
+          if (f) setStickerFile(f);
+        }}
+      />
       <button className="attach-btn" title="Anhang" onClick={() => fileInputRef.current?.click()}>
         <IconAttach />
+      </button>
+      <button
+        className={`attach-btn${stickerPanel ? ' active' : ''}`}
+        title="Sticker"
+        aria-expanded={stickerPanel}
+        onClick={() => setStickerPanel((v) => !v)}
+      >
+        <IconSticker />
       </button>
       <div className="composer-pill">
         <input
@@ -1468,10 +1629,20 @@ export function Messenger({ dek, onLock }: Props) {
           {msgs.map((m, i) => (
             <div
               key={`${m.ts}-${i}`}
-              className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file?.mime.startsWith('image/') ? ' has-file' : ''}`}
+              className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file && isSticker(m.file) ? ' is-sticker' : m.file && (m.file.mime.startsWith('image/') || m.file.mime.startsWith('video/')) ? ' has-file' : ''}`}
             >
               {m.file ? (
-                m.file.mime.startsWith('image/') ? (
+                isSticker(m.file) ? (
+                  <img className="bubble-sticker" src={`data:${m.file.mime};base64,${m.file.dataB64}`} alt="Sticker" />
+                ) : m.file.mime.startsWith('video/') ? (
+                  <video
+                    className="bubble-video"
+                    src={`data:${m.file.mime};base64,${m.file.dataB64}`}
+                    controls
+                    playsInline
+                    preload="metadata"
+                  />
+                ) : m.file.mime.startsWith('image/') ? (
                   <img
                     className="bubble-img"
                     src={`data:${m.file.mime};base64,${m.file.dataB64}`}
@@ -1508,6 +1679,8 @@ export function Messenger({ dek, onLock }: Props) {
 
         {error && <div className="err-note">{error}</div>}
 
+        {stickerCropEl}
+        {stickerPanelEl}
         {composerEl}
         {lightbox}
       </div>
@@ -1576,11 +1749,21 @@ export function Messenger({ dek, onLock }: Props) {
           {msgs.map((m, i) => (
             <div
               key={`${m.ts}-${i}`}
-              className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file?.mime.startsWith('image/') ? ' has-file' : ''}`}
+              className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file && isSticker(m.file) ? ' is-sticker' : m.file && (m.file.mime.startsWith('image/') || m.file.mime.startsWith('video/')) ? ' has-file' : ''}`}
             >
               {!m.mine && m.sender && <div className="bubble-sender">{m.sender}</div>}
               {m.file ? (
-                m.file.mime.startsWith('image/') ? (
+                isSticker(m.file) ? (
+                  <img className="bubble-sticker" src={`data:${m.file.mime};base64,${m.file.dataB64}`} alt="Sticker" />
+                ) : m.file.mime.startsWith('video/') ? (
+                  <video
+                    className="bubble-video"
+                    src={`data:${m.file.mime};base64,${m.file.dataB64}`}
+                    controls
+                    playsInline
+                    preload="metadata"
+                  />
+                ) : m.file.mime.startsWith('image/') ? (
                   <img className="bubble-img" src={`data:${m.file.mime};base64,${m.file.dataB64}`} alt={m.file.name} />
                 ) : m.file.mime.startsWith('audio/') ? (
                   <AudioPlayer dataB64={m.file.dataB64} mime={m.file.mime} />
@@ -1610,6 +1793,8 @@ export function Messenger({ dek, onLock }: Props) {
           ))}
         </div>
         {error && <div className="err-note">{error}</div>}
+        {stickerCropEl}
+        {stickerPanelEl}
         {composerEl}
       </div>
     );

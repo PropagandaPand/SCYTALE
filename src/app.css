@@ -958,6 +958,120 @@ select {
   object-fit: cover;
   cursor: pointer;
 }
+/* Video sits in the same padded shell as an image. */
+.bubble-video {
+  display: block;
+  width: 100%;
+  max-width: 260px;
+  max-height: 320px;
+  border-radius: 15px;
+  background: #000;
+}
+
+/* A sticker has no bubble: no background, no border, no padding — only the
+   timestamp stays, tucked under the artwork. That is what makes it read as a
+   sticker rather than as an image someone happened to send. */
+.bubble.is-sticker {
+  background: none !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+}
+.bubble-sticker {
+  display: block;
+  width: 132px;
+  height: 132px;
+  object-fit: contain;
+}
+.bubble.is-sticker .meta {
+  display: block;
+  text-align: right;
+  margin: 2px 2px 0;
+  opacity: 0.75;
+}
+
+/* ── Sticker picker ─────────────────────────────────────────────────── */
+.sticker-panel {
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  padding: 12px 14px;
+  max-height: 232px;
+  overflow-y: auto;
+  animation: sticker-in 180ms var(--ease-out) both;
+}
+@keyframes sticker-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+.sticker-empty {
+  margin: 0 0 10px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.sticker-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  gap: 10px;
+}
+.sticker-cell {
+  position: relative;
+}
+.sticker-btn {
+  width: 100%;
+  aspect-ratio: 1;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg);
+  cursor: pointer;
+  transition: transform 0.15s var(--ease-out), border-color 0.15s ease;
+}
+.sticker-btn:active {
+  transform: scale(0.94);
+}
+.sticker-btn img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.sticker-del {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  width: 20px;
+  height: 20px;
+  line-height: 1;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.sticker-add {
+  aspect-ratio: 1;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--muted);
+  font-size: 22px;
+  cursor: pointer;
+  transition: transform 0.15s var(--ease-out), color 0.15s ease;
+}
+.sticker-add:active {
+  transform: scale(0.94);
+}
+.attach-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 .bubble.has-file .meta {
   display: block;
   text-align: right;
@@ -1804,6 +1918,9 @@ select {
   box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
   border: 2px solid rgba(255, 255, 255, 0.9);
   pointer-events: none;
+}
+.crop-ring.square {
+  border-radius: var(--r-md);
 }
 .crop-zoom {
   width: min(86vw, 52vh);

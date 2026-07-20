@@ -2,13 +2,25 @@
 
 SCYTALE ist gegen **anlasslose Massenüberwachung** gebaut (Chatkontrolle /
 CSAR). Dieses Dokument ist die genaue Aufschlüsselung aller Mechanismen und
-sagt ehrlich, was geschützt ist — und was nicht. Stand: v0.16.0.
+sagt ehrlich, was geschützt ist — und was nicht. Stand: v0.17.2.
 
 **Leitprinzipien:** niemals eigene Krypto erfinden (vetted Primitiven +
 etablierte Protokolle: X3DH, Double Ratchet); der Server ist ein **dummer
-Ciphertext-Briefkasten** ohne Wissen; alle Schlüssel sind **non-extractable
-CryptoKeys**, ihre Rohbytes für JavaScript unerreichbar (selbst ein XSS-Fund
-kann keinen Schlüssel exfiltrieren).
+Ciphertext-Briefkasten** ohne Wissen; Zustand wird **erst nach bestandener
+Authentifizierung** übernommen (Commit-Disziplin, siehe Abschnitt 4).
+
+**Was non-extractable ist — und was nicht.** Diese Zeile hat hier lange zu viel
+behauptet, deshalb präzise: **KEK, DEK und die pro Nachricht importierten
+AES-GCM-Keys** sind non-extractable `CryptoKey`s; ihre Rohbytes sind für
+JavaScript unerreichbar. **Nicht** non-extractable sind alle Schlüssel, die
+libsodium verwaltet oder die als KDF-Eingabe gebraucht werden: der
+Ratchet-Zustand (`RK`, `CKs`, `CKr`, die gesamte `skipped`-Map mit ihren
+Message-Keys, `DHs.privateKey`) sowie die Identitäts- und Master-Privatschlüssel
+liegen als schlichte `Uint8Array` im Speicher. Das ist mit libsodium-wrappers
+unvermeidbar und für den At-Rest-Schutz auch irrelevant — es heisst aber, dass
+**ein XSS-Fund im laufenden, entsperrten Tab sehr wohl Schlüsselmaterial
+auslesen könnte**. Der Schutz dagegen ist die CSP und der gesperrte Tresor, nicht
+die Nicht-Extrahierbarkeit.
 
 ---
 
@@ -28,6 +40,10 @@ DEK --AES-256-GCM--> jeder Datensatz auf Platte
   stehen im Tresor-Header. **Code-seitiger Floor** (`MIN_ARGON2` = 64 MiB / t=3):
   der Header ist vor dem DEK-Unwrap nicht authentifiziert, also werden geschwächte
   Parameter (m=8 MiB, t=1) **ignoriert** — nie unter dem Floor abgeleitet.
+  **Und ein Deckel** (`MAX_ARGON2` = 1 GiB / t=16): derselbe unauthentifizierte
+  Header erlaubt sonst `memorySize: 2000000`, was jede Ableitung per OOM
+  abbrechen lässt und den Tresor **dauerhaft unöffenbar** macht. Ein reiner
+  Floor verwandelt einen Schwächungs- in einen Zerstörungsangriff.
 - **KEK** nur mit `wrapKey`/`unwrapKey` importiert; Rohbytes danach mit `fill(0)`
   überschrieben.
 - **DEK**: zufälliger AES-256-GCM-Key, non-extractable. Passphrase-Wechsel =
@@ -36,6 +52,10 @@ DEK --AES-256-GCM--> jeder Datensatz auf Platte
   (bindet Typ/ID/Version in den Auth-Tag → kein Vertauschen/Rollback).
 - **Falsche Passphrase** wird am fehlschlagenden GCM-Tag beim DEK-Unwrap erkannt
   — **kein separater Verifier** (der wäre ein Offline-Angriffs-Orakel).
+  **Beschädigter Header** meldet dagegen `VaultCorruptError` statt „falsche
+  Passphrase": wer eine korrekte Passphrase zum fünften Mal eintippt, während in
+  Wahrheit der Datensatz kaputt ist, sucht an der falschen Stelle — dieselbe
+  Diagnostizierbarkeitslücke wie beim stillen Handshake-Fehlschlag.
 
 **Device-Binding:** ein non-extractable AES-256-GCM-Schlüssel wird einmal pro
 Gerät/Browser-Profil erzeugt und in IndexedDB gehalten (Rohbytes nie JS-lesbar).
@@ -234,6 +254,29 @@ SK  = HKDF-SHA256( 0xFF·32 || DH1||DH2||DH3||DH4 ,  info="SCYTALE_X3DH_v1" )
 > das Löschen des verbrauchten Skipped-Keys — *das* ist die Einmal-Verwendung
 > auf der Empfangsseite.
 
+- **Commit-Disziplin beim Entschlüsseln (kritisch, v0.17.1):** `ratchetDecrypt`
+  arbeitet auf einer **Kopie** und übernimmt sie erst, wenn die AEAD-Prüfung
+  bestanden ist. Vorher mutierten `skipMessageKeys`, `dhRatchet` und das
+  `delete` in `trySkipped` den Zustand direkt, und der Tag wurde erst danach
+  geprüft — ohne Rollback. Einliefern in eine Inbox ist bewusst **auth-los**
+  (nur so erreicht uns jemand, der unseren Code hat), und die Inbox-ID ist aus
+  öffentlichem Material ableitbar. Ein zufälliger 32-Byte-X25519-Pubkey als
+  `header.dh` plus 48 Byte Müll genügte damit, um den DH-Ratchet
+  weiterzudrehen: `DHr`/`RK`/`CKr`/`CKs` überschrieben, Zähler zurückgesetzt,
+  Session in **beiden** Richtungen dauerhaft tot — ohne jedes Schlüsselmaterial.
+  Verschärft dadurch, dass `encryptAndPersist` den kaputten Zustand beim
+  nächsten Senden auf Platte schrieb und der Absender **volle Haken** sah, weil
+  der Relay alles angenommen hatte. Mit der Kopie ist zugleich der
+  Skipped-Key-Verbrauch geschützt: eine Fälschung mit dem Header einer
+  verzögerten echten Nachricht löschte bisher deren Message-Key endgültig.
+- **Eingangsvalidierung als Choke-Point:** `decodeEnvelope` prüft jetzt Typen,
+  Schlüssellängen und Zählerbereiche, bevor irgendein Wert Ratchet oder X3DH
+  erreicht, und lehnt einheitlich mit `EnvelopeError` ab. Vorher erzeugte
+  feindliche Eingabe je nach Stelle fünf verschiedene Exception-Typen
+  (`SyntaxError`, `TypeError`, Base64-Fehler, `RangeError`) — und ein 2-Byte-
+  DH-Key wurde stillschweigend akzeptiert und bis in `dhRatchet` durchgereicht.
+  Nicht-Ganzzahlen werden abgewiesen statt truncated: `epochBytes(-1)` ergäbe
+  `ffffffffffffffff`, die Abbildung wäre also nicht injektiv.
 - **Der IV wird abgeleitet, nicht übertragen** (`HKDF(MK)` → Key ‖ IV, 44 Byte).
   Das spart Bandbreite, macht die Persistenz des Chain-Keys aber
   **sicherheitskritisch**: derselbe Message-Key ergibt denselben Key *und*

@@ -35,8 +35,21 @@ export interface VaultHeader {
 
 export class WrongPassphraseError extends Error {
   constructor() {
-    super('Falsche Passphrase oder beschädigter Tresor.');
+    super('Falsche Passphrase.');
     this.name = 'WrongPassphraseError';
+  }
+}
+
+/**
+ * The header itself is unusable — truncated, wrong lengths, missing fields.
+ * Kept apart from WrongPassphraseError on purpose: telling someone "wrong
+ * passphrase" when the record is corrupt sends them to retype a passphrase that
+ * was never the problem. Same diagnosability lesson as HandshakeMismatchError.
+ */
+export class VaultCorruptError extends Error {
+  constructor(what: string) {
+    super('Tresor-Datensatz beschädigt (' + what + ') — Passphrase ist nicht die Ursache.');
+    this.name = 'VaultCorruptError';
   }
 }
 
@@ -99,6 +112,13 @@ async function unwrapDek(kek: CryptoKey, header: VaultHeader): Promise<CryptoKey
  * (which would itself be an offline-attack oracle).
  */
 export async function unlockVault(passphrase: string, header: VaultHeader): Promise<CryptoKey> {
+  // Separate "this record is broken" from "this passphrase is wrong" BEFORE the
+  // expensive derivation — the two need different actions from the user.
+  if (!header || !header.salt || header.salt.length < 16) throw new VaultCorruptError('Salt');
+  if (!header.wrapIv || header.wrapIv.length !== IV_LEN) throw new VaultCorruptError('IV');
+  if (!header.wrappedDek || header.wrappedDek.length < 16) throw new VaultCorruptError('Wrapped-DEK');
+  if (!header.argon2 || typeof header.argon2.memorySize !== 'number') throw new VaultCorruptError('Argon2-Parameter');
+
   const kekBytes = await deriveKekBytes(passphrase, header.salt, header.argon2);
   const kek = await importKek(kekBytes);
   try {

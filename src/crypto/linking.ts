@@ -161,6 +161,17 @@ export async function createLinkGrant(
 /**
  * New-device side: accept the grant only if it genuinely cross-signs OUR keys
  * and the accompanying list is master-signed, epoch-consistent and contains us.
+ *
+ * ⚠️ THIS FUNCTION IS DELIBERATELY SELF-REFERENTIAL AND THAT IS ONLY SAFE
+ * BECAUSE OF THE SAS. The new device has no pinned master yet — it is *learning*
+ * one — so every check here is relative to the master the grant asserts. A
+ * wholly forged grant passes all of them.
+ *
+ * The thing that actually authenticates the master is the emoji comparison, and
+ * therefore: **the SAS MUST be computed over P's masterPub.** If the linking UI
+ * ever passes a device key instead, the emoji stop authenticating the identity
+ * and this function's self-reference becomes a real hole. Locked as a
+ * requirement for the stage-3b UI; see tests/sas-binds-master.xfail.test.mjs.
  */
 export async function verifyLinkGrant(
   grant: LinkGrant,
@@ -176,6 +187,11 @@ export async function verifyLinkGrant(
   if (list.epoch !== grant.epoch) return false;
   if (list.masterPub.length !== grant.masterPub.length) return false;
   for (let i = 0; i < list.masterPub.length; i++) if (list.masterPub[i] !== grant.masterPub[i]) return false;
-  if (!(await verifyDeviceList(list))) return false;
+  // Anchored on the master the grant claims. That is NOT self-sufficient — a
+  // forged grant carries a forged master and would pass this check. What makes
+  // it sound is the SAS the user compares BEFORE the grant is even requested:
+  // the emoji must be derived over P's masterPub, so a substituted master
+  // produces different emoji. See the SAS requirement in verifyLinkGrant's doc.
+  if (!(await verifyDeviceList(list, grant.masterPub, grant.epoch))) return false;
   return deviceInList(list, myDeviceSignPub);
 }

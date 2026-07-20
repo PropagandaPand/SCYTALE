@@ -41,9 +41,11 @@ function cmpBytes(a: Bytes, b: Bytes): number {
 }
 
 /** Canonical signed message: order-independent in the device set. */
-function listMsg(epoch: number, version: number, devices: DeviceEntry[]): Bytes {
+function listMsg(masterPub: Bytes, epoch: number, version: number, devices: DeviceEntry[]): Bytes {
   const sorted = [...devices].sort((x, y) => cmpBytes(x.signPub, y.signPub));
-  const parts: Bytes[] = [CTX, epochBytes(epoch), epochBytes(version)];
+  // masterPub is signed along: it costs nothing and removes a whole class of
+  // confusion where a signature verifies under a key the message never named.
+  const parts: Bytes[] = [CTX, masterPub, epochBytes(epoch), epochBytes(version)];
   for (const d of sorted) parts.push(d.signPub, d.dhPub);
   return concatBytes(...parts);
 }
@@ -55,12 +57,39 @@ export async function signDeviceList(
   version: number,
   devices: DeviceEntry[],
 ): Promise<DeviceList> {
-  return { masterPub, epoch, version, devices, listSig: await sign(listMsg(epoch, version, devices), masterPriv) };
+  return { masterPub, epoch, version, devices, listSig: await sign(listMsg(masterPub, epoch, version, devices), masterPriv) };
 }
 
 /** Verify the list signature against the master AND every device's cert. */
-export async function verifyDeviceList(list: DeviceList): Promise<boolean> {
-  if (!(await verify(listMsg(list.epoch, list.version, list.devices), list.listSig, list.masterPub))) return false;
+/**
+ * Verify a device list AGAINST A PINNED MASTER.
+ *
+ * ⚠️ `pinnedMasterPub` is required on purpose. Verifying a list against the key
+ * the list itself carries is self-referential: an attacker generates a master,
+ * signs whatever list they like, and it verifies perfectly. The pinning check
+ * is the entire security of this function, so it must not be something a caller
+ * can forget — the same structural mistake that put the conversation-binding
+ * check inside a single branch (v0.16.4). Make it impossible, not unlikely.
+ *
+ * `pinnedEpoch`, when given, additionally refuses a list from an older epoch:
+ * a master rotation must not be undone by replaying a pre-rotation list.
+ */
+export async function verifyDeviceList(
+  list: DeviceList,
+  pinnedMasterPub: Bytes,
+  pinnedEpoch?: number,
+): Promise<boolean> {
+  if (cmpBytes(list.masterPub, pinnedMasterPub) !== 0) return false;
+  if (pinnedEpoch !== undefined && list.epoch < pinnedEpoch) return false;
+  if (
+    !(await verify(
+      listMsg(list.masterPub, list.epoch, list.version, list.devices),
+      list.listSig,
+      list.masterPub,
+    ))
+  ) {
+    return false;
+  }
   for (const d of list.devices) {
     if (!(await verifyDeviceCert(list.masterPub, list.epoch, d.signPub, d.dhPub, d.deviceCert))) return false;
   }

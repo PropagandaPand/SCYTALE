@@ -40,11 +40,12 @@ export async function unseal(myDh: KeyPair, sealed: Bytes): Promise<Bytes | null
   }
 }
 
-/** Inbound bytes → inner envelope bytes. Falls back to the raw bytes for legacy
- *  (pre-sealed-sender) messages still in flight during a rollout. */
-export async function openInbound(me: IdentityKeys, bytes: Bytes): Promise<Bytes> {
-  return (await unseal(me.dh, bytes)) ?? bytes;
-}
+// NOTE: a former `openInbound()` fell back to the RAW bytes when unsealing
+// failed, so that unsealed messages from a pre-sealed-sender rollout still
+// worked. It had no callers left and is deleted: while such a fallback exists,
+// Sealed Sender is optional rather than enforced — and the attacker, not the
+// rollout, gets to pick which path a message takes. openPayload() below returns
+// null instead, so a payload that is not sealed for us is simply dropped.
 
 // --- Tagged sealed payloads -------------------------------------------------
 //

@@ -49,7 +49,14 @@ export async function loadOrCreateOwnDeviceList(
   id: IdentityKeys,
 ): Promise<DeviceList | null> {
   const stored = await loadStored(dek);
-  if (stored && (await verifyDeviceList(stored)) && deviceInList(stored, id.sign.publicKey)) {
+  // Pin against OUR master: a stored record is not trusted just because it is
+  // stored — vault corruption or a restored foreign backup must not install a
+  // list signed by somebody else's master.
+  if (
+    stored &&
+    (await verifyDeviceList(stored, id.master.publicKey, id.epoch)) &&
+    deviceInList(stored, id.sign.publicKey)
+  ) {
     return stored;
   }
   if (!isPrimaryDevice(id)) return stored; // linked device: whatever we were granted
@@ -70,7 +77,9 @@ export async function adoptDeviceList(
   id: IdentityKeys,
   incoming: DeviceList,
 ): Promise<boolean> {
-  if (!(await verifyDeviceList(incoming))) return false;
+  // Our own master and epoch are the anchor — an incoming list that names a
+  // different master is not a newer version of ours, it is somebody else's.
+  if (!(await verifyDeviceList(incoming, id.master.publicKey, id.epoch))) return false;
   if (!deviceInList(incoming, id.sign.publicKey)) return false;
   const stored = await loadStored(dek);
   if (stored && !isNewerDeviceList(incoming, stored)) return false; // no rollback

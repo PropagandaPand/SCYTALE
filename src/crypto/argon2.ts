@@ -36,11 +36,27 @@ export const DEFAULT_ARGON2: Argon2Params = {
  */
 const MIN_ARGON2: Argon2Params = { memorySize: 65536, iterations: 3, parallelism: 1 };
 
+/**
+ * Ceilings, not just floors.
+ *
+ * The header is not authenticated before it is used to derive the KEK, so the
+ * same attacker the floor defends against can also push the parameters UP:
+ * memorySize: 2_000_000 (≈2 GiB) makes the derivation OOM on every attempt and
+ * the vault permanently unopenable — a floor-only clamp turns a weakening
+ * attack into a destruction attack. The caps sit well above anything we ever
+ * write ourselves, so a legitimate header is never touched.
+ */
+const MAX_ARGON2: Argon2Params = { memorySize: 1048576, iterations: 16, parallelism: 4 };
+
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.min(Math.max(Number.isSafeInteger(v) ? v : lo, lo), hi);
+}
+
 function withFloor(p: Argon2Params): Argon2Params {
   return {
-    memorySize: Math.max(p.memorySize | 0, MIN_ARGON2.memorySize),
-    iterations: Math.max(p.iterations | 0, MIN_ARGON2.iterations),
-    parallelism: Math.max(p.parallelism | 0, MIN_ARGON2.parallelism),
+    memorySize: clamp(p.memorySize | 0, MIN_ARGON2.memorySize, MAX_ARGON2.memorySize),
+    iterations: clamp(p.iterations | 0, MIN_ARGON2.iterations, MAX_ARGON2.iterations),
+    parallelism: clamp(p.parallelism | 0, MIN_ARGON2.parallelism, MAX_ARGON2.parallelism),
   };
 }
 

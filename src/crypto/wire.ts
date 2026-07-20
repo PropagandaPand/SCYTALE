@@ -37,16 +37,9 @@ interface InitialHeaderWire {
 async function encHeader(h: RatchetHeader): Promise<RatchetHeaderWire> {
   return { dh: await b64encode(h.dh), pn: h.pn, n: h.n };
 }
-async function decHeader(o: RatchetHeaderWire): Promise<RatchetHeader> {
-  return { dh: await b64decode(o.dh), pn: o.pn, n: o.n };
-}
 async function encMsg(m: RatchetMessage): Promise<RatchetMessageWire> {
   return { header: await encHeader(m.header), ct: await b64encode(m.ciphertext) };
 }
-async function decMsg(o: RatchetMessageWire): Promise<RatchetMessage> {
-  return { header: await decHeader(o.header), ciphertext: await b64decode(o.ct) };
-}
-
 export async function encodeInitialHeader(h: InitialMessageHeader): Promise<InitialHeaderWire> {
   return {
     mp: await b64encode(h.masterPub),
@@ -84,12 +77,96 @@ export async function encodeEnvelope(e: Envelope): Promise<Bytes> {
   return utf8.encode(JSON.stringify(o));
 }
 
-export async function decodeEnvelope(bytes: Bytes): Promise<Envelope> {
-  const o = JSON.parse(utf8.decode(bytes));
-  if (o.t === 'prekey') {
-    return { type: 'prekey', conv: o.c, x3dh: await decodeInitialHeader(o.x), message: await decMsg(o.m) };
+/**
+ * Everything reaching this function comes from an UNAUTHENTICATED sender —
+ * delivery into an inbox is deliberately open. Without validation the decoder
+ * produced a different exception type per malformation (SyntaxError, TypeError
+ * on a missing field, "incomplete input" from base64, RangeError out of a
+ * DataView, and a silently accepted 2-byte DH key that travelled all the way
+ * into dhRatchet). Five exception shapes from hostile input is not error
+ * handling — it is whatever the parser happened to do first.
+ *
+ * So: one validation stage, right here, at the single point every inbound
+ * envelope passes. Rejection is uniform (EnvelopeError) and happens before any
+ * value reaches the ratchet or X3DH.
+ */
+export class EnvelopeError extends Error {
+  constructor(what: string) {
+    super('Verworfen: fehlerhaftes Nachrichtenformat (' + what + ').');
+    this.name = 'EnvelopeError';
   }
-  return { type: 'msg', conv: o.c, message: await decMsg(o.m) };
+}
+
+const KEY_LEN = 32;
+const SIG_LEN = 64;
+
+function reqStr(v: unknown, what: string): string {
+  if (typeof v !== 'string' || v.length === 0) throw new EnvelopeError(what);
+  return v;
+}
+/** Non-negative safe integer. Rejects floats, NaN, Infinity and negatives —
+ *  epochBytes() would otherwise truncate a negative into 0xffffffffffffffff. */
+function reqUint(v: unknown, what: string): number {
+  if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0) throw new EnvelopeError(what);
+  return v;
+}
+function reqBytes(b: Bytes, len: number, what: string): Bytes {
+  if (b.length !== len) throw new EnvelopeError(what);
+  return b;
+}
+async function reqB64(v: unknown, what: string): Promise<Bytes> {
+  reqStr(v, what);
+  try {
+    return await b64decode(v as string);
+  } catch {
+    throw new EnvelopeError(what);
+  }
+}
+
+export async function decodeEnvelope(bytes: Bytes): Promise<Envelope> {
+  let o: Record<string, unknown>;
+  try {
+    o = JSON.parse(utf8.decode(bytes)) as Record<string, unknown>;
+  } catch {
+    throw new EnvelopeError('kein gültiges JSON');
+  }
+  if (!o || typeof o !== 'object') throw new EnvelopeError('kein Objekt');
+
+  const conv = reqStr(o.c, 'conv');
+  const message = await decMsgChecked(o.m);
+  if (o.t !== 'prekey') return { type: 'msg', conv, message };
+  return { type: 'prekey', conv, x3dh: await decodeInitialHeaderChecked(o.x), message };
+}
+
+async function decMsgChecked(m: unknown): Promise<RatchetMessage> {
+  if (!m || typeof m !== 'object') throw new EnvelopeError('Nachrichtenteil fehlt');
+  const w = m as Record<string, unknown>;
+  const h = w.header;
+  if (!h || typeof h !== 'object') throw new EnvelopeError('Header fehlt');
+  const hw = h as Record<string, unknown>;
+  return {
+    header: {
+      dh: reqBytes(await reqB64(hw.dh, 'header.dh'), KEY_LEN, 'header.dh Länge'),
+      pn: reqUint(hw.pn, 'header.pn'),
+      n: reqUint(hw.n, 'header.n'),
+    },
+    ciphertext: await reqB64(w.ct, 'ciphertext'),
+  };
+}
+
+async function decodeInitialHeaderChecked(x: unknown): Promise<InitialMessageHeader> {
+  if (!x || typeof x !== 'object') throw new EnvelopeError('X3DH-Header fehlt');
+  const o = x as Record<string, unknown>;
+  return {
+    masterPub: reqBytes(await reqB64(o.mp, 'masterPub'), KEY_LEN, 'masterPub Länge'),
+    epoch: reqUint(o.ep, 'epoch'),
+    deviceCert: reqBytes(await reqB64(o.dc, 'deviceCert'), SIG_LEN, 'deviceCert Länge'),
+    identitySignPub: reqBytes(await reqB64(o.isp, 'identitySignPub'), KEY_LEN, 'identitySignPub Länge'),
+    identityDhPub: reqBytes(await reqB64(o.idp, 'identityDhPub'), KEY_LEN, 'identityDhPub Länge'),
+    ephemeralPub: reqBytes(await reqB64(o.ek, 'ephemeralPub'), KEY_LEN, 'ephemeralPub Länge'),
+    signedPreKeyId: reqUint(o.spk, 'signedPreKeyId'),
+    oneTimePreKeyId: o.opk === null || o.opk === undefined ? undefined : reqUint(o.opk, 'oneTimePreKeyId'),
+  };
 }
 
 // --- Prekey bundle token: compact binary pack, base64url (short, URL-safe) ---

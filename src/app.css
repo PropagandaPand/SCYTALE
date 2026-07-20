@@ -1305,6 +1305,10 @@ select {
 }
 .share-actions .btn {
   margin-top: 0;
+  /* Fixed 46px height, so a wrapped label would clip. Both labels are short now
+     ("Code teilen" / "Kopieren"), and nowrap is the belt-and-braces guard down
+     to ~320px (iPhone SE, or any phone with Display-Zoom on). */
+  white-space: nowrap;
 }
 .divider {
   display: flex;

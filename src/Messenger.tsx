@@ -19,6 +19,7 @@ import {
   masterSafetyNumber,
   identityFingerprint,
   isPrimaryDevice,
+  bytesEqual,
   decodeLinkGrant,
   sign,
   type Bytes,
@@ -216,6 +217,7 @@ export function Messenger({ dek, onLock }: Props) {
   const [msgInput, setMsgInput] = useState('');
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
+  const [shared, setShared] = useState(false); // feedback for the share button's copy fallback
   const [renaming, setRenaming] = useState(false);
   const [renameInput, setRenameInput] = useState('');
   const [scanning, setScanning] = useState(false);
@@ -636,6 +638,14 @@ export function Messenger({ dek, onLock }: Props) {
     if (!id || !token) return;
     try {
       const bundle = await decodeBundle(token);
+      // Adding your OWN code would pass every check — your own cert verifies and
+      // computeRoomId(myDh, myDh) is valid — and silently create a "chat with
+      // yourself". With the copy and paste buttons now in one view, that is an
+      // easy two-tap misfire, so reject it explicitly.
+      if (bytesEqual(bundle.identityDhPub, id.dh.publicKey)) {
+        setError('Das ist dein eigener Verbindungscode.');
+        return;
+      }
       const contact = await makeContact(id.dh.publicKey, bundle);
       if (contactsRef.current.some((c) => c.roomId === contact.roomId)) {
         openChat(contact.roomId);
@@ -1455,11 +1465,13 @@ export function Messenger({ dek, onLock }: Props) {
     const text = contactShareText();
     try {
       if (typeof navigator !== 'undefined' && navigator.share) {
-        await navigator.share({ text });
+        await navigator.share({ text }); // the native sheet is its own feedback
       } else {
+        // No share sheet (most desktops): we copied instead — acknowledge on THIS
+        // button, not the separate 'Kopieren' one the user didn't click.
         await navigator.clipboard.writeText(text);
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1500);
+        setShared(true);
+        window.setTimeout(() => setShared(false), 1500);
       }
     } catch {
       /* share sheet cancelled, or share/clipboard unavailable — nothing to do */
@@ -2236,7 +2248,7 @@ export function Messenger({ dek, onLock }: Props) {
             <div className="link-box">{shareLink}</div>
             <div className="share-actions">
               <button className="btn btn-primary" onClick={() => void shareContactCode()}>
-                Verbindungscode teilen
+                {shared ? 'Kopiert ✓' : 'Code teilen'}
               </button>
               <button className="btn btn-outline" onClick={() => void copyLink()}>
                 {copied ? 'Kopiert ✓' : 'Kopieren'}

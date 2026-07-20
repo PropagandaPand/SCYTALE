@@ -78,6 +78,22 @@ export class StaleIdentityError extends Error {
   }
 }
 
+/**
+ * The X3DH handshake completed but its FIRST message would not decrypt — both
+ * sides derived different shared secrets. Typical cause: a one-time prekey the
+ * peer already consumed (so we computed DH1–DH4 and they DH1–DH3), or a stale
+ * signed prekey. Named explicitly because this class of bug otherwise surfaces
+ * as an anonymous decryption failure with no diagnostic trail.
+ */
+export class HandshakeMismatchError extends Error {
+  constructor() {
+    super(
+      'Handshake passt nicht zusammen (vermutlich verbrauchter oder veralteter Prekey) — Verbindung muss neu aufgebaut werden.',
+    );
+    this.name = 'HandshakeMismatchError';
+  }
+}
+
 /** A pinned contact presented a different master without a valid rotation chain
  *  — a possible MITM. The message is dropped and the contact drops verified. */
 export class MasterChangedError extends Error {
@@ -468,12 +484,19 @@ export async function receiveEnvelope(
     contact.pendingHeader = null;
   }
 
+  // Did THIS call establish the session? Then the very next decrypt is the
+  // handshake's proof — and its failure means the two sides derived different
+  // shared secrets (e.g. a one-time prekey the peer already consumed). That must
+  // be reported as such: a generic decrypt error here costs an evening to
+  // diagnose, a named one costs five minutes.
+  const freshHandshake = !contact.ratchet;
+
   if (!contact.ratchet) {
     if (envelope.type !== 'prekey') {
       throw new Error('Erste Nachricht ohne X3DH-Header — Session kann nicht aufgebaut werden.');
     }
     const spk = lookup.signedPreKey(envelope.x3dh.signedPreKeyId);
-    if (!spk) throw new Error('Passender Signed Prekey nicht gefunden.');
+    if (!spk) throw new Error('Passender Signed Prekey nicht gefunden (vermutlich rotiert).');
     const opkPriv = lookup.consumeOneTimePreKey(envelope.x3dh.oneTimePreKeyId);
     const session = await respondX3DH(me, spk.privateKey, opkPriv, envelope.x3dh);
     contact.ratchet = await initRatchetResponder(session.sharedSecret, spk, session.associatedData);
@@ -482,7 +505,17 @@ export async function receiveEnvelope(
     contact.pendingHeader = null;
   }
 
-  return unframeContent(await ratchetDecrypt(contact.ratchet, envelope.message));
+  try {
+    return unframeContent(await ratchetDecrypt(contact.ratchet, envelope.message));
+  } catch (e) {
+    if (freshHandshake) {
+      // The derived session is provably wrong — don't keep half a session around,
+      // so the next prekey attempt can start clean.
+      contact.ratchet = null;
+      throw new HandshakeMismatchError();
+    }
+    throw e;
+  }
 }
 
 // --- Contact (de)serialisation for the vault (produces plaintext bytes only) ---

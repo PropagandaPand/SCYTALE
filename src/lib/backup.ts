@@ -117,7 +117,17 @@ async function restore(dek: CryptoKey, plaintext: Bytes): Promise<void> {
   await saveIdentity(dek, await deserializeIdentity(await b64decode(blob.identity)));
   await savePreKeys(dek, await deserializePreKeys(await b64decode(blob.prekeys)));
   await saveProfile(dek, blob.profile);
-  for (const cb of blob.contacts) await saveContact(dek, await deserializeContact(await b64decode(cb)));
+  for (const cb of blob.contacts) {
+    const c = await deserializeContact(await b64decode(cb));
+    // A backup captures a bundle whose ONE-TIME prekey may have been consumed
+    // after the snapshot was taken. Restoring it verbatim would let a later
+    // handshake compute DH1–DH4 while the peer computes DH1–DH3 — the same
+    // silent mismatch reconnectContact() guards against, except the restore path
+    // never passes through it. We cannot know whether it was used, so drop it:
+    // falling back to the no-OPK X3DH is always safe.
+    if (c.bundle?.oneTimePreKey) c.bundle = { ...c.bundle, oneTimePreKey: undefined };
+    await saveContact(dek, c);
+  }
   for (const inv of blob.groups) await saveGroup(dek, await fromInvite(inv));
   for (const roomId of Object.keys(blob.messages)) await saveMessages(dek, roomId, blob.messages[roomId]);
 }

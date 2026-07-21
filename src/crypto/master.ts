@@ -112,3 +112,28 @@ export async function verifyRotation(
   const msg = rotateMsg(r.oldMasterPub, r.newMasterPub, r.epoch);
   return (await verify(msg, r.sigOld, r.oldMasterPub)) && (await verify(msg, r.sigNew, r.newMasterPub));
 }
+
+// Fixed wire: oldMasterPub(32) | newMasterPub(32) | epoch(4, BE) | sigOld(64) | sigNew(64).
+const ROTATION_LEN = 32 + 32 + 4 + 64 + 64;
+
+export function encodeRotation(r: RotationStatement): Bytes {
+  const out = new Uint8Array(ROTATION_LEN);
+  out.set(r.oldMasterPub, 0);
+  out.set(r.newMasterPub, 32);
+  new DataView(out.buffer).setUint32(64, r.epoch);
+  out.set(r.sigOld, 68);
+  out.set(r.sigNew, 132);
+  return out;
+}
+
+export function decodeRotation(bytes: Bytes): RotationStatement {
+  if (bytes.length !== ROTATION_LEN) throw new Error('Ungültige Rotations-Kette.');
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return {
+    oldMasterPub: bytes.slice(0, 32),
+    newMasterPub: bytes.slice(32, 64),
+    epoch: dv.getUint32(64),
+    sigOld: bytes.slice(68, 132),
+    sigNew: bytes.slice(132, 196),
+  };
+}

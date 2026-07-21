@@ -18,6 +18,12 @@ import {
   openPayload,
   SEALED_ENVELOPE,
   verifyDeviceCert,
+  verifyRotation,
+  encodeRotation,
+  decodeRotation,
+  deviceInList,
+  verifyDeviceList,
+  isNewerDeviceList,
   encodeDeviceList,
   decodeDeviceList,
   encodeBundle,
@@ -27,6 +33,8 @@ import {
   identityFingerprint,
   getSodium,
   concatBytes,
+  bytesEqual,
+  asMasterPub,
   utf8,
   type IdentityKeys,
   type KeyPair,
@@ -37,6 +45,7 @@ import {
   type Bytes,
   type MasterPub,
   type DeviceList,
+  type RotationStatement,
 } from '../crypto';
 import { bytesToB64, b64ToBytes } from './bytes';
 
@@ -117,6 +126,17 @@ export interface Contact {
   bundle?: PreKeyBundle; // present when WE hold their code (needed to initiate)
   ratchet: RatchetState | null; // null until the session is established
   pendingHeader: InitialMessageHeader | null; // initiator attaches until first reply arrives
+  /**
+   * The sign key of the peer DEVICE that established the current ratchet. Needed
+   * because a peer's SECOND device can establish a responder ratchet without
+   * rewriting peerSignPub (which stays the primary), so peerSignPub does not
+   * reliably name the device behind the live session. Device revocation on the
+   * message path (applyDeviceListUpdate) tears the ratchet down when THIS device
+   * leaves the accepted list — otherwise a revoked device keeps sending accepted
+   * 'msg' over its established ratchet. Absent on pre-3c records → falls back to
+   * peerSignPub (correct for them: they predate multi-device receive).
+   */
+  ratchetDeviceSignPub?: Bytes;
 }
 
 /** Sending to a contact that still pins our pre-linking master is refused: the
@@ -141,6 +161,19 @@ export class HandshakeMismatchError extends Error {
       'Handshake passt nicht zusammen (vermutlich verbrauchter oder veralteter Prekey) — Verbindung muss neu aufgebaut werden.',
     );
     this.name = 'HandshakeMismatchError';
+  }
+}
+
+/**
+ * A prekey arrived from a device whose cert verifies under the pinned master but
+ * which is NOT in the contact's accepted device list — a REVOKED device. This is
+ * the receive half of device revocation (Stage 3c). Distinct from a "not my
+ * conversation" rejection: the master is right, the device is retired.
+ */
+export class RevokedDeviceError extends Error {
+  constructor() {
+    super('Nachricht von einem Gerät, das nicht in der Geräteliste dieses Kontakts steht (widerrufen) — abgelehnt.');
+    this.name = 'RevokedDeviceError';
   }
 }
 
@@ -220,6 +253,100 @@ export async function computeMasterRoomId(a: MasterPub, b: MasterPub): Promise<s
   return s.to_hex(s.crypto_generichash(16, concatBytes(MASTER_ROOM_CTX, x, y), null));
 }
 
+/**
+ * Is this SENDER device allowed to reach this contact? — the device-revocation
+ * check (Stage 3c).
+ *
+ * With an accepted master-signed device list, presence in it is the answer:
+ * a device whose cert is valid under the pinned master but which was removed
+ * from the list is REVOKED. Without a list (first contact, or a pre-3c record),
+ * the rule is "implicit single-device": only the pinned device is allowed.
+ *
+ * ⚠️ The list is NEVER synthesized from the device under test — that would be a
+ * self-referential guard (the v0.16.1 verifyLinkGrant class), green while
+ * checking nothing. A second device can only be admitted by a real, master-
+ * signed devlist update (Stage 8). Until then the implicit rule holds.
+ */
+export function deviceAuthorized(contact: Contact, deviceSignPub: Bytes): boolean {
+  if (contact.peerDeviceList) return deviceInList(contact.peerDeviceList, deviceSignPub);
+  return bytesEqual(deviceSignPub, contact.peerSignPub);
+}
+
+/**
+ * Learn a peer's newer, MASTER-SIGNED device list (Stage 3c/3d gossip). This is
+ * the ONLY way a second device of a peer becomes authorised — never by an
+ * implicit list synthesized from the device itself (that would be
+ * self-referential; see deviceAuthorized). Returns true if adopted.
+ *
+ * Refuses, in order: a master that isn't the pinned one; a RETIRED master
+ * (denylist first); a list that doesn't verify against the pinned master + epoch
+ * floor; and a ROLLBACK (not strictly newer than the stored list). Only then is
+ * the list stored — so a downgrade or a forged list can never widen the set.
+ */
+export async function applyDeviceListUpdate(
+  contact: Contact,
+  list: DeviceList,
+  retired: Set<string>,
+): Promise<boolean> {
+  if (!bytesEqual(list.masterPub, contact.peerMasterPub)) return false;
+  if (retired.has(await masterKeyB64(list.masterPub))) return false;
+  if (!(await verifyDeviceList(list, contact.peerMasterPub, contact.peerEpoch))) return false;
+  if (contact.peerDeviceList && !isNewerDeviceList(list, contact.peerDeviceList)) return false;
+  contact.peerDeviceList = list;
+  // Device revocation on the MESSAGE path (Review C): the guard in receiveEnvelope
+  // only gates PREKEY envelopes, so a revoked device could keep sending accepted
+  // 'msg' over its already-established ratchet indefinitely. When the device
+  // backing the live ratchet is no longer in the accepted list, tear the ratchet
+  // down: any further traffic from it must then re-handshake through the prekey
+  // gate, where deviceAuthorized rejects it (RevokedDeviceError).
+  const ratchetDevice = contact.ratchetDeviceSignPub ?? contact.peerSignPub;
+  if (contact.ratchet && !deviceInList(list, ratchetDevice)) {
+    contact.ratchet = null;
+    contact.pendingHeader = null;
+    contact.ratchetDeviceSignPub = undefined;
+  }
+  return true;
+}
+
+/**
+ * Resolve which contact an inbound envelope's `conv` refers to, tolerant of the
+ * DUAL REGIME during migration (Stage 3c). A migrated sender routes with a
+ * master-based conv, a not-yet-migrated one with a device-based conv, and the
+ * receiver may be in either state — so a direct `roomId === conv` match misses
+ * exactly when the two sides are out of step. This also tries the OTHER regime's
+ * derivation for each contact. Domain separation (computeMasterRoomId's prefix)
+ * makes a hit unambiguous: a device id can never equal a master id.
+ *
+ * ⚠️ RESOLUTION ONLY, NEVER AUTHORISATION. Identifying the contact does not
+ * authorise the envelope — receiveEnvelope re-checks the master afterwards. A
+ * legacy (device-derivation) match must never become a trust decision; that
+ * would be the v0.16.4 downgrade, a second weaker path an attacker would pick.
+ *
+ * TODO(stage-3c-cleanup): once the boot migration guarantees every contact has
+ * regime==='master', the legacy branch is dead code and pure attack surface —
+ * remove it. `legacy-resolve.test` goes red the moment it is no longer
+ * exercised, forcing that removal to be a deliberate commit.
+ */
+export async function resolveContactByConv(
+  contacts: Contact[],
+  conv: string,
+  myDhPub: Bytes,
+  myMasterPub: MasterPub,
+): Promise<Contact | undefined> {
+  const direct = contacts.find((c) => c.roomId === conv);
+  if (direct) return direct;
+  for (const c of contacts) {
+    if (c.regime === 'master') {
+      // stored master, sender may still be on device-DH
+      if ((await computeRoomId(myDhPub, c.peerDhPub)) === conv) return c;
+    } else {
+      // stored device (or pre-3c), sender may have migrated to master
+      if ((await computeMasterRoomId(myMasterPub, asMasterPub(c.peerMasterPub))) === conv) return c;
+    }
+  }
+  return undefined;
+}
+
 /** Our inbox room: SHA-256 of our Ed25519 identity pub. Derived from our OWN
  *  identity, so we can listen without knowing anyone else; whoever holds our
  *  code can send here. The relay verifies inbox ownership by checking this hash
@@ -234,8 +361,9 @@ export async function inboxRoom(signPub: Bytes): Promise<string> {
 }
 
 /** Initiator side: we hold their code (bundle). Verify the device cert against
- *  the master BEFORE trusting any of the bundle's keys, then pin the master. */
-export async function makeContact(myDhPub: Bytes, bundle: PreKeyBundle): Promise<Contact> {
+ *  the master BEFORE trusting any of the bundle's keys, then pin the master.
+ *  `myMasterPub` (branded) anchors the master-based roomId — see computeMasterRoomId. */
+export async function makeContact(myMasterPub: MasterPub, bundle: PreKeyBundle): Promise<Contact> {
   const certOk = await verifyDeviceCert(
     bundle.masterPub,
     bundle.epoch,
@@ -245,12 +373,17 @@ export async function makeContact(myDhPub: Bytes, bundle: PreKeyBundle): Promise
   );
   if (!certOk) throw new Error('Device-Zertifikat ungültig — Gerät nicht vom Master signiert (möglicher MITM).');
   return {
-    roomId: await computeRoomId(myDhPub, bundle.identityDhPub),
+    roomId: await computeMasterRoomId(myMasterPub, asMasterPub(bundle.masterPub)),
     peerMasterPub: bundle.masterPub,
     peerEpoch: bundle.epoch,
     peerSignPub: bundle.identitySignPub,
     peerDhPub: bundle.identityDhPub,
     peerFingerprint: await identityFingerprint(bundle.masterPub, bundle.masterPub),
+    ownMasterPub: myMasterPub,
+    regime: 'master',
+    // peerDeviceList intentionally UNSET → implicit single-device (only the
+    // pinned device is allowed) until a real master-signed devlist arrives. We
+    // never synthesize a list from the very device we are about to trust.
     bundle,
     ratchet: null,
     pendingHeader: null,
@@ -260,7 +393,7 @@ export async function makeContact(myDhPub: Bytes, bundle: PreKeyBundle): Promise
 /** Responder side: a stranger who holds OUR code just messaged us. Verify their
  *  device cert against their master, then TOFU-pin the master. */
 export async function makeContactFromHeader(
-  myDhPub: Bytes,
+  myMasterPub: MasterPub,
   header: InitialMessageHeader,
 ): Promise<Contact> {
   const certOk = await verifyDeviceCert(
@@ -272,12 +405,14 @@ export async function makeContactFromHeader(
   );
   if (!certOk) throw new Error('Device-Zertifikat des Absenders ungültig (möglicher MITM).');
   return {
-    roomId: await computeRoomId(myDhPub, header.identityDhPub),
+    roomId: await computeMasterRoomId(myMasterPub, asMasterPub(header.masterPub)),
     peerMasterPub: header.masterPub,
     peerEpoch: header.epoch,
     peerSignPub: header.identitySignPub,
     peerDhPub: header.identityDhPub,
     peerFingerprint: await identityFingerprint(header.masterPub, header.masterPub),
+    ownMasterPub: myMasterPub,
+    regime: 'master',
     bundle: undefined,
     ratchet: null,
     pendingHeader: null,
@@ -290,15 +425,24 @@ export async function makeContactFromHeader(
  * a fresh X3DH runs under the new identity, and clears `verified` — the safety
  * number MUST be compared again. Returns false if nothing was pending.
  */
-export async function acceptMasterChange(contact: Contact): Promise<boolean> {
+/**
+ * The "hint BEHAVES as claimed" half of the door: the user deliberately accepts
+ * a claimed new identity (from an unproven previousMaster merge affordance).
+ * Unlike acceptRotation (chain-proven, keeps verified), this is a TOFU break —
+ * `verified` is cleared, a fresh safety-number compare is mandatory.
+ *
+ * Returns {oldRoomId, newRoomId, retiredMaster} so the caller can move storage
+ * + maps AND add the abandoned master to the GLOBAL denylist (no longer a
+ * per-contact field). Null if nothing was pending.
+ */
+export async function acceptMasterChange(
+  contact: Contact,
+): Promise<{ oldRoomId: string; newRoomId: string; retiredMaster: string } | null> {
   const p = contact.pendingMaster;
-  if (!p) return false;
-  // The master we are replacing is now abandoned — remember it so it can never
-  // be offered again (see Contact.retiredMasters).
-  const retired = await b64(contact.peerMasterPub);
-  contact.retiredMasters = [...(contact.retiredMasters ?? []), retired].filter(
-    (v, i, arr) => arr.indexOf(v) === i,
-  );
+  if (!p) return null;
+  if (!contact.ownMasterPub) throw new Error('Identitätswechsel ohne ownMasterPub — roomId nicht ableitbar.');
+  const retiredMaster = await b64(contact.peerMasterPub); // now abandoned → global denylist
+  const oldRoomId = contact.roomId;
   contact.peerMasterPub = p.masterPub;
   contact.peerEpoch = p.epoch;
   contact.peerSignPub = p.signPub;
@@ -307,9 +451,12 @@ export async function acceptMasterChange(contact: Contact): Promise<boolean> {
   contact.bundle = undefined; // the stored bundle belonged to the old identity
   contact.ratchet = null; // force a fresh handshake
   contact.pendingHeader = null;
-  contact.verified = false; // re-verification is mandatory
+  contact.ratchetDeviceSignPub = undefined; // ratchet gone → forget its device
+  contact.verified = false; // TOFU break — re-verification is mandatory
   contact.pendingMaster = undefined;
-  return true;
+  contact.roomId = await computeMasterRoomId(contact.ownMasterPub, asMasterPub(p.masterPub));
+  contact.regime = 'master';
+  return { oldRoomId, newRoomId: contact.roomId, retiredMaster };
 }
 
 /**
@@ -318,10 +465,14 @@ export async function acceptMasterChange(contact: Contact): Promise<boolean> {
  * CURRENT (linked) master and lifts the send block. The peer will see an
  * identity warning and must accept us — that is the pinning working, not a bug.
  */
-export function reconnectContact(contact: Contact): void {
+export async function reconnectContact(
+  contact: Contact,
+  myMasterPub: MasterPub,
+): Promise<{ oldRoomId: string; newRoomId: string }> {
   contact.staleIdentity = undefined;
   contact.ratchet = null;
   contact.pendingHeader = null;
+  contact.ratchetDeviceSignPub = undefined; // ratchet gone → forget its device
   // The stored bundle's ONE-TIME prekey was consumed by the session we are
   // resetting. Reusing it would make us derive DH1–DH4 while the peer (who no
   // longer holds that key) derives DH1–DH3 — different shared secrets, and the
@@ -330,6 +481,87 @@ export function reconnectContact(contact: Contact): void {
   if (contact.bundle?.oneTimePreKey) {
     contact.bundle = { ...contact.bundle, oneTimePreKey: undefined };
   }
+  // We changed identity (device linking), so this contact now knows us under
+  // our CURRENT master — update the local half of the room key and re-derive it.
+  const oldRoomId = contact.roomId;
+  contact.ownMasterPub = myMasterPub;
+  contact.roomId = await computeMasterRoomId(myMasterPub, asMasterPub(contact.peerMasterPub));
+  contact.regime = 'master';
+  return { oldRoomId, newRoomId: contact.roomId };
+}
+
+/**
+ * Re-derive a contact's roomId under the master-based regime (Stage 3c). PURE
+ * and IDEMPOTENT: `regime` is the anchor — a contact already 'master' is
+ * returned unchanged, which the crash-safe re-key routine relies on to resume a
+ * half-done migration without double-applying. Needs `ownMasterPub` (the master
+ * THIS contact knows us under); the boot migration fills it before calling. A
+ * staleIdentity contact whose old master was never snapshotted (pre-v0.18.7)
+ * has none and cannot be migrated — the caller routes it to "reconnect".
+ *
+ * This only computes and re-labels; moving the stored record, messages and
+ * in-memory maps under the new id is the caller's crash-safe routine (it must
+ * RE-ENCRYPT under the new AAD, never rename — see store.ts contactAad).
+ */
+export async function migrateContactRoomId(
+  contact: Contact,
+): Promise<{ oldRoomId: string; newRoomId: string }> {
+  const oldRoomId = contact.roomId;
+  if (contact.regime === 'master') return { oldRoomId, newRoomId: oldRoomId };
+  if (!contact.ownMasterPub) {
+    throw new Error('Migration ohne ownMasterPub — der Master, unter dem uns dieser Kontakt kennt, fehlt.');
+  }
+  const newRoomId = await computeMasterRoomId(contact.ownMasterPub, asMasterPub(contact.peerMasterPub));
+  contact.roomId = newRoomId;
+  contact.regime = 'master';
+  return { oldRoomId, newRoomId };
+}
+
+/**
+ * The "chain PROVES continuity" half of the door (Stage 3c): accept a
+ * dual-signed master ROTATION on an existing contact. Unlike acceptMasterChange
+ * (a user-confirmed TOFU break that clears `verified`), a valid rotation chain
+ * is cryptographic proof that the new master succeeds the pinned one — so
+ * `verified` is KEPT and the room re-keys automatically.
+ *
+ * ⚠️ ORDER IS SECURITY-CRITICAL (Runde-3 conditions):
+ *  1. DENYLIST FIRST — a claimed master on the global retired-set is refused
+ *     BEFORE any lookup or state touch. Otherwise the rotation path is a
+ *     downgrade onto an abandoned key, and the denylist would guard only
+ *     auto-create while the attacker takes this path.
+ *  2. REJECT BEFORE ANY STATE TOUCH — an invalid chain leaves verified,
+ *     peerMasterPub, peerEpoch and roomId untouched (the v0.16.0 trust-DoS, a
+ *     rule that applies afresh because this path is new).
+ *
+ * The contact is resolved elsewhere by the CLAIMED old master; authorisation is
+ * the chain's two signatures (verifyRotation), never the match.
+ */
+export async function acceptRotation(
+  contact: Contact,
+  statement: RotationStatement,
+  retired: Set<string>,
+): Promise<{ oldRoomId: string; newRoomId: string }> {
+  if (retired.has(await b64(statement.oldMasterPub)) || retired.has(await b64(statement.newMasterPub))) {
+    throw new RetiredIdentityError(true);
+  }
+  if (!(await verifyRotation(contact.peerMasterPub, contact.peerEpoch, statement))) {
+    throw new Error('Rotations-Kette ungültig — Kontakt unverändert.');
+  }
+  if (!contact.ownMasterPub) {
+    throw new Error('Rotation ohne ownMasterPub — roomId nicht ableitbar.');
+  }
+  const oldRoomId = contact.roomId;
+  contact.peerMasterPub = statement.newMasterPub;
+  contact.peerEpoch = statement.epoch;
+  contact.bundle = undefined;
+  contact.ratchet = null; // fresh X3DH under the new master
+  contact.pendingHeader = null;
+  contact.ratchetDeviceSignPub = undefined; // ratchet gone → forget its device
+  const newRoomId = await computeMasterRoomId(contact.ownMasterPub, asMasterPub(statement.newMasterPub));
+  contact.roomId = newRoomId;
+  contact.regime = 'master';
+  // verified DELIBERATELY unchanged — the chain proved continuity.
+  return { oldRoomId, newRoomId };
 }
 
 /** Encrypt outgoing text into a wire envelope; establishes the session if needed. */
@@ -348,7 +580,9 @@ export type MessageContent =
   | { kind: 'group'; groupId: string; senderName?: string; inner: MessageContent }
   | { kind: 'ginvite'; group: GroupInvite }
   | { kind: 'gremove'; groupId: string } // "you were removed from this group"
-  | { kind: 'gleave'; groupId: string }; // "I left this group"
+  | { kind: 'gleave'; groupId: string } // "I left this group"
+  | { kind: 'devlist'; list: DeviceList } // E2E gossip of my updated device list
+  | { kind: 'rotation'; statement: RotationStatement }; // dual-signed master rotation (proven door)
 
 function prefixed(type: number, body: Uint8Array): Bytes {
   const out = new Uint8Array(1 + body.length);
@@ -360,7 +594,7 @@ function prefixed(type: number, body: Uint8Array): Bytes {
 // Frame: byte0 = 0 (text) | 1 (file) | 2 (profile).
 //   file:    [nameLen(2)][name][mimeLen(2)][mime][data]
 //   profile: [nameLen(2)][name][avatarLen(4)][avatar]
-function frameContent(c: MessageContent): Bytes {
+async function frameContent(c: MessageContent): Promise<Bytes> {
   if (c.kind === 'text') {
     const t = utf8.encode(c.text);
     const out = new Uint8Array(1 + t.length);
@@ -403,16 +637,18 @@ function frameContent(c: MessageContent): Bytes {
     return out;
   }
   if (c.kind === 'group') {
-    const json = JSON.stringify({ g: c.groupId, s: c.senderName ?? '', i: bytesToB64(frameContent(c.inner)) });
+    const json = JSON.stringify({ g: c.groupId, s: c.senderName ?? '', i: bytesToB64(await frameContent(c.inner)) });
     return prefixed(3, utf8.encode(json));
   }
   if (c.kind === 'gremove') return prefixed(5, utf8.encode(c.groupId));
   if (c.kind === 'gleave') return prefixed(6, utf8.encode(c.groupId));
+  if (c.kind === 'devlist') return prefixed(7, await encodeDeviceList(c.list));
+  if (c.kind === 'rotation') return prefixed(8, encodeRotation(c.statement));
   // ginvite
   return prefixed(4, utf8.encode(JSON.stringify(c.group)));
 }
 
-function unframeContent(bytes: Bytes): MessageContent {
+async function unframeContent(bytes: Bytes): Promise<MessageContent> {
   if (bytes[0] === 0) return { kind: 'text', text: utf8.decode(bytes.slice(1)) };
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 
@@ -428,13 +664,15 @@ function unframeContent(bytes: Bytes): MessageContent {
   }
   if (bytes[0] === 3) {
     const j = JSON.parse(utf8.decode(bytes.slice(1)));
-    return { kind: 'group', groupId: j.g, senderName: j.s || undefined, inner: unframeContent(b64ToBytes(j.i)) };
+    return { kind: 'group', groupId: j.g, senderName: j.s || undefined, inner: await unframeContent(b64ToBytes(j.i)) };
   }
   if (bytes[0] === 4) {
     return { kind: 'ginvite', group: JSON.parse(utf8.decode(bytes.slice(1))) as GroupInvite };
   }
   if (bytes[0] === 5) return { kind: 'gremove', groupId: utf8.decode(bytes.slice(1)) };
   if (bytes[0] === 6) return { kind: 'gleave', groupId: utf8.decode(bytes.slice(1)) };
+  if (bytes[0] === 7) return { kind: 'devlist', list: await decodeDeviceList(bytes.slice(1)) };
+  if (bytes[0] === 8) return { kind: 'rotation', statement: decodeRotation(bytes.slice(1)) };
 
   // Only type 1 is a real file. Anything else is a corrupt/unknown frame — throw
   // so it's dropped, never rendered as a junk "file" in the chat (e.g. a mangled
@@ -472,8 +710,10 @@ async function sendContent(me: IdentityKeys, contact: Contact, content: MessageC
       session.associatedData,
     );
     contact.pendingHeader = header;
+    // We initiate to the pinned device, so that device backs this ratchet.
+    contact.ratchetDeviceSignPub = contact.peerSignPub;
   }
-  const message = await ratchetEncrypt(contact.ratchet, frameContent(content));
+  const message = await ratchetEncrypt(contact.ratchet, await frameContent(content));
   const conv = contact.roomId;
   const envelope = contact.pendingHeader
     ? ({ type: 'prekey', conv, x3dh: contact.pendingHeader, message } as const)
@@ -529,6 +769,19 @@ export async function sendGroupLeave(me: IdentityKeys, contact: Contact, groupId
   return sendContent(me, contact, { kind: 'gleave', groupId });
 }
 
+/** Gossip our updated, master-signed device list to a contact (revocation). */
+export async function sendDeviceList(me: IdentityKeys, contact: Contact, list: DeviceList): Promise<Bytes> {
+  return sendContent(me, contact, { kind: 'devlist', list });
+}
+
+/** Gossip a dual-signed master rotation to a contact that still pins our OLD
+ *  master. Unlike the unproven previousMaster hint, this PROVES continuity, so
+ *  the receiver's acceptRotation keeps `verified`. The producer (a co-signed
+ *  chain from device linking) is separate; this is the transport. */
+export async function sendRotation(me: IdentityKeys, contact: Contact, statement: RotationStatement): Promise<Bytes> {
+  return sendContent(me, contact, { kind: 'rotation', statement });
+}
+
 /** Decrypt an incoming envelope; establishes the responder session on first contact. */
 export async function receiveMessage(
   me: IdentityKeys,
@@ -549,138 +802,121 @@ export async function receiveEnvelope(
   envelope: Envelope,
   lookup: PreKeyLookup,
 ): Promise<MessageContent> {
-  // ── Bind the envelope to THIS conversation, for EVERY prekey ──────────────
+  // ── AUTHORISE every prekey — master-based, at the TOP, before any mutation ──
   // `conv` is a pure routing field: the sender picks it freely and the relay
-  // accepts unauthenticated sends into any inbox. So the fact that this envelope
-  // was matched to `contact` proves nothing on its own. The device cert proves
-  // nothing about *whose* keys these are either — anyone can generate a master
-  // and self-sign a cert over arbitrary public keys (a cert carries no proof of
-  // possession).
+  // accepts unauthenticated sends into any inbox, so being matched to `contact`
+  // proves nothing. The peer's device DH key is public (it travels in group
+  // rosters), so it CANNOT bind — only the MASTER can, because only the peer's
+  // own devices hold a cert under it (respondX3DH re-checks that cert).
   //
-  // What IS binding: our roomId is derived from our DH key and the peer's, so a
-  // prekey that legitimately concerns this contact must re-derive exactly this
-  // roomId from the identity it presents.
+  // (1) MASTER binding: the claimed master must be the pinned one. Regime-
+  //     independent — it compares the masters directly, so it works whether this
+  //     contact's roomId is still device-DH (pre-migration) or already master.
+  //     A mismatch is REJECTED here, never routed into the master-change branch
+  //     below: routing it there would reopen the v0.16.4 injection — an attacker
+  //     with a victim's rostered dhPub could otherwise smuggle in a pendingMaster.
+  //     Legitimate master changes are handled deliberately (Stage 3c door), not
+  //     off an unauthenticated prekey.
   //
-  // This sits at the TOP, not inside the master-mismatch branch below, so that
-  // the contact-selection is validated on every path rather than one. When the
-  // masters happen to match, the mismatch branch is skipped entirely and the
-  // only remaining guard would be the cert check inside respondX3DH — which
-  // catches a forgery, but only after we have already accepted the envelope as
-  // belonging here. Defence should not depend on which branch a message takes.
-  //
-  // Legitimate cases pass: an ordinary prekey, a master rotation and a
-  // device-linking swap all keep the device keys. A peer whose device keys
-  // really changed arrives as a NEW contact — the honest outcome. (That also
-  // stops a second device of the peer from silently clobbering this session;
-  // per-device sessions are stage 3c's job, not an accident of this path.)
+  // (2) DEVICE revocation: the sending device must be authorised for this
+  //     contact (present in an accepted master-signed list, or the pinned device
+  //     when none exists). This sits BEFORE the simultaneous-init tie-break that
+  //     nulls our ratchet — otherwise a revoked device could destroy a live
+  //     session via that path before the guard ever runs.
   if (envelope.type === 'prekey') {
-    const claimed = envelope.x3dh.identityDhPub;
-    if ((await computeRoomId(me.dh.publicKey, claimed)) !== contact.roomId) {
+    const x = envelope.x3dh;
+    if (!bytesEqual(x.masterPub, contact.peerMasterPub)) {
       throw new Error('Nachricht gehört nicht zu dieser Unterhaltung — verworfen.');
     }
+    if (!deviceAuthorized(contact, x.identitySignPub)) {
+      throw new RevokedDeviceError();
+    }
   }
 
-  // Master pinning (TOFU): a prekey claiming a DIFFERENT master for an already-
-  // pinned contact is rejected outright. A bare master change — without a valid,
-  // dual-signed rotation chain from the pinned master — is a possible MITM, so a
-  // higher epoch alone must never override the pin. Drop verified, Signal-style.
-  // (Rotation-chain acceptance arrives with the rotation flow.)
-  if (
-    envelope.type === 'prekey' &&
-    contact.peerMasterPub &&
-    cmp(envelope.x3dh.masterPub, contact.peerMasterPub) !== 0
-  ) {
-    const x = envelope.x3dh;
+  // (The old master-mismatch branch that recorded pendingMaster and threw
+  // MasterChangedError/RetiredIdentityError from a bare prekey is GONE. Under
+  // master-based roomId the top-of-function authorisation already rejects any
+  // envelope whose master isn't the pinned one — a different master derives a
+  // different room and never reaches here as this contact. A legitimate master
+  // change is now handled deliberately, off two explicit paths, not off an
+  // unauthenticated prekey:
+  //   • a dual-signed ROTATION chain proves continuity → acceptRotation (keeps
+  //     verified, re-keys); and
+  //   • an UNPROVEN previousMaster hint surfaces a merge affordance the user
+  //     confirms → acceptMasterChange (clears verified).
+  // The retired-master defence moved to the GLOBAL, master-indexed denylist,
+  // checked before those paths and before auto-create — see lib/denylist.ts.)
 
-    // (Conversation binding is enforced at the TOP of this function, for every
-    // prekey — an identity-change claim that does not derive this roomId never
-    // reaches this branch.)
-
-    // Retired master? Refuse outright and — importantly — WITHOUT touching
-    // `verified`. Otherwise anyone holding the abandoned key could degrade our
-    // trust in the contact's CURRENT identity just by sending. This is a dead
-    // end by design: the way back is a fresh identity setup, not this key.
-    if (contact.retiredMasters?.includes(await b64(x.masterPub))) {
-      // Record the attempt ONCE. The holder of the abandoned key can replay
-      // indefinitely, so this must be a contact state the user can look at, not
-      // a per-message alert — see Contact.retiredAttempt.
-      const first = !contact.retiredAttempt;
-      contact.retiredAttempt = true;
-      throw new RetiredIdentityError(first);
-    }
-
-    // NOTE: `verified` is deliberately NOT cleared here — see acceptMasterChange,
-    // which clears it at the moment the pin actually moves. Clearing it on
-    // receipt would let anyone who can reach our inbox burn the flag of an
-    // arbitrary contact, repeatedly and without holding any key: a verification
-    // DoS that trains the user to click the MITM warning away — exactly the
-    // precondition for a later false accept. `verified` describes the identity
-    // we have PINNED, and an unaccepted claim has not moved that pin.
-    //
-    // Remember the claimed identity so the user can deliberately accept it, but
-    // ONLY if it is internally consistent (device cert verifies under the
-    // claimed master). An inconsistent claim isn't even worth offering.
-    // A claim we are already showing must not alert again: it is replayable at
-    // will, so one warning per delivered message is the same harassment lever as
-    // the retired-master case. Dedup on CONTENT (this exact master), not on a
-    // flag — a genuinely different claim deserves a fresh warning.
-    const sameAsPending =
-      !!contact.pendingMaster && cmp(contact.pendingMaster.masterPub, x.masterPub) === 0;
-    if (await verifyDeviceCert(x.masterPub, x.epoch, x.identitySignPub, x.identityDhPub, x.deviceCert)) {
-      contact.pendingMaster = {
-        masterPub: x.masterPub,
-        epoch: x.epoch,
-        signPub: x.identitySignPub,
-        dhPub: x.identityDhPub,
-      };
-    }
-    throw new MasterChangedError(!sameAsPending);
-  }
+  // We DECIDE the path and BUILD any new session into LOCALS, mutating live
+  // contact state only AFTER the message authenticates (respondX3DH's cert check
+  // and the AEAD decrypt both pass) — the v0.17.1 "commit only after the AEAD
+  // check" discipline. The prekey guards above compare only PUBLIC roster values;
+  // the secret-binding check lives inside respondX3DH. If we nulled the live
+  // ratchet/pendingHeader before it, an attacker who copied a peer's public
+  // master + signPub could destroy an in-flight session with a garbage prekey
+  // (Devil's-Advocate DA-4), and a forged 'msg' could clear pendingHeader and
+  // stall a handshake (Review F). Committing last closes both.
 
   // Simultaneous initiation: we started a session and haven't heard back
   // (pendingHeader set) AND the peer also sent a prekey. Both can't keep their
   // own session — pick one deterministically by identity order: the lower key
   // stays initiator, the higher adopts the peer's session. Both then converge.
-  if (contact.ratchet && contact.pendingHeader && envelope.type === 'prekey') {
-    if (cmp(me.dh.publicKey, contact.peerDhPub) < 0) {
-      throw new Error('Gleichzeitiger Verbindungsaufbau — Peer-Prekey ignoriert (unsere Session gewinnt).');
-    }
-    contact.ratchet = null; // peer wins — drop our attempt and respond to theirs
-    contact.pendingHeader = null;
+  const simInitAdopt = !!contact.ratchet && !!contact.pendingHeader && envelope.type === 'prekey';
+  if (simInitAdopt && cmp(me.dh.publicKey, contact.peerDhPub) < 0) {
+    throw new Error('Gleichzeitiger Verbindungsaufbau — Peer-Prekey ignoriert (unsere Session gewinnt).');
   }
 
-  // Did THIS call establish the session? Then the very next decrypt is the
-  // handshake's proof — and its failure means the two sides derived different
-  // shared secrets (e.g. a one-time prekey the peer already consumed). That must
-  // be reported as such: a generic decrypt error here costs an evening to
-  // diagnose, a named one costs five minutes.
-  const freshHandshake = !contact.ratchet;
+  // Build a fresh responder session iff we have no live ratchet, OR we lost the
+  // sim-init tie-break and must adopt the peer's (without yet dropping ours).
+  // freshHandshake drives the "provably wrong on first decrypt" reporting: its
+  // failure means the two sides derived different shared secrets.
+  const buildFresh = !contact.ratchet || simInitAdopt;
+  const freshHandshake = buildFresh;
 
-  if (!contact.ratchet) {
+  let ratchet = contact.ratchet;
+  if (buildFresh) {
     if (envelope.type !== 'prekey') {
       throw new Error('Erste Nachricht ohne X3DH-Header — Session kann nicht aufgebaut werden.');
     }
     const spk = lookup.signedPreKey(envelope.x3dh.signedPreKeyId);
     if (!spk) throw new Error('Passender Signed Prekey nicht gefunden (vermutlich rotiert).');
     const opkPriv = lookup.consumeOneTimePreKey(envelope.x3dh.oneTimePreKeyId);
+    // respondX3DH verifies the sender's device cert — throws X3DHError on a forgery
+    // BEFORE we touch any live state.
     const session = await respondX3DH(me, spk.privateKey, opkPriv, envelope.x3dh);
-    contact.ratchet = await initRatchetResponder(session.sharedSecret, spk, session.associatedData);
-  } else {
-    // Any inbound message means the peer has our session → stop attaching the header.
-    contact.pendingHeader = null;
+    ratchet = await initRatchetResponder(session.sharedSecret, spk, session.associatedData);
+  }
+  if (!ratchet) {
+    // Unreachable: buildFresh either set ratchet or threw. Kept as a type guard.
+    throw new Error('Kein Ratchet-Zustand nach Handshake.');
   }
 
+  let plaintext: Bytes;
   try {
-    return unframeContent(await ratchetDecrypt(contact.ratchet, envelope.message));
+    plaintext = await ratchetDecrypt(ratchet, envelope.message);
   } catch (e) {
     if (freshHandshake) {
-      // The derived session is provably wrong — don't keep half a session around,
-      // so the next prekey attempt can start clean.
-      contact.ratchet = null;
+      // The derived session is provably wrong — leave contact untouched (we never
+      // committed the fresh ratchet), so the next prekey attempt starts clean AND
+      // a forged prekey cannot have destroyed a pre-existing in-flight session.
       throw new HandshakeMismatchError();
     }
     throw e;
   }
+
+  // COMMIT: the message authenticated, so it is now safe to mutate live state.
+  // Adopting a fresh ratchet replaces our in-flight one (sim-init loss / first
+  // contact); any inbound message means the peer has our session, so we stop
+  // attaching the X3DH header.
+  contact.ratchet = ratchet;
+  contact.pendingHeader = null;
+  if (buildFresh) {
+    // Record the peer device that established this ratchet — it may be a SECOND
+    // device (authorised by the list), not the primary peerSignPub, so revocation
+    // on the message path can later tear this ratchet down if THIS device leaves.
+    contact.ratchetDeviceSignPub = envelope.type === 'prekey' ? envelope.x3dh.identitySignPub : contact.peerSignPub;
+  }
+  return await unframeContent(plaintext);
 }
 
 // --- Contact (de)serialisation for the vault (produces plaintext bytes only) ---
@@ -707,11 +943,19 @@ interface ContactWire {
   bundle: string | null; // bundle token (null if we only hold their identity)
   ratchet: string | null; // base64 of serializeState output
   pendingHeader: unknown | null;
+  ratchetDeviceSignPub: string | null; // b64 of the device behind the live ratchet
 }
 
 async function b64(b: Bytes): Promise<string> {
   const s = await getSodium();
   return s.to_base64(b, s.base64_variants.ORIGINAL);
+}
+
+/** Canonical base64 of a master pub — THE key format of the global denylist.
+ *  Exported so every denylist check uses the same encoding as what acceptMaster-
+ *  Change/acceptRotation store; a mismatched encoding would silently miss. */
+export async function masterKeyB64(masterPub: Bytes): Promise<string> {
+  return b64(masterPub);
 }
 async function unb64(str: string): Promise<Bytes> {
   const s = await getSodium();
@@ -748,6 +992,7 @@ export async function serializeContact(c: Contact): Promise<Bytes> {
     bundle: c.bundle ? await encodeBundle(c.bundle) : null,
     ratchet: c.ratchet ? await b64(await serializeState(c.ratchet)) : null,
     pendingHeader: c.pendingHeader ? await encodeInitialHeader(c.pendingHeader) : null,
+    ratchetDeviceSignPub: c.ratchetDeviceSignPub ? await b64(c.ratchetDeviceSignPub) : null,
   };
   return utf8.encode(JSON.stringify(wire));
 }
@@ -784,5 +1029,6 @@ export async function deserializeContact(bytes: Bytes): Promise<Contact> {
     ratchet: wire.ratchet ? await deserializeState(await unb64(wire.ratchet)) : null,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     pendingHeader: wire.pendingHeader ? await decodeInitialHeader(wire.pendingHeader as any) : null,
+    ratchetDeviceSignPub: wire.ratchetDeviceSignPub ? await unb64(wire.ratchetDeviceSignPub) : undefined,
   };
 }

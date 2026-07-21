@@ -1,7 +1,5 @@
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  ZIELVORGABE (xfail) — roomId-Migration von Geräte-DH auf Master          ║
-// ║  Dieser Test ist HEUTE ROT. Das ist beabsichtigt.                        ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
+// roomId-Migration von Geräte-DH auf Master (Stufe 3c).
+// (War xfail-Zielvorgabe bis migrateContactRoomId gebaut war; jetzt regulär.)
 //
 // EIGENSCHAFT:
 //   Nach dem Umbau der roomId-Ableitung findet eine BESTEHENDE Konversation
@@ -34,7 +32,7 @@
 import * as S from './.bundle/entry.js';
 
 let pass = 0, fail = 0;
-const ok = (n, c) => { if (c) { pass++; console.log('  ok  ', n); } else { fail++; console.log('  OFFEN', n); } };
+const ok = (n, c) => { if (c) { pass++; console.log('  ok  ', n); } else { fail++; console.log('  FAIL', n); } };
 const sodium = await S.getSodium();
 const hex = (x) => sodium.to_hex(x);
 
@@ -79,9 +77,12 @@ if (typeof S.migrateContactRoomId === 'function' && typeof S.computeMasterRoomId
   ok('die ID hat sich tatsächlich geändert', r.newRoomId !== oldId);
 
   // Beide Seiten: Bob leitet aus (bob.own, alice.peer) ab — dieselbe sortierte ID.
+  // regime explizit 'device' (contact wurde oben schon migriert → 'master', das
+  // würde die idempotente migrate zum No-op machen; hier soll frisch migriert werden).
   const bobContact = {
     ...contact,
     roomId: oldId,
+    regime: 'device',
     ownMasterPub: bob.master.publicKey,
     peerMasterPub: alice.master.publicKey,
   };
@@ -101,6 +102,7 @@ if (typeof S.migrateContactRoomId === 'function' && typeof S.computeMasterRoomId
   const stale = {
     ...contact,
     roomId: oldId,
+    regime: 'device',
     staleIdentity: true,
     ownMasterPub: staleOldMaster.publicKey,
   };

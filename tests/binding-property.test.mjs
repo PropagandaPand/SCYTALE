@@ -51,8 +51,8 @@ const snap = async (c) => dec.decode(await S.serializeContact(c));
  * get, and see whether that is the same conversation as the victim's.
  */
 async function checkProperty(label, victimIdentity, claimIdentity) {
-  const victim = await S.makeContactFromHeader(alice.dh.publicKey, header(victimIdentity));
-  const wouldBe = await S.makeContactFromHeader(alice.dh.publicKey, header(claimIdentity));
+  const victim = await S.makeContactFromHeader(alice.master.publicKey, header(victimIdentity));
+  const wouldBe = await S.makeContactFromHeader(alice.master.publicKey, header(claimIdentity));
   const belongsHere = wouldBe.roomId === victim.roomId;
 
   const before = await snap(victim);

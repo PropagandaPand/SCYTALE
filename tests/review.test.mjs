@@ -22,13 +22,15 @@ const lookup = { signedPreKey: () => undefined, consumeOneTimePreKey: () => unde
 
 // Alice's contact for Bob, verified.
 const mkContact = async () => ({
-  roomId: await S.computeRoomId(alice.dh.publicKey, bob.dh.publicKey),
+  roomId: await S.computeMasterRoomId(alice.master.publicKey, bob.master.publicKey),
+  ownMasterPub: alice.master.publicKey,
   peerMasterPub: bob.master.publicKey,
   peerEpoch: 1,
   peerSignPub: bob.sign.publicKey,
   peerDhPub: bob.dh.publicKey,
   peerFingerprint: 'fp',
   verified: true,
+  regime: 'master',
   ratchet: null,
   pendingHeader: null,
 });
@@ -69,30 +71,24 @@ console.log('\n[conv-Injektion: fremde Device-Keys auf fremden Kontakt]');
   ok('peerDhPub NICHT auf Mallory umgebogen', hex(c.peerDhPub) === hex(bob.dh.publicKey));
 }
 
-// The legitimate case must still pass: same device keys, NEW master (rotation
-// or a device-linking swap both look like this).
-console.log('\n[legitimer Fall: gleiche Device-Keys, neuer Master]');
+// Under master-based binding a prekey claiming a DIFFERENT master — even with
+// the SAME device keys — is REJECTED, not turned into a pendingMaster. The old
+// "prekey opens the door" mechanism is gone: a legitimate master change is
+// handled deliberately via acceptRotation (proven chain) or the merge affordance
+// (unproven previousMaster hint), never off an unauthenticated prekey. This is
+// the injection defence: an attacker who knows bob's rostered dhPub still can't
+// forge a chain or a cert under bob's master.
+console.log('\n[Master-Wechsel per Prekey: abgelehnt, keine Tür]');
 {
   const c = await mkContact();
   const bobNewMaster = sodium.crypto_sign_keypair();
   const newCert = await S.signDeviceCert(bobNewMaster.privateKey, 1, bob.sign.publicKey, bob.dh.publicKey);
+  // conv = the pinned room; claimed master differs → rejected as not-this-conv.
   const e = await recv(c, envelope(c.roomId, bob, bobNewMaster.publicKey, newCert));
-  ok('meldet MasterChangedError', e?.name === 'MasterChangedError');
-  ok('pendingMaster wird angeboten', hex(c.pendingMaster?.masterPub) === hex(bobNewMaster.publicKey));
-  ok('erste Meldung ist firstOccurrence', e?.firstOccurrence === true);
-
-  // Fund 4: repeated identical claim must NOT re-alert.
-  const e2 = await recv(c, envelope(c.roomId, bob, bobNewMaster.publicKey, newCert));
-  ok('Wiederholung derselben Behauptung: kein neuer Alarm', e2?.firstOccurrence === false);
-  let alerts = 0;
-  for (let i = 0; i < 30; i++) { const r = await recv(c, envelope(c.roomId, bob, bobNewMaster.publicKey, newCert)); if (r?.firstOccurrence) alerts++; }
-  ok('30 Wiederholungen -> 0 zusätzliche Alarme', alerts === 0);
-
-  // A genuinely DIFFERENT claim deserves a fresh warning.
-  const thirdMaster = sodium.crypto_sign_keypair();
-  const cert3 = await S.signDeviceCert(thirdMaster.privateKey, 1, bob.sign.publicKey, bob.dh.publicKey);
-  const e3 = await recv(c, envelope(c.roomId, bob, thirdMaster.publicKey, cert3));
-  ok('andere Behauptung -> wieder Alarm', e3?.firstOccurrence === true);
+  ok('fremder Master (gleiche Device-Keys) -> abgelehnt', /gehört nicht zu dieser Unterhaltung/.test(e?.message ?? ''));
+  ok('KEIN pendingMaster von einem Prekey', c.pendingMaster === undefined);
+  ok('verified unberührt', c.verified === true);
+  ok('Pin unverändert', hex(c.peerMasterPub) === hex(bob.master.publicKey));
 }
 
 // ── Fund 4: verified-DoS ────────────────────────────────────────────────────
@@ -107,12 +103,14 @@ console.log('\n[verified-DoS: verified überlebt jede Behauptung]');
   const bobNew = sodium.crypto_sign_keypair();
   const cert = await S.signDeviceCert(bobNew.privateKey, 1, bob.sign.publicKey, bob.dh.publicKey);
   for (let i = 0; i < 20; i++) await recv(c, envelope(c.roomId, bob, bobNew.publicKey, cert));
-  ok('auch 20 konsistente Behauptungen lassen verified stehen', c.verified === true);
+  ok('auch 20 Prekeys mit fremdem Master lassen verified stehen', c.verified === true);
 
-  // verified must fall exactly when the user accepts — not before.
-  await S.acceptMasterChange(c);
+  // verified falls only when the user deliberately accepts a pending claim.
+  c.pendingMaster = { masterPub: bobNew.publicKey, epoch: 2, signPub: bob.sign.publicKey, dhPub: bob.dh.publicKey };
+  const r = await S.acceptMasterChange(c);
   ok('erst acceptMasterChange löscht verified', c.verified === false);
   ok('und pinnt den neuen Master', hex(c.peerMasterPub) === hex(bobNew.publicKey));
+  ok('acceptMasterChange gibt retiredMaster + neue roomId zurück', typeof r?.retiredMaster === 'string' && r?.newRoomId !== r?.oldRoomId);
 }
 
 console.log(`\n${pass} ok, ${fail} fail`);

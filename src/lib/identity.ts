@@ -71,6 +71,10 @@ export async function installLinkedIdentity(
     master: { publicKey: grant.masterPub, privateKey: new Uint8Array(0) },
     epoch: grant.epoch,
     deviceCert: grant.deviceCert,
+    // Remember the master we held until now, so outgoing prekeys can carry it as
+    // the unproven previousMaster hint — contacts still pinning it get a merge
+    // affordance instead of a silent stranger.
+    previousMasterPub: current.master.publicKey,
   };
   await saveIdentity(dek, linked); // write new identity first …
   await saveOwnDeviceList(dek, grant.deviceList); // … then its device list

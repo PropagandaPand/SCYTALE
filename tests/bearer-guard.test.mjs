@@ -1,7 +1,8 @@
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  ZIELVORGABE (xfail) — Ende des Bearer-Charakters von deviceCert          ║
-// ║  Dieser Test ist HEUTE ROT. Das ist beabsichtigt.                        ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
+// Der Device-Revocation-GUARD (Stufe 3c): gegeben eine peerDeviceList lehnt
+// receiveEnvelope ein Gerät ab, das nicht darin steht, und lässt ein gelistetes
+// durch. (War Teil der bearer-usage-Zielvorgabe; die "existiert ein Guard"-Hälfte
+// ist erfüllt. Die "die Liste stammt aus einer master-signierten devlist, nicht
+// implizit"-Hälfte lebt jetzt in bearer-list-source.xfail bis Schritt 8.)
 //
 // EIGENSCHAFT:
 //   Ein gültiger deviceCert allein genügt NICHT zum Session-Aufbau. Nötig ist
@@ -24,7 +25,7 @@
 import * as S from './.bundle/entry.js';
 
 let pass = 0, fail = 0;
-const ok = (n, c) => { if (c) { pass++; console.log('  ok  ', n); } else { fail++; console.log('  OFFEN', n); } };
+const ok = (n, c) => { if (c) { pass++; console.log('  ok  ', n); } else { fail++; console.log('  FAIL', n); } };
 const sodium = await S.getSodium();
 
 // Two distinct identities, each with its OWN master (master-based roomId needs both).

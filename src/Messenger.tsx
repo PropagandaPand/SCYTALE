@@ -19,6 +19,7 @@ import {
   masterSafetyNumber,
   identityFingerprint,
   isPrimaryDevice,
+  verifyDeviceCert,
   bytesEqual,
   asMasterPub,
   decodeLinkGrant,
@@ -47,12 +48,20 @@ import {
   sendGroupRemove,
   sendGroupLeave,
   receiveEnvelope,
+  resolveContactByConv,
   acceptMasterChange,
+  acceptRotation,
   reconnectContact,
+  migrateContactRoomId,
+  applyDeviceListUpdate,
+  masterKeyB64,
+  sendDeviceList,
   MasterChangedError,
   RetiredIdentityError,
+  RevokedDeviceError,
   inboxRoom,
   computeRoomId,
+  computeMasterRoomId,
   type Contact,
   type MessageContent,
   type GroupInvite,
@@ -69,6 +78,8 @@ import {
   type GroupMember,
 } from './lib/groups';
 import { saveContact, loadContacts, removeContact } from './lib/store';
+import { moveContactStorage } from './lib/rekey';
+import { loadRetiredMasters, addRetiredMaster } from './lib/denylist';
 import { loadProfile, saveProfile, type MyProfile } from './lib/profile';
 import {
   loadStickers,
@@ -189,6 +200,8 @@ export function Messenger({ dek, onLock }: Props) {
   const sendRoomRef = useRef<Map<string, string>>(new Map());
   const inboxClientRef = useRef<RelayClient | null>(null);
   const seenIdsRef = useRef<Set<number>>(new Set());
+  // Serializes ALL inbox processing through one promise chain (see enqueueInbox).
+  const inboxQueueRef = useRef<Promise<unknown>>(Promise.resolve());
   const fileInputRef = useRef<HTMLInputElement>(null);
   const stickerInputRef = useRef<HTMLInputElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -199,8 +212,11 @@ export function Messenger({ dek, onLock }: Props) {
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const myProfileRef = useRef<MyProfile>({});
   const profileSentRef = useRef<Set<string>>(new Set());
+  const retiredMastersRef = useRef<Set<string>>(new Set()); // global master denylist, loaded at boot
   const groupsRef = useRef<Group[]>([]);
-  const pendingGroupMsgsRef = useRef<Map<string, ChatMessage[]>>(new Map());
+  // Buffered group messages carry the AUTHENTICATED sender key so the membership
+  // check can run on flush (once we have the roster from the invite).
+  const pendingGroupMsgsRef = useRef<Map<string, { msg: ChatMessage; senderDhPub: Bytes }[]>>(new Map());
   const viewRef = useRef<View>('list');
   const activeRoomRef = useRef<string | null>(null);
   const activeGroupRef = useRef<string | null>(null);
@@ -280,13 +296,27 @@ export function Messenger({ dek, onLock }: Props) {
     await saveMessages(dek, roomId, messagesRef.current[roomId]);
   }
 
+  // Serialize every inbox task (each queued/live message, and the boot migration
+  // seeded as the chain's head) through ONE promise chain. Two decrypts on the
+  // same ratchet can therefore never interleave at an await: a relay that replays
+  // one ciphertext under two ack-ids no longer has both executions clone the same
+  // uncommitted ratchet state and decrypt it twice — the second runs on the
+  // committed state and is rejected as an ordinary replay. Also strictly orders
+  // every message after the boot migration, closing the onInbox-vs-migration race.
+  // A task's rejection is isolated so it can't break the chain for the next task.
+  function enqueueInbox<T>(task: () => Promise<T>): Promise<T> {
+    const run = inboxQueueRef.current.catch(() => undefined).then(task);
+    inboxQueueRef.current = run.catch(() => undefined);
+    return run;
+  }
+
   // Listen on our own inbox and authenticate as its owner (Ed25519 sig over the
   // DO's challenge) so the relay hands us our queued + live messages.
   function connectInbox(room: string) {
     const id = identityRef.current;
     if (!id || relaysRef.current.has(room)) return;
     const client = new RelayClient(room, {
-      onCipher: (bytes, ackId) => void onInbox(bytes, ackId),
+      onCipher: (bytes, ackId) => void enqueueInbox(() => onInbox(bytes, ackId)),
       auth: {
         signPub: id.sign.publicKey,
         sign: (nonce) => sign(nonce, id.sign.privateKey),
@@ -367,6 +397,119 @@ export function Messenger({ dek, onLock }: Props) {
         return;
       }
     }
+  }
+
+  // ── roomId migration (device-DH → master) ──────────────────────────
+  // Move one contact's storage AND its in-memory maps from oldRoomId to its
+  // already-set contact.roomId. The single crash-safe routine every mutation
+  // site funnels through (boot migration, acceptRotation, acceptMasterChange) —
+  // so no site can orphan history or leave a dead map key. The caller sets the
+  // new contact.roomId first (migrate for boot; the door functions themselves).
+  async function reKeyContactInMemory(oldRoomId: string, contact: Contact): Promise<void> {
+    const newRoomId = contact.roomId;
+    if (oldRoomId === newRoomId) return;
+    await moveContactStorage(dek, oldRoomId, contact); // re-seal storage old → new
+    if (messagesRef.current[oldRoomId] !== undefined) {
+      messagesRef.current[newRoomId] = messagesRef.current[oldRoomId];
+      delete messagesRef.current[oldRoomId];
+    }
+    if (unreadRef.current[oldRoomId] !== undefined) {
+      unreadRef.current[newRoomId] = unreadRef.current[oldRoomId];
+      delete unreadRef.current[oldRoomId];
+    }
+    const room = sendRoomRef.current.get(oldRoomId);
+    if (room !== undefined) {
+      sendRoomRef.current.set(newRoomId, room);
+      sendRoomRef.current.delete(oldRoomId);
+    }
+    if (profileSentRef.current.has(oldRoomId)) {
+      profileSentRef.current.delete(oldRoomId);
+      profileSentRef.current.add(newRoomId);
+    }
+    setStatuses((prev) => {
+      if (prev[oldRoomId] === undefined) return prev;
+      const n = { ...prev };
+      n[newRoomId] = n[oldRoomId];
+      delete n[oldRoomId];
+      return n;
+    });
+  }
+
+  // One-time boot migration of the whole vault to the master regime. Pulls each
+  // contact's per-contact retiredMasters into the GLOBAL denylist, sets
+  // ownMasterPub where missing, and re-keys every device-regime contact —
+  // collapsing crash-interrupted duplicates (two records for one peer) by
+  // keeping the one with a live ratchet / more messages, never blind-overwriting.
+  async function migrateContactsToMaster() {
+    const id = identityRef.current;
+    if (!id) return;
+    const myMaster = asMasterPub(id.master.publicKey);
+
+    // Move per-contact retiredMasters into the global denylist (one-time).
+    const retired = retiredMastersRef.current;
+    for (const c of contactsRef.current) {
+      if (c.retiredMasters?.length) {
+        for (const rm of c.retiredMasters) if (!retired.has(rm)) await addRetiredMaster(dek, rm);
+        c.retiredMasters = undefined;
+      }
+    }
+
+    // Give un-migrated contacts an ownMasterPub. A staleIdentity contact without
+    // one lost its pre-link master (pre-v0.18.7) → cannot derive the peer-
+    // symmetric room; leave it device-regime, the user must reconnect.
+    for (const c of contactsRef.current) {
+      if (c.regime === 'master') continue;
+      if (!c.ownMasterPub && !c.staleIdentity) c.ownMasterPub = myMaster;
+    }
+
+    // Group by the TARGET master-roomId to detect crash-interrupted duplicates.
+    const score = (c: Contact) => (c.ratchet ? 1_000_000 : 0) + (messagesRef.current[c.roomId]?.length ?? 0);
+    const byTarget = new Map<string, Contact[]>();
+    for (const c of contactsRef.current) {
+      if (c.regime !== 'master' && !c.ownMasterPub) continue; // hard case, skip
+      const target =
+        c.regime === 'master'
+          ? c.roomId
+          : await computeMasterRoomId(asMasterPub(c.ownMasterPub!), asMasterPub(c.peerMasterPub));
+      (byTarget.get(target) ?? byTarget.set(target, []).get(target)!).push(c);
+    }
+
+    const losers: Contact[] = [];
+    const survivorIds = new Set<string>(); // final roomIds a winner occupies — never delete
+    for (const group of byTarget.values()) {
+      // Winner: highest score. On a TIE prefer the record ALREADY in the master
+      // regime (already at the target roomId), so we never migrate a device copy
+      // ONTO a live master record's key and then delete that same key as a
+      // "loser" — the silent, permanent data loss a crash-interrupted duplicate
+      // produced (the winner's freshly re-sealed contact+history would be wiped).
+      let winner = group[0];
+      for (const c of group) {
+        const s = score(c);
+        const w = score(winner);
+        if (s > w || (s === w && winner.regime !== 'master' && c.regime === 'master')) winner = c;
+      }
+      for (const c of group) if (c !== winner) losers.push(c);
+      if (winner.regime !== 'master') {
+        try {
+          const oldRoomId = winner.roomId;
+          await migrateContactRoomId(winner); // sets winner.roomId + regime='master'
+          await reKeyContactInMemory(oldRoomId, winner); // moves storage + maps
+        } catch (e) {
+          console.error('[migrate] Kontakt nicht migrierbar (bleibt device):', (e as Error).message);
+        }
+      }
+      survivorIds.add(winner.roomId); // post-migration roomId
+    }
+    for (const l of losers) {
+      // Never delete a storage key a migrated winner now owns: if a device winner
+      // was re-keyed INTO a master loser's roomId, moveContactStorage already
+      // re-sealed contact+messages there and reKeyContactInMemory moved the live
+      // messages under that key — removeContact/delete would nuke the survivor.
+      if (survivorIds.has(l.roomId)) continue;
+      await removeContact(dek, l.roomId);
+      delete messagesRef.current[l.roomId];
+    }
+    if (losers.length) contactsRef.current = contactsRef.current.filter((c) => !losers.includes(c));
   }
 
   // ── Device linking ──────────────────────────────────────────────────
@@ -511,6 +654,22 @@ export function Messenger({ dek, onLock }: Props) {
   }
 
   // P confirmed the emoji → issue the grant, send it, then persist the list.
+  // Gossip our updated device list to every contact with an established session
+  // (revocation transport). Only sendable sessions: not stale, not hidden group
+  // members, and a ratchet must already exist. Best-effort per contact.
+  async function gossipDeviceList(list: Parameters<typeof sendDeviceList>[2]) {
+    const id = identityRef.current;
+    if (!id) return;
+    for (const c of contactsRef.current) {
+      if (c.hidden || c.staleIdentity || !c.ratchet) continue;
+      try {
+        await sendEnvelopeTo(c, await encryptAndPersist(c, () => sendDeviceList(id, c, list)));
+      } catch {
+        /* unreachable contact — best effort, they learn it next time */
+      }
+    }
+  }
+
   async function onPConfirmSas() {
     const id = identityRef.current;
     const session = linkSessionRef.current;
@@ -519,7 +678,11 @@ export function Messenger({ dek, onLock }: Props) {
     try {
       const currentList = await loadOrCreateOwnDeviceList(dek, id);
       if (!currentList) throw new Error('Geräteliste nicht verfügbar.');
-      await completeLinkOnP(dek, id, session, currentList, sendToInbox);
+      const newList = await completeLinkOnP(dek, id, session, currentList, sendToInbox);
+      // Gossip the updated list so contacts learn the new device (and, later,
+      // stop accepting a removed one). Best-effort: revocation takes effect for
+      // a contact once it has seen this newer, master-signed list.
+      await gossipDeviceList(newList);
       resetLink();
       setLinkView('done');
     } catch (e) {
@@ -563,11 +726,68 @@ export function Messenger({ dek, onLock }: Props) {
         return; // handled in finally (ack + drop)
       }
 
-      let contact = contactsRef.current.find((c) => c.roomId === env.conv);
+      // RESOLVE (regime-robust): may use the legacy device-derivation for a
+      // not-yet-migrated contact. Resolution only — authorisation happens in
+      // receiveEnvelope against the master.
+      const myMaster = asMasterPub(id.master.publicKey);
+      let contact = await resolveContactByConv(contactsRef.current, env.conv, id.dh.publicKey, myMaster);
       if (!contact) {
-        // First contact from someone who holds our code — auto-create it.
         if (env.type !== 'prekey') return;
-        contact = await makeContactFromHeader(id.dh.publicKey, env.x3dh);
+        // AUTO-CREATE only on a MASTER-based conv that matches the sender's own
+        // claimed master. A device-based unknown conv is not a valid reason to
+        // mint a contact post-flip (Stage 3c): resolution may use the legacy
+        // derivation, creation may not — else the weaker path becomes a trust
+        // decision (the openInbound-fallback shape).
+        const masterConv = await computeMasterRoomId(myMaster, asMasterPub(env.x3dh.masterPub));
+        if (env.conv !== masterConv) return;
+        // DENYLIST before creation: a prekey under an abandoned master must not
+        // mint a fresh contact (the retired-master replay the global denylist
+        // exists to stop — under master-roomId it lands as a NEW conversation,
+        // so the check must sit here, not only on the old contact).
+        if (retiredMastersRef.current.has(await masterKeyB64(env.x3dh.masterPub))) {
+          console.warn('[recv] Auto-Create unter verlassenem Master abgelehnt.');
+          return;
+        }
+        // MERGE AFFORDANCE (unproven): the prekey carries a previousMaster hint,
+        // and we still have a contact pinned to THAT master → the person may have
+        // changed identity. Offer a merge (record pendingMaster on the origin) —
+        // it PROVES nothing, so it only prompts; the user must compare the safety
+        // number, and acceptMasterChange (verified=false) is the confirm.
+        const prev = env.x3dh.previousMaster;
+        if (prev) {
+          // A retired master claimed as origin is an attack, not a merge.
+          if (retiredMastersRef.current.has(await masterKeyB64(prev))) {
+            console.warn('[recv] Herkunfts-Hinweis nennt verlassenen Master — abgelehnt.');
+            return;
+          }
+          const origin = contactsRef.current.find((c) => bytesEqual(c.peerMasterPub, prev));
+          if (origin && !bytesEqual(origin.peerMasterPub, env.x3dh.masterPub)) {
+            // Fire the merge affordance AT MOST ONCE per origin, until the user
+            // acts (accept via acceptMasterChange, or dismiss). previousMaster is
+            // unsigned and attacker-chosen; gating the dedup on the exact claimed
+            // master let a FRESH master per message defeat it and repeatedly
+            // overwrite the pending claim + re-raise the alert — an unauthenticated
+            // pendingMaster-overwrite + warning-fatigue lever (Review D). Once a
+            // claim is pending we surface the FIRST one and ignore later hints;
+            // the user must compare the safety number out-of-band regardless.
+            const consistent =
+              !origin.pendingMaster &&
+              (await verifyDeviceCert(
+                env.x3dh.masterPub, env.x3dh.epoch, env.x3dh.identitySignPub, env.x3dh.identityDhPub, env.x3dh.deviceCert,
+              ));
+            if (consistent) {
+              origin.pendingMaster = {
+                masterPub: env.x3dh.masterPub, epoch: env.x3dh.epoch,
+                signPub: env.x3dh.identitySignPub, dhPub: env.x3dh.identityDhPub,
+              };
+              await saveContact(dek, origin);
+              setError(`⚠ ${displayName(origin)} meldet sich mit einer neuen Identität (unbelegt). Prüfe sie in der Kontaktansicht und vergleiche die Sicherheitsnummer.`);
+              bump();
+            }
+            return; // the merge affordance is the path — do NOT auto-create a stranger
+          }
+        }
+        contact = await makeContactFromHeader(myMaster, env.x3dh);
         contactsRef.current = [...contactsRef.current, contact];
         messagesRef.current[contact.roomId] = [];
         await connectSend(contact);
@@ -600,6 +820,12 @@ export function Messenger({ dek, onLock }: Props) {
             setError(`⚠ Sicherheit: Jemand hat sich als ${displayName(contact)} mit einer bereits ersetzten Identität gemeldet — abgelehnt.`);
           }
           bump();
+        } else if (e instanceof RevokedDeviceError) {
+          // Dropped silently (no toast): a revoked device can replay forever, so
+          // per-message alerts would be the same fatigue lever as the retired
+          // case. Logged for diagnosis. Full "delivered to a no-longer-valid
+          // device" surfacing is the send-side status work (3d).
+          console.warn(`[recv] Prekey von widerrufenem Gerät von ${displayName(contact)} verworfen.`);
         }
         throw e; // drop the message (don't process the unpinned master)
       }
@@ -624,6 +850,27 @@ export function Messenger({ dek, onLock }: Props) {
         await deleteGroupAction(content.groupId);
       } else if (content.kind === 'gleave') {
         await applyGroupLeave(content.groupId, contact);
+      } else if (content.kind === 'devlist') {
+        // Learn the peer's newer device list (revocation gossip). Verified +
+        // rollback-checked + denylist-guarded inside applyDeviceListUpdate; on
+        // success persist immediately (the list authorises future sends, so it
+        // must not live only in RAM — the v0.17.1 lesson).
+        if (await applyDeviceListUpdate(contact, content.list, retiredMastersRef.current)) {
+          await saveContact(dek, contact);
+        }
+      } else if (content.kind === 'rotation') {
+        // A dual-signed rotation PROVES the peer's master continuity → acceptRotation
+        // re-pins to the new master and re-keys, KEEPING `verified` (unlike the
+        // unproven previousMaster path, which clears it). Denylist-first and
+        // reject-before-any-state-touch live inside acceptRotation; a forged or
+        // rolled-back chain throws and changes nothing.
+        try {
+          const r = await acceptRotation(contact, content.statement, retiredMastersRef.current);
+          await reKeyContactInMemory(r.oldRoomId, contact); // move storage + maps to the new room
+          if (activeRoomRef.current === r.oldRoomId) setActiveRoom(r.newRoomId);
+        } catch (e) {
+          console.warn('[recv] Rotation abgelehnt:', (e as Error).message);
+        }
       } else {
         await appendMessage(contact.roomId, incomingMessage(content));
         if (!(viewRef.current === 'chat' && activeRoomRef.current === contact.roomId)) {
@@ -649,15 +896,15 @@ export function Messenger({ dek, onLock }: Props) {
     if (!id || !token) return;
     try {
       const bundle = await decodeBundle(token);
-      // Adding your OWN code would pass every check — your own cert verifies and
-      // computeRoomId(myDh, myDh) is valid — and silently create a "chat with
-      // yourself". With the copy and paste buttons now in one view, that is an
-      // easy two-tap misfire, so reject it explicitly.
-      if (bytesEqual(bundle.identityDhPub, id.dh.publicKey)) {
+      // Adding your OWN code would pass every check and silently create a "chat
+      // with yourself". Compare MASTERS, not device keys: under master-based
+      // rooms an own SECOND device (same master, different dh) must also be
+      // caught, and it would slip a dhPub-only guard.
+      if (bytesEqual(bundle.masterPub, id.master.publicKey)) {
         setError('Das ist dein eigener Verbindungscode.');
         return;
       }
-      const contact = await makeContact(id.dh.publicKey, bundle);
+      const contact = await makeContact(asMasterPub(id.master.publicKey), bundle);
       if (contactsRef.current.some((c) => c.roomId === contact.roomId)) {
         openChat(contact.roomId);
         return;
@@ -700,6 +947,24 @@ export function Messenger({ dek, onLock }: Props) {
       setShareLink(link);
       makeQr(link).then(setQrDataUrl).catch(() => undefined);
 
+      retiredMastersRef.current = await loadRetiredMasters(dek);
+      contactsRef.current = await loadContacts(dek);
+      // Seed the inbox queue with the whole vault load + one-time master migration,
+      // so every queued/live message the relay delivers on connect is processed
+      // strictly AFTER it (no onInbox-vs-migration race). Messages load FIRST, keyed
+      // by the current roomIds, so the duplicate-collapse tiebreak compares real
+      // history counts (not an empty map); reKeyContactInMemory relocates them.
+      const bootLoad = enqueueInbox(async () => {
+        for (const c of contactsRef.current) messagesRef.current[c.roomId] = await loadMessages(dek, c.roomId);
+        await migrateContactsToMaster();
+        for (const c of contactsRef.current) await connectSend(c);
+        const gs = await loadGroups(dek);
+        groupsRef.current = gs;
+        for (const g of gs) messagesRef.current[g.id] = await loadMessages(dek, g.id);
+        commitMessages();
+        bump();
+      });
+
       connectInbox(await inboxRoom(id.sign.publicKey));
       // Restore an existing push subscription so the DO keeps waking this device.
       if (pushSupported()) {
@@ -713,17 +978,7 @@ export function Messenger({ dek, onLock }: Props) {
           .catch(() => undefined);
       }
 
-      const cs = await loadContacts(dek);
-      contactsRef.current = cs;
-      for (const c of cs) {
-        messagesRef.current[c.roomId] = await loadMessages(dek, c.roomId);
-        await connectSend(c);
-      }
-      const gs = await loadGroups(dek);
-      groupsRef.current = gs;
-      for (const g of gs) messagesRef.current[g.id] = await loadMessages(dek, g.id);
-      commitMessages();
-      bump();
+      await bootLoad; // contacts are on their final master roomIds; messages loaded
 
       const hashMatch = location.hash.match(/[#&]add=([^&]+)/);
       if (hashMatch) {
@@ -838,24 +1093,70 @@ export function Messenger({ dek, onLock }: Props) {
   async function ensureMemberContact(m: GroupMember): Promise<Contact | null> {
     const id = identityRef.current;
     if (!id) return null;
-    const roomId = await computeRoomId(id.dh.publicKey, m.dhPub);
-    const existing = contactsRef.current.find((c) => c.roomId === roomId);
-    if (existing) return existing;
-    const contact: Contact = {
-      roomId,
-      // Group rosters carry v2 bundles (with the master); fall back to the device
-      // sign key if a legacy member has none (bundle-less members can't be messaged).
-      peerMasterPub: m.bundle?.masterPub ?? m.signPub,
-      peerEpoch: m.bundle?.epoch ?? 1,
-      peerSignPub: m.signPub,
-      peerDhPub: m.dhPub,
-      peerFingerprint: await identityFingerprint(m.signPub, m.dhPub),
-      peerName: m.name,
-      bundle: m.bundle,
-      hidden: true,
-      ratchet: null,
-      pendingHeader: null,
-    };
+    const myMaster = asMasterPub(id.master.publicKey);
+    const memberMaster = m.bundle?.masterPub;
+    // Master-based room when the roster entry carries a master (v2 bundles do);
+    // a legacy member without one stays on the device-DH room — frozen, since
+    // group device-revocation is v3 (it can't get a master room until re-invited
+    // with a v2 bundle). Resolve regime-robustly so a pre-flip member contact is
+    // found rather than duplicated.
+    let contact: Contact;
+    if (memberMaster) {
+      const roomId = await computeMasterRoomId(myMaster, asMasterPub(memberMaster));
+      const existing = await resolveContactByConv(contactsRef.current, roomId, id.dh.publicKey, myMaster);
+      if (existing) return existing;
+      // CREATION guards (Devil's-Advocate G2): a group roster is an unproven,
+      // attacker-relayable list, and receiveEnvelope never consults the denylist —
+      // so this is the choke point. Never mint a member contact for a RETIRED
+      // master (the abandoned-key downgrade the denylist exists to stop, reached
+      // here via the roster instead of 1:1 auto-create), and require the master to
+      // actually vouch (device cert) for the exact keys we are about to pin — else
+      // a stale/forged roster entry binds arbitrary device keys under a master.
+      if (retiredMastersRef.current.has(await masterKeyB64(memberMaster))) {
+        console.warn('[group] Mitglied unter verlassenem (widerrufenem) Master abgelehnt.');
+        return null;
+      }
+      const bundle = m.bundle;
+      const certOk =
+        !!bundle && (await verifyDeviceCert(memberMaster, bundle.epoch, m.signPub, m.dhPub, bundle.deviceCert));
+      if (!certOk) {
+        console.warn('[group] Mitglied mit ungültigem Device-Zertifikat abgelehnt.');
+        return null;
+      }
+      contact = {
+        roomId,
+        peerMasterPub: memberMaster,
+        peerEpoch: m.bundle?.epoch ?? 1,
+        peerSignPub: m.signPub,
+        peerDhPub: m.dhPub,
+        peerFingerprint: await identityFingerprint(memberMaster, memberMaster),
+        peerName: m.name,
+        ownMasterPub: myMaster,
+        regime: 'master',
+        bundle: m.bundle,
+        hidden: true,
+        ratchet: null,
+        pendingHeader: null,
+      };
+    } else {
+      const roomId = await computeRoomId(id.dh.publicKey, m.dhPub);
+      const existing = contactsRef.current.find((c) => c.roomId === roomId);
+      if (existing) return existing;
+      contact = {
+        roomId,
+        peerMasterPub: m.signPub, // legacy fallback (no master in the roster)
+        peerEpoch: 1,
+        peerSignPub: m.signPub,
+        peerDhPub: m.dhPub,
+        peerFingerprint: await identityFingerprint(m.signPub, m.dhPub),
+        peerName: m.name,
+        regime: 'device',
+        bundle: m.bundle,
+        hidden: true,
+        ratchet: null,
+        pendingHeader: null,
+      };
+    }
     contactsRef.current = [...contactsRef.current, contact];
     await connectSend(contact);
     await saveContact(dek, contact);
@@ -960,26 +1261,40 @@ export function Messenger({ dek, onLock }: Props) {
     bump();
   }
 
+  // AUTHENTICITY: a group has no group-level signature — it is pairwise fan-out,
+  // so each message is authenticated only as coming from the pairwise `contact`.
+  // The wire `senderName` is attacker-chosen and is therefore DISCARDED for
+  // attribution; the displayed sender is derived from the authenticated sending
+  // key, and a message whose sender is not a CURRENT member is dropped. Otherwise
+  // any co-member (or a removed member still holding a pairwise session) could
+  // post AS another member — a forgeable sender badge (Devil's-Advocate DA-2).
   async function applyGroupMessage(
     groupId: string,
-    senderName: string | undefined,
+    _senderName: string | undefined, // intentionally unused — never trust it
     inner: MessageContent,
     contact: Contact,
   ) {
-    const sender = senderName || contact.peerName || shortFp(contact.peerFingerprint);
-    const msg: ChatMessage =
+    const buildMsg = (sender: string): ChatMessage =>
       inner.kind === 'file'
         ? { mine: false, ts: Date.now(), sender, file: { name: inner.name, mime: inner.mime, dataB64: bytesToB64(inner.data) } }
         : { mine: false, ts: Date.now(), sender, text: inner.kind === 'text' ? inner.text : '' };
     const g = groupsRef.current.find((x) => x.id === groupId);
     if (!g) {
-      // Message arrived before the group invite — hold it until we join.
+      // Message arrived before the group invite — hold it, attributed to the
+      // authenticated contact; membership is re-checked against the roster on
+      // flush (applyGroupInvite), since we have no roster yet.
+      const msg = buildMsg(contact.peerName || shortFp(contact.peerFingerprint));
       const buf = pendingGroupMsgsRef.current.get(groupId) ?? [];
-      buf.push(msg);
+      buf.push({ msg, senderDhPub: contact.peerDhPub });
       pendingGroupMsgsRef.current.set(groupId, buf);
       return;
     }
-    await appendMessage(g.id, msg);
+    const member = g.members.find((m) => eqBytes(m.dhPub, contact.peerDhPub));
+    if (!member) {
+      console.warn('[group] Nachricht von Nicht-/entferntem Mitglied verworfen.');
+      return;
+    }
+    await appendMessage(g.id, buildMsg(member.name || contact.peerName || shortFp(contact.peerFingerprint)));
     if (!(viewRef.current === 'chat' && activeGroupRef.current === g.id)) {
       unreadRef.current[g.id] = (unreadRef.current[g.id] ?? 0) + 1;
     }
@@ -993,13 +1308,20 @@ export function Messenger({ dek, onLock }: Props) {
     await saveGroup(dek, g);
     for (const m of g.members) await ensureMemberContact(m);
 
-    // Flush any messages that arrived before this invite.
+    // Flush any messages that arrived before this invite — but only from senders
+    // the resolved roster actually lists (a non-member's buffered message is
+    // dropped here, the membership check applyGroupMessage could not run yet).
     const pending = pendingGroupMsgsRef.current.get(g.id);
     if (pending?.length) {
       pendingGroupMsgsRef.current.delete(g.id);
-      for (const msg of pending) await appendMessage(g.id, msg);
-      if (!(viewRef.current === 'chat' && activeGroupRef.current === g.id)) {
-        unreadRef.current[g.id] = (unreadRef.current[g.id] ?? 0) + pending.length;
+      let added = 0;
+      for (const { msg, senderDhPub } of pending) {
+        if (!g.members.some((m) => eqBytes(m.dhPub, senderDhPub))) continue;
+        await appendMessage(g.id, msg);
+        added++;
+      }
+      if (added && !(viewRef.current === 'chat' && activeGroupRef.current === g.id)) {
+        unreadRef.current[g.id] = (unreadRef.current[g.id] ?? 0) + added;
       }
     }
     bump();
@@ -1554,8 +1876,17 @@ export function Messenger({ dek, onLock }: Props) {
     if (!c || !c.pendingMaster) return;
     if (!confirm('Neue Identität dieses Kontakts übernehmen? Danach musst du die Sicherheitsnummer erneut vergleichen.'))
       return;
-    await acceptMasterChange(c);
-    await saveContact(dek, c);
+    const r = await acceptMasterChange(c); // sets new roomId + verified=false
+    if (!r) return;
+    // Commit the contact re-key BEFORE persisting the denylist entry (Review E): a
+    // crash between the two must leave the milder, self-correcting state — the
+    // contact already moved to the NEW master (off the denylist), only the
+    // retirement not yet recorded — never the contact stranded on a master that is
+    // already denylisted, which would silently reject all its future device-list
+    // and rotation updates.
+    await reKeyContactInMemory(r.oldRoomId, c); // move storage + maps to the new room
+    retiredMastersRef.current = await addRetiredMaster(dek, r.retiredMaster); // global denylist
+    if (activeRoom === r.oldRoomId) setActiveRoom(r.newRoomId);
     setError('');
     bump();
   }
@@ -1566,9 +1897,11 @@ export function Messenger({ dek, onLock }: Props) {
   // X3DH under our current identity, which the peer then has to accept.
   async function reconnectStaleContact() {
     const c = contactsRef.current.find((x) => x.roomId === activeRoom);
-    if (!c) return;
-    reconnectContact(c);
-    await saveContact(dek, c);
+    const id = identityRef.current;
+    if (!c || !id) return;
+    const r = await reconnectContact(c, asMasterPub(id.master.publicKey)); // sets new roomId
+    await reKeyContactInMemory(r.oldRoomId, c); // move storage + maps
+    if (activeRoom === r.oldRoomId) setActiveRoom(r.newRoomId);
     setError('');
     bump();
   }

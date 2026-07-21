@@ -33,6 +33,7 @@ import {
   type InitialMessageHeader,
   type Envelope,
   type Bytes,
+  type MasterPub,
 } from '../crypto';
 import { bytesToB64, b64ToBytes } from './bytes';
 
@@ -158,11 +159,36 @@ function cmp(a: Uint8Array, b: Uint8Array): number {
   return a.length - b.length;
 }
 
-/** Deterministic per-pair relay room: both sides derive the same id. */
+/** Deterministic per-pair relay room: both sides derive the same id.
+ *  DEVICE-DH based (the pre-3c regime). Kept because migration must recompute the
+ *  old id from device keys, and group/member rooms still use it until 3d. */
 export async function computeRoomId(a: Bytes, b: Bytes): Promise<string> {
   const s = await getSodium();
   const [x, y] = cmp(a, b) <= 0 ? [a, b] : [b, a];
   return s.to_hex(s.crypto_generichash(16, concatBytes(x, y), null));
+}
+
+/**
+ * Master-based conversation id (Stage 3c). A conversation is a property of the
+ * two PERSONS, so it is derived from both Ed25519 MASTER keys, sorted so both
+ * sides land on the same value — never from the device pair (which would
+ * fragment n×m across devices).
+ *
+ * `MasterPub` (not `Bytes`) on purpose: passing a device key here would compile
+ * cleanly and silently key the conversation off the wrong material. The brand
+ * turns that into a compile error — same guard as linkingSas.
+ *
+ * DOMAIN SEPARATION is not cosmetic: the old device-DH id and the new master id
+ * share one IndexedDB keyspace during migration. Without the context prefix a
+ * master id could (however improbably) collide with a not-yet-migrated device id
+ * and cross-link two conversations' history and ratchet state. The prefix makes
+ * the two derivations disjoint by construction.
+ */
+const MASTER_ROOM_CTX = utf8.encode('SCYTALE-master-room-v1');
+export async function computeMasterRoomId(a: MasterPub, b: MasterPub): Promise<string> {
+  const s = await getSodium();
+  const [x, y] = cmp(a, b) <= 0 ? [a, b] : [b, a];
+  return s.to_hex(s.crypto_generichash(16, concatBytes(MASTER_ROOM_CTX, x, y), null));
 }
 
 /** Our inbox room: SHA-256 of our Ed25519 identity pub. Derived from our OWN

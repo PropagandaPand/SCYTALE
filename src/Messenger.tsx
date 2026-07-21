@@ -20,6 +20,7 @@ import {
   identityFingerprint,
   isPrimaryDevice,
   bytesEqual,
+  asMasterPub,
   decodeLinkGrant,
   sign,
   type Bytes,
@@ -450,6 +451,15 @@ export function Messenger({ dek, onLock }: Props) {
           }
         }
       };
+      // ⚠️ ORDERING (Design-Fund #1): snapshot the PRE-SWAP master onto every
+      // contact BEFORE the identity changes. After linking, id.master becomes the
+      // primary's master and our old one is gone — but every existing contact
+      // still pins the OLD master, so once roomId is master-based their room
+      // derives from it. Losing it makes each stale conversation permanently
+      // un-addressable. `if (!ownMasterPub)` keeps the EARLIEST master a contact
+      // knows us under (a second link must not overwrite it with a master we
+      // never actually spoke to them under). Same discipline as the farewell.
+      const preSwapMaster = asMasterPub(id.master.publicKey);
       const linked = await completeLinkOnN(dek, id, session, grant, farewell);
       identityRef.current = linked;
       setFingerprint(await fingerprintOf(linked));
@@ -467,6 +477,7 @@ export function Messenger({ dek, onLock }: Props) {
       // reconnects each, which runs a fresh X3DH the peer then accepts.
       for (const c of contactsRef.current) {
         c.staleIdentity = true;
+        if (!c.ownMasterPub) c.ownMasterPub = preSwapMaster; // the master the peer still pins us under
         await saveContact(dek, c);
       }
       resetLink();

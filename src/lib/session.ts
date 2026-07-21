@@ -374,15 +374,24 @@ export async function makeContactFromHeader(
  * a fresh X3DH runs under the new identity, and clears `verified` — the safety
  * number MUST be compared again. Returns false if nothing was pending.
  */
-export async function acceptMasterChange(contact: Contact): Promise<boolean> {
+/**
+ * The "hint BEHAVES as claimed" half of the door: the user deliberately accepts
+ * a claimed new identity (from an unproven previousMaster merge affordance).
+ * Unlike acceptRotation (chain-proven, keeps verified), this is a TOFU break —
+ * `verified` is cleared, a fresh safety-number compare is mandatory.
+ *
+ * Returns {oldRoomId, newRoomId, retiredMaster} so the caller can move storage
+ * + maps AND add the abandoned master to the GLOBAL denylist (no longer a
+ * per-contact field). Null if nothing was pending.
+ */
+export async function acceptMasterChange(
+  contact: Contact,
+): Promise<{ oldRoomId: string; newRoomId: string; retiredMaster: string } | null> {
   const p = contact.pendingMaster;
-  if (!p) return false;
-  // The master we are replacing is now abandoned — remember it so it can never
-  // be offered again (see Contact.retiredMasters).
-  const retired = await b64(contact.peerMasterPub);
-  contact.retiredMasters = [...(contact.retiredMasters ?? []), retired].filter(
-    (v, i, arr) => arr.indexOf(v) === i,
-  );
+  if (!p) return null;
+  if (!contact.ownMasterPub) throw new Error('Identitätswechsel ohne ownMasterPub — roomId nicht ableitbar.');
+  const retiredMaster = await b64(contact.peerMasterPub); // now abandoned → global denylist
+  const oldRoomId = contact.roomId;
   contact.peerMasterPub = p.masterPub;
   contact.peerEpoch = p.epoch;
   contact.peerSignPub = p.signPub;
@@ -391,9 +400,11 @@ export async function acceptMasterChange(contact: Contact): Promise<boolean> {
   contact.bundle = undefined; // the stored bundle belonged to the old identity
   contact.ratchet = null; // force a fresh handshake
   contact.pendingHeader = null;
-  contact.verified = false; // re-verification is mandatory
+  contact.verified = false; // TOFU break — re-verification is mandatory
   contact.pendingMaster = undefined;
-  return true;
+  contact.roomId = await computeMasterRoomId(contact.ownMasterPub, asMasterPub(p.masterPub));
+  contact.regime = 'master';
+  return { oldRoomId, newRoomId: contact.roomId, retiredMaster };
 }
 
 /**
@@ -402,7 +413,10 @@ export async function acceptMasterChange(contact: Contact): Promise<boolean> {
  * CURRENT (linked) master and lifts the send block. The peer will see an
  * identity warning and must accept us — that is the pinning working, not a bug.
  */
-export function reconnectContact(contact: Contact): void {
+export async function reconnectContact(
+  contact: Contact,
+  myMasterPub: MasterPub,
+): Promise<{ oldRoomId: string; newRoomId: string }> {
   contact.staleIdentity = undefined;
   contact.ratchet = null;
   contact.pendingHeader = null;
@@ -414,6 +428,13 @@ export function reconnectContact(contact: Contact): void {
   if (contact.bundle?.oneTimePreKey) {
     contact.bundle = { ...contact.bundle, oneTimePreKey: undefined };
   }
+  // We changed identity (device linking), so this contact now knows us under
+  // our CURRENT master — update the local half of the room key and re-derive it.
+  const oldRoomId = contact.roomId;
+  contact.ownMasterPub = myMasterPub;
+  contact.roomId = await computeMasterRoomId(myMasterPub, asMasterPub(contact.peerMasterPub));
+  contact.regime = 'master';
+  return { oldRoomId, newRoomId: contact.roomId };
 }
 
 /**
@@ -826,6 +847,13 @@ interface ContactWire {
 async function b64(b: Bytes): Promise<string> {
   const s = await getSodium();
   return s.to_base64(b, s.base64_variants.ORIGINAL);
+}
+
+/** Canonical base64 of a master pub — THE key format of the global denylist.
+ *  Exported so every denylist check uses the same encoding as what acceptMaster-
+ *  Change/acceptRotation store; a mismatched encoding would silently miss. */
+export async function masterKeyB64(masterPub: Bytes): Promise<string> {
+  return b64(masterPub);
 }
 async function unb64(str: string): Promise<Bytes> {
   const s = await getSodium();

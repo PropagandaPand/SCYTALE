@@ -50,6 +50,8 @@ import {
   resolveContactByConv,
   acceptMasterChange,
   reconnectContact,
+  migrateContactRoomId,
+  masterKeyB64,
   MasterChangedError,
   RetiredIdentityError,
   RevokedDeviceError,
@@ -72,6 +74,8 @@ import {
   type GroupMember,
 } from './lib/groups';
 import { saveContact, loadContacts, removeContact } from './lib/store';
+import { moveContactStorage } from './lib/rekey';
+import { loadRetiredMasters, addRetiredMaster } from './lib/denylist';
 import { loadProfile, saveProfile, type MyProfile } from './lib/profile';
 import {
   loadStickers,
@@ -202,6 +206,7 @@ export function Messenger({ dek, onLock }: Props) {
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const myProfileRef = useRef<MyProfile>({});
   const profileSentRef = useRef<Set<string>>(new Set());
+  const retiredMastersRef = useRef<Set<string>>(new Set()); // global master denylist, loaded at boot
   const groupsRef = useRef<Group[]>([]);
   const pendingGroupMsgsRef = useRef<Map<string, ChatMessage[]>>(new Map());
   const viewRef = useRef<View>('list');
@@ -370,6 +375,103 @@ export function Messenger({ dek, onLock }: Props) {
         return;
       }
     }
+  }
+
+  // ── roomId migration (device-DH → master) ──────────────────────────
+  // Move one contact's storage AND its in-memory maps from oldRoomId to its
+  // already-set contact.roomId. The single crash-safe routine every mutation
+  // site funnels through (boot migration, acceptRotation, acceptMasterChange) —
+  // so no site can orphan history or leave a dead map key. The caller sets the
+  // new contact.roomId first (migrate for boot; the door functions themselves).
+  async function reKeyContactInMemory(oldRoomId: string, contact: Contact): Promise<void> {
+    const newRoomId = contact.roomId;
+    if (oldRoomId === newRoomId) return;
+    await moveContactStorage(dek, oldRoomId, contact); // re-seal storage old → new
+    if (messagesRef.current[oldRoomId] !== undefined) {
+      messagesRef.current[newRoomId] = messagesRef.current[oldRoomId];
+      delete messagesRef.current[oldRoomId];
+    }
+    if (unreadRef.current[oldRoomId] !== undefined) {
+      unreadRef.current[newRoomId] = unreadRef.current[oldRoomId];
+      delete unreadRef.current[oldRoomId];
+    }
+    const room = sendRoomRef.current.get(oldRoomId);
+    if (room !== undefined) {
+      sendRoomRef.current.set(newRoomId, room);
+      sendRoomRef.current.delete(oldRoomId);
+    }
+    if (profileSentRef.current.has(oldRoomId)) {
+      profileSentRef.current.delete(oldRoomId);
+      profileSentRef.current.add(newRoomId);
+    }
+    setStatuses((prev) => {
+      if (prev[oldRoomId] === undefined) return prev;
+      const n = { ...prev };
+      n[newRoomId] = n[oldRoomId];
+      delete n[oldRoomId];
+      return n;
+    });
+  }
+
+  // One-time boot migration of the whole vault to the master regime. Pulls each
+  // contact's per-contact retiredMasters into the GLOBAL denylist, sets
+  // ownMasterPub where missing, and re-keys every device-regime contact —
+  // collapsing crash-interrupted duplicates (two records for one peer) by
+  // keeping the one with a live ratchet / more messages, never blind-overwriting.
+  async function migrateContactsToMaster() {
+    const id = identityRef.current;
+    if (!id) return;
+    const myMaster = asMasterPub(id.master.publicKey);
+
+    // Move per-contact retiredMasters into the global denylist (one-time).
+    const retired = retiredMastersRef.current;
+    for (const c of contactsRef.current) {
+      if (c.retiredMasters?.length) {
+        for (const rm of c.retiredMasters) if (!retired.has(rm)) await addRetiredMaster(dek, rm);
+        c.retiredMasters = undefined;
+      }
+    }
+
+    // Give un-migrated contacts an ownMasterPub. A staleIdentity contact without
+    // one lost its pre-link master (pre-v0.18.7) → cannot derive the peer-
+    // symmetric room; leave it device-regime, the user must reconnect.
+    for (const c of contactsRef.current) {
+      if (c.regime === 'master') continue;
+      if (!c.ownMasterPub && !c.staleIdentity) c.ownMasterPub = myMaster;
+    }
+
+    // Group by the TARGET master-roomId to detect crash-interrupted duplicates.
+    const score = (c: Contact) => (c.ratchet ? 1_000_000 : 0) + (messagesRef.current[c.roomId]?.length ?? 0);
+    const byTarget = new Map<string, Contact[]>();
+    for (const c of contactsRef.current) {
+      if (c.regime !== 'master' && !c.ownMasterPub) continue; // hard case, skip
+      const target =
+        c.regime === 'master'
+          ? c.roomId
+          : await computeMasterRoomId(asMasterPub(c.ownMasterPub!), asMasterPub(c.peerMasterPub));
+      (byTarget.get(target) ?? byTarget.set(target, []).get(target)!).push(c);
+    }
+
+    const losers: Contact[] = [];
+    for (const group of byTarget.values()) {
+      let winner = group[0];
+      for (const c of group) if (score(c) > score(winner)) winner = c;
+      for (const c of group) if (c !== winner) losers.push(c);
+      if (winner.regime !== 'master') {
+        try {
+          const oldRoomId = winner.roomId;
+          await migrateContactRoomId(winner); // sets winner.roomId + regime='master'
+          await reKeyContactInMemory(oldRoomId, winner); // moves storage + maps
+        } catch (e) {
+          console.error('[migrate] Kontakt nicht migrierbar (bleibt device):', (e as Error).message);
+        }
+      }
+    }
+    for (const l of losers) {
+      await removeContact(dek, l.roomId);
+      delete messagesRef.current[l.roomId];
+    }
+    if (losers.length) contactsRef.current = contactsRef.current.filter((c) => !losers.includes(c));
   }
 
   // ── Device linking ──────────────────────────────────────────────────
@@ -580,6 +682,14 @@ export function Messenger({ dek, onLock }: Props) {
         // decision (the openInbound-fallback shape).
         const masterConv = await computeMasterRoomId(myMaster, asMasterPub(env.x3dh.masterPub));
         if (env.conv !== masterConv) return;
+        // DENYLIST before creation: a prekey under an abandoned master must not
+        // mint a fresh contact (the retired-master replay the global denylist
+        // exists to stop — under master-roomId it lands as a NEW conversation,
+        // so the check must sit here, not only on the old contact).
+        if (retiredMastersRef.current.has(await masterKeyB64(env.x3dh.masterPub))) {
+          console.warn('[recv] Auto-Create unter verlassenem Master abgelehnt.');
+          return;
+        }
         contact = await makeContactFromHeader(myMaster, env.x3dh);
         contactsRef.current = [...contactsRef.current, contact];
         messagesRef.current[contact.roomId] = [];
@@ -732,9 +842,14 @@ export function Messenger({ dek, onLock }: Props) {
           .catch(() => undefined);
       }
 
+      retiredMastersRef.current = await loadRetiredMasters(dek);
       const cs = await loadContacts(dek);
       contactsRef.current = cs;
-      for (const c of cs) {
+      // Migrate to the master regime BEFORE loading messages/connecting, so those
+      // key off the final roomIds. Re-key re-seals message storage; we load the
+      // in-memory copies afterwards under the migrated ids.
+      await migrateContactsToMaster();
+      for (const c of contactsRef.current) {
         messagesRef.current[c.roomId] = await loadMessages(dek, c.roomId);
         await connectSend(c);
       }
@@ -1601,8 +1716,11 @@ export function Messenger({ dek, onLock }: Props) {
     if (!c || !c.pendingMaster) return;
     if (!confirm('Neue Identität dieses Kontakts übernehmen? Danach musst du die Sicherheitsnummer erneut vergleichen.'))
       return;
-    await acceptMasterChange(c);
-    await saveContact(dek, c);
+    const r = await acceptMasterChange(c); // sets new roomId + verified=false
+    if (!r) return;
+    retiredMastersRef.current = await addRetiredMaster(dek, r.retiredMaster); // global denylist
+    await reKeyContactInMemory(r.oldRoomId, c); // move storage + maps to the new room
+    if (activeRoom === r.oldRoomId) setActiveRoom(r.newRoomId);
     setError('');
     bump();
   }
@@ -1613,9 +1731,11 @@ export function Messenger({ dek, onLock }: Props) {
   // X3DH under our current identity, which the peer then has to accept.
   async function reconnectStaleContact() {
     const c = contactsRef.current.find((x) => x.roomId === activeRoom);
-    if (!c) return;
-    reconnectContact(c);
-    await saveContact(dek, c);
+    const id = identityRef.current;
+    if (!c || !id) return;
+    const r = await reconnectContact(c, asMasterPub(id.master.publicKey)); // sets new roomId
+    await reKeyContactInMemory(r.oldRoomId, c); // move storage + maps
+    if (activeRoom === r.oldRoomId) setActiveRoom(r.newRoomId);
     setError('');
     bump();
   }

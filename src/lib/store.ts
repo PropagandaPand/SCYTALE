@@ -44,8 +44,14 @@ export async function loadContacts(dek: CryptoKey): Promise<Contact[]> {
     if (!rec) continue;
     try {
       out.push(await deserializeContact(await open(dek, rec, contactAad(id))));
-    } catch {
-      /* pre-master-format contact from before the multi-device break → skip */
+    } catch (e) {
+      // Do NOT swallow silently. An open() failure here means a contact record
+      // whose storage key and sealed AAD have diverged — e.g. a re-key that
+      // renamed the key instead of re-encrypting under the new roomId's AAD. In
+      // the dual-regime migration window (Stage 3c) that is a LIKELY, not
+      // theoretical, failure, and a contact that vanishes with no trace is
+      // exactly the diagnosability gap HandshakeMismatchError was named to close.
+      console.error(`[store] Kontakt ${id.slice(0, 12)}… nicht ladbar (AAD/Format):`, (e as Error).message);
     }
   }
   return out;

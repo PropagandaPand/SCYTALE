@@ -2,7 +2,8 @@
 
 SCYTALE ist gegen **anlasslose Massenüberwachung** gebaut (Chatkontrolle /
 CSAR). Dieses Dokument ist die genaue Aufschlüsselung aller Mechanismen und
-sagt ehrlich, was geschützt ist — und was nicht. Stand: v0.19.0 (Stufe 3c).
+sagt ehrlich, was geschützt ist — und was nicht. Stand: v0.19.1 (Stufe 3c,
+gehärtet nach adversarialer Gegenprüfung).
 
 **Leitprinzipien:** niemals eigene Krypto erfinden (vetted Primitiven +
 etablierte Protokolle: X3DH, Double Ratchet); der Server ist ein **dummer
@@ -158,7 +159,13 @@ Primitiven beim Start.
   Revocation greift für einen Kontakt, sobald er die neuere Liste gesehen hat —
   dieselbe Eigenschaft wie bei Signal/Element. Der Guard sitzt **vor** dem
   sim-init-Zweig, sonst zerstörte ein widerrufenes Gerät über den Tie-Break den
-  Live-Ratchet.
+  Live-Ratchet. Der Prekey-Guard blockiert nur **neue** Handshakes; damit ein
+  widerrufenes Gerät nicht über seinen **bereits etablierten** Ratchet weiter
+  `msg`-Envelopes senden kann, reisst `applyDeviceListUpdate` den Ratchet **ab**,
+  sobald das Gerät hinter der Live-Session aus der akzeptierten Liste fällt
+  (`ratchetDeviceSignPub` merkt sich dieses Gerät, weil es ein Zweitgerät sein kann,
+  das `peerSignPub` nicht ersetzt hat) — jeder weitere Verkehr muss dann durch den
+  Prekey-Guard, der ihn abweist.
 - **Zweiseitige Tür, zwei Vertrauenslabel — nie verschmolzen:**
   - **Dual-signierte Rotation** (Kette vom gepinnten Master, `verifyRotation`):
     kryptografisch **bewiesene** Kontinuität → `acceptRotation` schlüsselt den Raum
@@ -196,9 +203,13 @@ Primitiven beim Start.
   Bestätigung würde also gerade das Falsche bestätigen. Eine Nachricht unter
   einem gesperrten Master wird **sichtbar abgelehnt** (nicht still verworfen)
   und lässt `verified` **unberührt**, damit ein alter Schlüssel das Vertrauen in
-  die aktuelle Identität nicht degradieren kann. Die Sperrliste ist Teil des
-  Kontakt-Datensatzes und damit auch im Recovery-Export enthalten — ein Restore
-  ohne sie würde den Downgrade-Pfad wieder öffnen.
+  die aktuelle Identität nicht degradieren kann. Die Sperrliste ist **global nach
+  Master indiziert** (nicht mehr am Kontakt) und reist **ausdrücklich im Recovery-
+  Export** mit; ein Restore **vereinigt** sie mit der lokalen Menge (nie
+  überschreiben — ein älteres Backup darf keine bereits verlassene Kennung
+  wiederbeleben). Ohne diese explizite Aufnahme öffnete ein Restore in einen
+  frischen Tresor den Downgrade-Pfad wieder — die globale Denylist ist der
+  einzige Post-Migrations-Speicher der Verlassungen.
   *Gewollte Konsequenz:* der Weg zurück zu einem verlassenen Master ist
   **endgültig zu**, auch für den legitimen Nutzer, der es sich anders überlegt.
   Der Rückweg ist ein frischer Identitätsaufbau. Das ist der Schutz, kein Bug.
@@ -326,6 +337,16 @@ gegen denselben Code, beide kommen an.
 > dem Entschlüsseln**, vor jeder Inhaltsverarbeitung. Beim Empfang zählt dazu
 > das Löschen des verbrauchten Skipped-Keys — *das* ist die Einmal-Verwendung
 > auf der Empfangsseite.
+>
+> Die Commit-Kopie schützt nur die **sequenzielle** Verarbeitung. Liefert der
+> Relay **denselben** Ciphertext gleichzeitig unter zwei Ack-IDs, klonten zwei
+> nebenläufige `onInbox`-Läufe denselben *noch nicht committeten* Zustand und
+> entschlüsselten ihn **beide** — ein Replay, den der Ratchet sonst per
+> Konstruktion abweist. Deshalb läuft der gesamte Empfang jetzt durch **eine
+> Promise-Kette** (pro Client serialisiert): kein zweiter Decrypt setzt auf,
+> bevor der erste committet hat, und die Doppel-Zustellung wird zum gewöhnlichen,
+> abgewiesenen Replay. Dieselbe Kette ordnet jede Nachricht **hinter** die
+> Boot-Migration, die als ihr Kopf läuft.
 
 - **Commit-Disziplin beim Entschlüsseln (kritisch, v0.17.1):** `ratchetDecrypt`
   arbeitet auf einer **Kopie** und übernimmt sie erst, wenn die AEAD-Prüfung
@@ -364,6 +385,7 @@ gegen denselben Code, beide kommen an.
 > | Empfangen | Persist **unmittelbar nach** dem Entschlüsseln, vor jeder Inhaltsverarbeitung | Replay eines verbrauchten Skipped-Keys (v0.16.3) |
 > | Entschlüsseln | Draft-Kopie, Commit **nach** der AEAD-Prüfung | Ferngesteuerte Session-Zerstörung ohne Schlüsselmaterial (v0.17.1) |
 > | X3DH-Antwort | OPK-Verbrauch und Session-Erzeugung sind **ein** Schritt | Entweder unbearbeitbares Retransmit oder wiederverwendbarer OPK |
+> | Sim-Init-Tie-Break | `ratchet`/`pendingHeader` erst **nach** `respondX3DH` (Cert) und AEAD committen — auf Locals bauen | Ein gefälschter Prekey (öffentl. Master+signPub, Müll-Cert) zerstörte die in-flight-Session; ein gefälschtes `msg` löschte `pendingHeader` (v0.19.x) |
 >
 > Der Prüfauftrag für jeden künftigen Zustandsübergang — auch die, die Stufe 3c
 > mitbringt — ist damit mechanisch: *Wo genau wird committet, und was passiert,
@@ -507,6 +529,12 @@ Header angezeigte **Versionsnummer** hilft beim Abgleich, welcher Build läuft.
 - **Gruppen v1/v2**: „Soft"-Membership per Pairwise-Fan-out ohne kryptografisches
   Re-Keying — ein entferntes Mitglied behält alten Verlauf. Echte Forward-/
   Post-Compromise-Sicherheit bei Mitgliederwechsel bräuchte Sender-Keys/MLS (v3).
+  Die **Absender-Anzeige** einer Gruppennachricht ist dennoch **nicht** fälschbar:
+  sie wird aus dem kryptografisch authentifizierten Pairwise-Kontakt abgeleitet,
+  **nie** aus dem mitgesendeten `senderName`-Feld, und eine Nachricht von einem
+  Nicht-/entfernten Mitglied wird verworfen. Und `ensureMemberContact` prüft beim
+  Anlegen eines Mitglied-Kontakts **Denylist + Device-Cert** — ein veralteter
+  Roster kann keinen verlassenen Master über die Gruppen-Fläche wieder-pinnen.
 - **Geräte-Revocation greift NICHT in Gruppen** (3c-Grenze): der Bearer-Guard
   prüft die master-signierte Geräteliste nur für 1:1-Kontakte. Gruppen-Mitglieder
   entstehen über `ensureMemberContact` ohne `peerDeviceList`, also ist der Guard
@@ -538,6 +566,15 @@ Header angezeigte **Versionsnummer** hilft beim Abgleich, welcher Build läuft.
   symmetrisch (gleiches SK, gleiche Ratchet-Sicherheit) — „Gewinnen" bringt
   keinen Vorteil außer, welche in-flight Erst-Nachricht das Rennen überlebt.
   Grinden auf einen kleinen Schlüssel ist damit nutzlos.
+- **Bewiesene Tür — Producer noch nicht verdrahtet**: der **Empfangspfad** der
+  dual-signierten Rotation ist vollständig (`acceptRotation` behält `verified`,
+  über `kind:'rotation'` erreichbar und e2e-getestet). Der **Producer** — die
+  automatische Co-Signatur beim Device-Linking — fehlt noch, weil das gelinkte
+  Gerät den *neuen* Master-Privkey nie hält (Signal-Modell) und die Rotations-
+  Epoche `> e_alt` **und** `≤ e_shared` sein muss, was P beim Linken zu einem
+  Epochen-Bump + Re-Gossip zwingt (eigener design-gelockter Schritt). Bis dahin
+  kollabiert eine reale Master-Rotation auf den sicheren **TOFU-Bruch**
+  (`acceptMasterChange`, `verified` gelöscht, Safety Number neu vergleichen).
 - **Sender-Rate-Limiting**: die Queue ist gedeckelt (`MAX_QUEUE`), aber ein
   echtes Pro-Sender-Rate-Limit gegen gezieltes Fluten fehlt noch.
 

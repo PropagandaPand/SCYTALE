@@ -34,6 +34,7 @@ import { loadGroups, saveGroup, toInvite, fromInvite } from './groups';
 import { loadProfile, saveProfile, type MyProfile } from './profile';
 import { loadStickers, saveStickers, type Sticker } from './stickers';
 import { loadMessages, saveMessages, type ChatMessage } from './messages';
+import { loadRetiredMasters, saveRetiredMasters } from './denylist';
 
 // --- Encryption container (the downloadable file) --------------------------
 
@@ -90,6 +91,14 @@ interface BackupBlob {
   groups: GroupInvite[];
   messages: Record<string, ChatMessage[]>;
   stickers?: Sticker[]; // optional: backups written before stickers existed
+  // The GLOBAL retired-master denylist (base64 master pubs). MUST travel with the
+  // backup: it is the only post-migration store of retirements (per-contact
+  // retiredMasters are drained into it at boot), and a restore without it lands in
+  // a fresh vault with an EMPTY denylist — re-opening the abandoned-key downgrade
+  // the denylist exists to stop (a retired/compromised master would be accepted
+  // again). Optional: backups written before this field carry none. See
+  // Devil's-Advocate DA-3.
+  retiredMasters?: string[];
 }
 
 async function gather(dek: CryptoKey): Promise<Bytes> {
@@ -110,6 +119,7 @@ async function gather(dek: CryptoKey): Promise<Bytes> {
     groups: await Promise.all(groups.map((g) => toInvite(g))),
     messages,
     stickers: await loadStickers(dek),
+    retiredMasters: [...(await loadRetiredMasters(dek))],
   };
   return utf8.encode(JSON.stringify(blob));
 }
@@ -133,6 +143,15 @@ async function restore(dek: CryptoKey, plaintext: Bytes): Promise<void> {
   }
   for (const inv of blob.groups) await saveGroup(dek, await fromInvite(inv));
   for (const roomId of Object.keys(blob.messages)) await saveMessages(dek, roomId, blob.messages[roomId]);
+  // Restore the retired-master denylist by UNION (never overwrite): a restore may
+  // only ADD retirements, never drop an existing local one — otherwise importing
+  // an older backup would silently un-retire a master this device already
+  // abandoned. A missing field (pre-DA-3 backup) leaves the local set untouched.
+  if (blob.retiredMasters?.length) {
+    const merged = await loadRetiredMasters(dek);
+    for (const m of blob.retiredMasters) merged.add(m);
+    await saveRetiredMasters(dek, merged);
+  }
   // Optional: a backup taken before stickers existed has no field. Restoring
   // an empty array over an existing set would silently delete it, so only
   // write when the backup actually carried one.

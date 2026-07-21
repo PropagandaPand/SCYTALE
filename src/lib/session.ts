@@ -19,6 +19,8 @@ import {
   SEALED_ENVELOPE,
   verifyDeviceCert,
   verifyRotation,
+  encodeRotation,
+  decodeRotation,
   deviceInList,
   verifyDeviceList,
   isNewerDeviceList,
@@ -124,6 +126,17 @@ export interface Contact {
   bundle?: PreKeyBundle; // present when WE hold their code (needed to initiate)
   ratchet: RatchetState | null; // null until the session is established
   pendingHeader: InitialMessageHeader | null; // initiator attaches until first reply arrives
+  /**
+   * The sign key of the peer DEVICE that established the current ratchet. Needed
+   * because a peer's SECOND device can establish a responder ratchet without
+   * rewriting peerSignPub (which stays the primary), so peerSignPub does not
+   * reliably name the device behind the live session. Device revocation on the
+   * message path (applyDeviceListUpdate) tears the ratchet down when THIS device
+   * leaves the accepted list — otherwise a revoked device keeps sending accepted
+   * 'msg' over its established ratchet. Absent on pre-3c records → falls back to
+   * peerSignPub (correct for them: they predate multi-device receive).
+   */
+  ratchetDeviceSignPub?: Bytes;
 }
 
 /** Sending to a contact that still pins our pre-linking master is refused: the
@@ -280,6 +293,18 @@ export async function applyDeviceListUpdate(
   if (!(await verifyDeviceList(list, contact.peerMasterPub, contact.peerEpoch))) return false;
   if (contact.peerDeviceList && !isNewerDeviceList(list, contact.peerDeviceList)) return false;
   contact.peerDeviceList = list;
+  // Device revocation on the MESSAGE path (Review C): the guard in receiveEnvelope
+  // only gates PREKEY envelopes, so a revoked device could keep sending accepted
+  // 'msg' over its already-established ratchet indefinitely. When the device
+  // backing the live ratchet is no longer in the accepted list, tear the ratchet
+  // down: any further traffic from it must then re-handshake through the prekey
+  // gate, where deviceAuthorized rejects it (RevokedDeviceError).
+  const ratchetDevice = contact.ratchetDeviceSignPub ?? contact.peerSignPub;
+  if (contact.ratchet && !deviceInList(list, ratchetDevice)) {
+    contact.ratchet = null;
+    contact.pendingHeader = null;
+    contact.ratchetDeviceSignPub = undefined;
+  }
   return true;
 }
 
@@ -426,6 +451,7 @@ export async function acceptMasterChange(
   contact.bundle = undefined; // the stored bundle belonged to the old identity
   contact.ratchet = null; // force a fresh handshake
   contact.pendingHeader = null;
+  contact.ratchetDeviceSignPub = undefined; // ratchet gone → forget its device
   contact.verified = false; // TOFU break — re-verification is mandatory
   contact.pendingMaster = undefined;
   contact.roomId = await computeMasterRoomId(contact.ownMasterPub, asMasterPub(p.masterPub));
@@ -446,6 +472,7 @@ export async function reconnectContact(
   contact.staleIdentity = undefined;
   contact.ratchet = null;
   contact.pendingHeader = null;
+  contact.ratchetDeviceSignPub = undefined; // ratchet gone → forget its device
   // The stored bundle's ONE-TIME prekey was consumed by the session we are
   // resetting. Reusing it would make us derive DH1–DH4 while the peer (who no
   // longer holds that key) derives DH1–DH3 — different shared secrets, and the
@@ -529,6 +556,7 @@ export async function acceptRotation(
   contact.bundle = undefined;
   contact.ratchet = null; // fresh X3DH under the new master
   contact.pendingHeader = null;
+  contact.ratchetDeviceSignPub = undefined; // ratchet gone → forget its device
   const newRoomId = await computeMasterRoomId(contact.ownMasterPub, asMasterPub(statement.newMasterPub));
   contact.roomId = newRoomId;
   contact.regime = 'master';
@@ -553,7 +581,8 @@ export type MessageContent =
   | { kind: 'ginvite'; group: GroupInvite }
   | { kind: 'gremove'; groupId: string } // "you were removed from this group"
   | { kind: 'gleave'; groupId: string } // "I left this group"
-  | { kind: 'devlist'; list: DeviceList }; // E2E gossip of my updated device list
+  | { kind: 'devlist'; list: DeviceList } // E2E gossip of my updated device list
+  | { kind: 'rotation'; statement: RotationStatement }; // dual-signed master rotation (proven door)
 
 function prefixed(type: number, body: Uint8Array): Bytes {
   const out = new Uint8Array(1 + body.length);
@@ -614,6 +643,7 @@ async function frameContent(c: MessageContent): Promise<Bytes> {
   if (c.kind === 'gremove') return prefixed(5, utf8.encode(c.groupId));
   if (c.kind === 'gleave') return prefixed(6, utf8.encode(c.groupId));
   if (c.kind === 'devlist') return prefixed(7, await encodeDeviceList(c.list));
+  if (c.kind === 'rotation') return prefixed(8, encodeRotation(c.statement));
   // ginvite
   return prefixed(4, utf8.encode(JSON.stringify(c.group)));
 }
@@ -642,6 +672,7 @@ async function unframeContent(bytes: Bytes): Promise<MessageContent> {
   if (bytes[0] === 5) return { kind: 'gremove', groupId: utf8.decode(bytes.slice(1)) };
   if (bytes[0] === 6) return { kind: 'gleave', groupId: utf8.decode(bytes.slice(1)) };
   if (bytes[0] === 7) return { kind: 'devlist', list: await decodeDeviceList(bytes.slice(1)) };
+  if (bytes[0] === 8) return { kind: 'rotation', statement: decodeRotation(bytes.slice(1)) };
 
   // Only type 1 is a real file. Anything else is a corrupt/unknown frame — throw
   // so it's dropped, never rendered as a junk "file" in the chat (e.g. a mangled
@@ -679,6 +710,8 @@ async function sendContent(me: IdentityKeys, contact: Contact, content: MessageC
       session.associatedData,
     );
     contact.pendingHeader = header;
+    // We initiate to the pinned device, so that device backs this ratchet.
+    contact.ratchetDeviceSignPub = contact.peerSignPub;
   }
   const message = await ratchetEncrypt(contact.ratchet, await frameContent(content));
   const conv = contact.roomId;
@@ -739,6 +772,14 @@ export async function sendGroupLeave(me: IdentityKeys, contact: Contact, groupId
 /** Gossip our updated, master-signed device list to a contact (revocation). */
 export async function sendDeviceList(me: IdentityKeys, contact: Contact, list: DeviceList): Promise<Bytes> {
   return sendContent(me, contact, { kind: 'devlist', list });
+}
+
+/** Gossip a dual-signed master rotation to a contact that still pins our OLD
+ *  master. Unlike the unproven previousMaster hint, this PROVES continuity, so
+ *  the receiver's acceptRotation keeps `verified`. The producer (a co-signed
+ *  chain from device linking) is separate; this is the transport. */
+export async function sendRotation(me: IdentityKeys, contact: Contact, statement: RotationStatement): Promise<Bytes> {
+  return sendContent(me, contact, { kind: 'rotation', statement });
 }
 
 /** Decrypt an incoming envelope; establishes the responder session on first contact. */
@@ -806,50 +847,76 @@ export async function receiveEnvelope(
   // The retired-master defence moved to the GLOBAL, master-indexed denylist,
   // checked before those paths and before auto-create — see lib/denylist.ts.)
 
+  // We DECIDE the path and BUILD any new session into LOCALS, mutating live
+  // contact state only AFTER the message authenticates (respondX3DH's cert check
+  // and the AEAD decrypt both pass) — the v0.17.1 "commit only after the AEAD
+  // check" discipline. The prekey guards above compare only PUBLIC roster values;
+  // the secret-binding check lives inside respondX3DH. If we nulled the live
+  // ratchet/pendingHeader before it, an attacker who copied a peer's public
+  // master + signPub could destroy an in-flight session with a garbage prekey
+  // (Devil's-Advocate DA-4), and a forged 'msg' could clear pendingHeader and
+  // stall a handshake (Review F). Committing last closes both.
+
   // Simultaneous initiation: we started a session and haven't heard back
   // (pendingHeader set) AND the peer also sent a prekey. Both can't keep their
   // own session — pick one deterministically by identity order: the lower key
   // stays initiator, the higher adopts the peer's session. Both then converge.
-  if (contact.ratchet && contact.pendingHeader && envelope.type === 'prekey') {
-    if (cmp(me.dh.publicKey, contact.peerDhPub) < 0) {
-      throw new Error('Gleichzeitiger Verbindungsaufbau — Peer-Prekey ignoriert (unsere Session gewinnt).');
-    }
-    contact.ratchet = null; // peer wins — drop our attempt and respond to theirs
-    contact.pendingHeader = null;
+  const simInitAdopt = !!contact.ratchet && !!contact.pendingHeader && envelope.type === 'prekey';
+  if (simInitAdopt && cmp(me.dh.publicKey, contact.peerDhPub) < 0) {
+    throw new Error('Gleichzeitiger Verbindungsaufbau — Peer-Prekey ignoriert (unsere Session gewinnt).');
   }
 
-  // Did THIS call establish the session? Then the very next decrypt is the
-  // handshake's proof — and its failure means the two sides derived different
-  // shared secrets (e.g. a one-time prekey the peer already consumed). That must
-  // be reported as such: a generic decrypt error here costs an evening to
-  // diagnose, a named one costs five minutes.
-  const freshHandshake = !contact.ratchet;
+  // Build a fresh responder session iff we have no live ratchet, OR we lost the
+  // sim-init tie-break and must adopt the peer's (without yet dropping ours).
+  // freshHandshake drives the "provably wrong on first decrypt" reporting: its
+  // failure means the two sides derived different shared secrets.
+  const buildFresh = !contact.ratchet || simInitAdopt;
+  const freshHandshake = buildFresh;
 
-  if (!contact.ratchet) {
+  let ratchet = contact.ratchet;
+  if (buildFresh) {
     if (envelope.type !== 'prekey') {
       throw new Error('Erste Nachricht ohne X3DH-Header — Session kann nicht aufgebaut werden.');
     }
     const spk = lookup.signedPreKey(envelope.x3dh.signedPreKeyId);
     if (!spk) throw new Error('Passender Signed Prekey nicht gefunden (vermutlich rotiert).');
     const opkPriv = lookup.consumeOneTimePreKey(envelope.x3dh.oneTimePreKeyId);
+    // respondX3DH verifies the sender's device cert — throws X3DHError on a forgery
+    // BEFORE we touch any live state.
     const session = await respondX3DH(me, spk.privateKey, opkPriv, envelope.x3dh);
-    contact.ratchet = await initRatchetResponder(session.sharedSecret, spk, session.associatedData);
-  } else {
-    // Any inbound message means the peer has our session → stop attaching the header.
-    contact.pendingHeader = null;
+    ratchet = await initRatchetResponder(session.sharedSecret, spk, session.associatedData);
+  }
+  if (!ratchet) {
+    // Unreachable: buildFresh either set ratchet or threw. Kept as a type guard.
+    throw new Error('Kein Ratchet-Zustand nach Handshake.');
   }
 
+  let plaintext: Bytes;
   try {
-    return await unframeContent(await ratchetDecrypt(contact.ratchet, envelope.message));
+    plaintext = await ratchetDecrypt(ratchet, envelope.message);
   } catch (e) {
     if (freshHandshake) {
-      // The derived session is provably wrong — don't keep half a session around,
-      // so the next prekey attempt can start clean.
-      contact.ratchet = null;
+      // The derived session is provably wrong — leave contact untouched (we never
+      // committed the fresh ratchet), so the next prekey attempt starts clean AND
+      // a forged prekey cannot have destroyed a pre-existing in-flight session.
       throw new HandshakeMismatchError();
     }
     throw e;
   }
+
+  // COMMIT: the message authenticated, so it is now safe to mutate live state.
+  // Adopting a fresh ratchet replaces our in-flight one (sim-init loss / first
+  // contact); any inbound message means the peer has our session, so we stop
+  // attaching the X3DH header.
+  contact.ratchet = ratchet;
+  contact.pendingHeader = null;
+  if (buildFresh) {
+    // Record the peer device that established this ratchet — it may be a SECOND
+    // device (authorised by the list), not the primary peerSignPub, so revocation
+    // on the message path can later tear this ratchet down if THIS device leaves.
+    contact.ratchetDeviceSignPub = envelope.type === 'prekey' ? envelope.x3dh.identitySignPub : contact.peerSignPub;
+  }
+  return await unframeContent(plaintext);
 }
 
 // --- Contact (de)serialisation for the vault (produces plaintext bytes only) ---
@@ -876,6 +943,7 @@ interface ContactWire {
   bundle: string | null; // bundle token (null if we only hold their identity)
   ratchet: string | null; // base64 of serializeState output
   pendingHeader: unknown | null;
+  ratchetDeviceSignPub: string | null; // b64 of the device behind the live ratchet
 }
 
 async function b64(b: Bytes): Promise<string> {
@@ -924,6 +992,7 @@ export async function serializeContact(c: Contact): Promise<Bytes> {
     bundle: c.bundle ? await encodeBundle(c.bundle) : null,
     ratchet: c.ratchet ? await b64(await serializeState(c.ratchet)) : null,
     pendingHeader: c.pendingHeader ? await encodeInitialHeader(c.pendingHeader) : null,
+    ratchetDeviceSignPub: c.ratchetDeviceSignPub ? await b64(c.ratchetDeviceSignPub) : null,
   };
   return utf8.encode(JSON.stringify(wire));
 }
@@ -960,5 +1029,6 @@ export async function deserializeContact(bytes: Bytes): Promise<Contact> {
     ratchet: wire.ratchet ? await deserializeState(await unb64(wire.ratchet)) : null,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     pendingHeader: wire.pendingHeader ? await decodeInitialHeader(wire.pendingHeader as any) : null,
+    ratchetDeviceSignPub: wire.ratchetDeviceSignPub ? await unb64(wire.ratchetDeviceSignPub) : undefined,
   };
 }

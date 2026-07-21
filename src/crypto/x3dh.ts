@@ -46,6 +46,14 @@ export interface InitialMessageHeader {
   ephemeralPub: Bytes;
   signedPreKeyId: number;
   oneTimePreKeyId?: number;
+  /**
+   * UNPROVEN origin hint: "I was previously master X". Not signed, not signable
+   * (a signed one would be the rotation chain). Carried so the recipient can
+   * offer a merge affordance when this contact re-appears under a new master —
+   * it authorises NOTHING and is DELIBERATELY excluded from the AEAD's AD (see
+   * respondX3DH). It may only ever prompt a question, never a state change.
+   */
+  previousMaster?: Bytes;
 }
 
 export interface X3DHSession {
@@ -117,6 +125,9 @@ export async function initiateX3DH(
     ephemeralPub: ekPub,
     signedPreKeyId: bundle.signedPreKey.id,
     oneTimePreKeyId: bundle.oneTimePreKey?.id,
+    // Unproven origin hint — see InitialMessageHeader.previousMaster. Outside the
+    // AD above ON PURPOSE: it must not authenticate anything, only prompt a merge.
+    previousMaster: me.previousMasterPub,
   };
 
   return { header, session: { sharedSecret, associatedData } };

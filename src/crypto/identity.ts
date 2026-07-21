@@ -28,6 +28,10 @@ export interface IdentityKeys {
   sign: KeyPair; // Ed25519 device
   dh: KeyPair; // X25519 device
   createdAt: number;
+  /** The master this identity held BEFORE its last change (device-linking swap).
+   *  Sent as the unproven `previousMaster` hint so contacts who still pin the old
+   *  master can be offered a merge affordance. Public only; authorises nothing. */
+  previousMasterPub?: Bytes;
 }
 
 /** Only the primary device holds the master private key, so only it can
@@ -82,6 +86,7 @@ interface IdentityWire {
   signPriv: string;
   dhPub: string;
   dhPriv: string;
+  previousMasterPub?: string | null;
 }
 
 export async function serializeIdentity(id: IdentityKeys): Promise<Bytes> {
@@ -96,6 +101,7 @@ export async function serializeIdentity(id: IdentityKeys): Promise<Bytes> {
     signPriv: await b64encode(id.sign.privateKey),
     dhPub: await b64encode(id.dh.publicKey),
     dhPriv: await b64encode(id.dh.privateKey),
+    previousMasterPub: id.previousMasterPub ? await b64encode(id.previousMasterPub) : null,
   };
   return utf8Encode(JSON.stringify(wire));
 }
@@ -113,6 +119,7 @@ export async function deserializeIdentity(bytes: Bytes): Promise<IdentityKeys> {
     deviceCert: await b64decode(wire.deviceCert),
     sign: { publicKey: await b64decode(wire.signPub), privateKey: await b64decode(wire.signPriv) },
     dh: { publicKey: await b64decode(wire.dhPub), privateKey: await b64decode(wire.dhPriv) },
+    previousMasterPub: wire.previousMasterPub ? await b64decode(wire.previousMasterPub) : undefined,
   };
 }
 

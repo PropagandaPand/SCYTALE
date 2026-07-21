@@ -19,6 +19,7 @@ import {
   masterSafetyNumber,
   identityFingerprint,
   isPrimaryDevice,
+  verifyDeviceCert,
   bytesEqual,
   asMasterPub,
   decodeLinkGrant,
@@ -689,6 +690,40 @@ export function Messenger({ dek, onLock }: Props) {
         if (retiredMastersRef.current.has(await masterKeyB64(env.x3dh.masterPub))) {
           console.warn('[recv] Auto-Create unter verlassenem Master abgelehnt.');
           return;
+        }
+        // MERGE AFFORDANCE (unproven): the prekey carries a previousMaster hint,
+        // and we still have a contact pinned to THAT master → the person may have
+        // changed identity. Offer a merge (record pendingMaster on the origin) —
+        // it PROVES nothing, so it only prompts; the user must compare the safety
+        // number, and acceptMasterChange (verified=false) is the confirm.
+        const prev = env.x3dh.previousMaster;
+        if (prev) {
+          // A retired master claimed as origin is an attack, not a merge.
+          if (retiredMastersRef.current.has(await masterKeyB64(prev))) {
+            console.warn('[recv] Herkunfts-Hinweis nennt verlassenen Master — abgelehnt.');
+            return;
+          }
+          const origin = contactsRef.current.find((c) => bytesEqual(c.peerMasterPub, prev));
+          if (origin && !bytesEqual(origin.peerMasterPub, env.x3dh.masterPub)) {
+            // Only offer if the claim is internally consistent (cert verifies
+            // under the NEW master) and not already the pending one (dedup — the
+            // hint is replayable, so no per-message alert spam).
+            const alreadyPending =
+              !!origin.pendingMaster && bytesEqual(origin.pendingMaster.masterPub, env.x3dh.masterPub);
+            const consistent = await verifyDeviceCert(
+              env.x3dh.masterPub, env.x3dh.epoch, env.x3dh.identitySignPub, env.x3dh.identityDhPub, env.x3dh.deviceCert,
+            );
+            if (consistent && !alreadyPending) {
+              origin.pendingMaster = {
+                masterPub: env.x3dh.masterPub, epoch: env.x3dh.epoch,
+                signPub: env.x3dh.identitySignPub, dhPub: env.x3dh.identityDhPub,
+              };
+              await saveContact(dek, origin);
+              setError(`⚠ ${displayName(origin)} meldet sich mit einer neuen Identität (unbelegt). Prüfe sie in der Kontaktansicht und vergleiche die Sicherheitsnummer.`);
+              bump();
+            }
+            return; // the merge affordance is the path — do NOT auto-create a stranger
+          }
         }
         contact = await makeContactFromHeader(myMaster, env.x3dh);
         contactsRef.current = [...contactsRef.current, contact];

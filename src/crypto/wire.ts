@@ -32,6 +32,7 @@ interface InitialHeaderWire {
   ek: string;
   spk: number;
   opk: number | null;
+  pm?: string | null; // previousMaster (unproven origin hint), optional
 }
 
 async function encHeader(h: RatchetHeader): Promise<RatchetHeaderWire> {
@@ -50,6 +51,7 @@ export async function encodeInitialHeader(h: InitialMessageHeader): Promise<Init
     ek: await b64encode(h.ephemeralPub),
     spk: h.signedPreKeyId,
     opk: h.oneTimePreKeyId ?? null,
+    pm: h.previousMaster ? await b64encode(h.previousMaster) : null,
   };
 }
 export async function decodeInitialHeader(o: InitialHeaderWire): Promise<InitialMessageHeader> {
@@ -62,6 +64,7 @@ export async function decodeInitialHeader(o: InitialHeaderWire): Promise<Initial
     ephemeralPub: await b64decode(o.ek),
     signedPreKeyId: o.spk,
     oneTimePreKeyId: o.opk ?? undefined,
+    previousMaster: o.pm ? await b64decode(o.pm) : undefined,
   };
 }
 
@@ -166,6 +169,11 @@ async function decodeInitialHeaderChecked(x: unknown): Promise<InitialMessageHea
     ephemeralPub: reqBytes(await reqB64(o.ek, 'ephemeralPub'), KEY_LEN, 'ephemeralPub Länge'),
     signedPreKeyId: reqUint(o.spk, 'signedPreKeyId'),
     oneTimePreKeyId: o.opk === null || o.opk === undefined ? undefined : reqUint(o.opk, 'oneTimePreKeyId'),
+    // Optional, unproven, length-checked only. It authorises nothing, so a bad
+    // value can at worst mean "no merge hint" — reject the wrong length rather
+    // than truncate.
+    previousMaster:
+      o.pm === null || o.pm === undefined ? undefined : reqBytes(await reqB64(o.pm, 'previousMaster'), KEY_LEN, 'previousMaster Länge'),
   };
 }
 

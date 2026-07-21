@@ -1,7 +1,5 @@
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  ZIELVORGABE (xfail) — die Liste stammt aus einer MASTER-SIGNIERTEN Quelle ║
-// ║  HEUTE ROT: applyDeviceListUpdate existiert noch nicht (Schritt 8).        ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
+// Die peerDeviceList stammt aus einer MASTER-SIGNIERTEN Quelle, nie implizit aus
+// dem geprüften Gerät (Stufe 3c). (War xfail bis applyDeviceListUpdate gebaut war.)
 //
 // Der Guard (bearer-guard.test) prüft ein Gerät GEGEN eine peerDeviceList. Diese
 // Suite pinnt die zweite Hälfte der Eigenschaft: die Liste darf NICHT implizit
@@ -17,7 +15,7 @@
 import * as S from './.bundle/entry.js';
 
 let pass = 0, fail = 0;
-const ok = (n, c) => { if (c) { pass++; console.log('  ok  ', n); } else { fail++; console.log('  OFFEN', n); } };
+const ok = (n, c) => { if (c) { pass++; console.log('  ok  ', n); } else { fail++; console.log('  FAIL', n); } };
 const sodium = await S.getSodium();
 
 const master = sodium.crypto_sign_keypair();
@@ -58,7 +56,7 @@ if (typeof S.applyDeviceListUpdate === 'function') {
     { signPub: first.sign.publicKey, dhPub: first.dh.publicKey, deviceCert: first.cert },
     { signPub: second.sign.publicKey, dhPub: second.dh.publicKey, deviceCert: second.cert },
   ]);
-  const applied = S.applyDeviceListUpdate(contact, list, new Set());
+  const applied = await S.applyDeviceListUpdate(contact, list, new Set());
   ok('master-signierte Liste wird übernommen', applied === true);
   ok('danach ist das zweite Gerät legitimiert', S.deviceAuthorized(contact, second.sign.publicKey));
 
@@ -67,7 +65,7 @@ if (typeof S.applyDeviceListUpdate === 'function') {
   const forged = await S.signDeviceList(evil.privateKey, evil.publicKey, 1, 3, [
     { signPub: second.sign.publicKey, dhPub: second.dh.publicKey, deviceCert: second.cert },
   ]);
-  ok('fremd-signierte Liste wird abgelehnt', S.applyDeviceListUpdate(contact, forged, new Set()) === false);
+  ok('fremd-signierte Liste wird abgelehnt', (await S.applyDeviceListUpdate(contact, forged, new Set())) === false);
 }
 
 console.log(`\n${pass} ok, ${fail} fail`);

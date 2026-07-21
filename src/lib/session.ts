@@ -20,6 +20,8 @@ import {
   verifyDeviceCert,
   verifyRotation,
   deviceInList,
+  verifyDeviceList,
+  isNewerDeviceList,
   encodeDeviceList,
   decodeDeviceList,
   encodeBundle,
@@ -255,6 +257,30 @@ export async function computeMasterRoomId(a: MasterPub, b: MasterPub): Promise<s
 export function deviceAuthorized(contact: Contact, deviceSignPub: Bytes): boolean {
   if (contact.peerDeviceList) return deviceInList(contact.peerDeviceList, deviceSignPub);
   return bytesEqual(deviceSignPub, contact.peerSignPub);
+}
+
+/**
+ * Learn a peer's newer, MASTER-SIGNED device list (Stage 3c/3d gossip). This is
+ * the ONLY way a second device of a peer becomes authorised — never by an
+ * implicit list synthesized from the device itself (that would be
+ * self-referential; see deviceAuthorized). Returns true if adopted.
+ *
+ * Refuses, in order: a master that isn't the pinned one; a RETIRED master
+ * (denylist first); a list that doesn't verify against the pinned master + epoch
+ * floor; and a ROLLBACK (not strictly newer than the stored list). Only then is
+ * the list stored — so a downgrade or a forged list can never widen the set.
+ */
+export async function applyDeviceListUpdate(
+  contact: Contact,
+  list: DeviceList,
+  retired: Set<string>,
+): Promise<boolean> {
+  if (!bytesEqual(list.masterPub, contact.peerMasterPub)) return false;
+  if (retired.has(await masterKeyB64(list.masterPub))) return false;
+  if (!(await verifyDeviceList(list, contact.peerMasterPub, contact.peerEpoch))) return false;
+  if (contact.peerDeviceList && !isNewerDeviceList(list, contact.peerDeviceList)) return false;
+  contact.peerDeviceList = list;
+  return true;
 }
 
 /**

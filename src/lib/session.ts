@@ -18,6 +18,7 @@ import {
   openPayload,
   SEALED_ENVELOPE,
   verifyDeviceCert,
+  verifyRotation,
   deviceInList,
   encodeDeviceList,
   decodeDeviceList,
@@ -40,6 +41,7 @@ import {
   type Bytes,
   type MasterPub,
   type DeviceList,
+  type RotationStatement,
 } from '../crypto';
 import { bytesToB64, b64ToBytes } from './bytes';
 
@@ -414,6 +416,79 @@ export function reconnectContact(contact: Contact): void {
   }
 }
 
+/**
+ * Re-derive a contact's roomId under the master-based regime (Stage 3c). PURE
+ * and IDEMPOTENT: `regime` is the anchor — a contact already 'master' is
+ * returned unchanged, which the crash-safe re-key routine relies on to resume a
+ * half-done migration without double-applying. Needs `ownMasterPub` (the master
+ * THIS contact knows us under); the boot migration fills it before calling. A
+ * staleIdentity contact whose old master was never snapshotted (pre-v0.18.7)
+ * has none and cannot be migrated — the caller routes it to "reconnect".
+ *
+ * This only computes and re-labels; moving the stored record, messages and
+ * in-memory maps under the new id is the caller's crash-safe routine (it must
+ * RE-ENCRYPT under the new AAD, never rename — see store.ts contactAad).
+ */
+export async function migrateContactRoomId(
+  contact: Contact,
+): Promise<{ oldRoomId: string; newRoomId: string }> {
+  const oldRoomId = contact.roomId;
+  if (contact.regime === 'master') return { oldRoomId, newRoomId: oldRoomId };
+  if (!contact.ownMasterPub) {
+    throw new Error('Migration ohne ownMasterPub — der Master, unter dem uns dieser Kontakt kennt, fehlt.');
+  }
+  const newRoomId = await computeMasterRoomId(contact.ownMasterPub, asMasterPub(contact.peerMasterPub));
+  contact.roomId = newRoomId;
+  contact.regime = 'master';
+  return { oldRoomId, newRoomId };
+}
+
+/**
+ * The "chain PROVES continuity" half of the door (Stage 3c): accept a
+ * dual-signed master ROTATION on an existing contact. Unlike acceptMasterChange
+ * (a user-confirmed TOFU break that clears `verified`), a valid rotation chain
+ * is cryptographic proof that the new master succeeds the pinned one — so
+ * `verified` is KEPT and the room re-keys automatically.
+ *
+ * ⚠️ ORDER IS SECURITY-CRITICAL (Runde-3 conditions):
+ *  1. DENYLIST FIRST — a claimed master on the global retired-set is refused
+ *     BEFORE any lookup or state touch. Otherwise the rotation path is a
+ *     downgrade onto an abandoned key, and the denylist would guard only
+ *     auto-create while the attacker takes this path.
+ *  2. REJECT BEFORE ANY STATE TOUCH — an invalid chain leaves verified,
+ *     peerMasterPub, peerEpoch and roomId untouched (the v0.16.0 trust-DoS, a
+ *     rule that applies afresh because this path is new).
+ *
+ * The contact is resolved elsewhere by the CLAIMED old master; authorisation is
+ * the chain's two signatures (verifyRotation), never the match.
+ */
+export async function acceptRotation(
+  contact: Contact,
+  statement: RotationStatement,
+  retired: Set<string>,
+): Promise<{ oldRoomId: string; newRoomId: string }> {
+  if (retired.has(await b64(statement.oldMasterPub)) || retired.has(await b64(statement.newMasterPub))) {
+    throw new RetiredIdentityError(true);
+  }
+  if (!(await verifyRotation(contact.peerMasterPub, contact.peerEpoch, statement))) {
+    throw new Error('Rotations-Kette ungültig — Kontakt unverändert.');
+  }
+  if (!contact.ownMasterPub) {
+    throw new Error('Rotation ohne ownMasterPub — roomId nicht ableitbar.');
+  }
+  const oldRoomId = contact.roomId;
+  contact.peerMasterPub = statement.newMasterPub;
+  contact.peerEpoch = statement.epoch;
+  contact.bundle = undefined;
+  contact.ratchet = null; // fresh X3DH under the new master
+  contact.pendingHeader = null;
+  const newRoomId = await computeMasterRoomId(contact.ownMasterPub, asMasterPub(statement.newMasterPub));
+  contact.roomId = newRoomId;
+  contact.regime = 'master';
+  // verified DELIBERATELY unchanged — the chain proved continuity.
+  return { oldRoomId, newRoomId };
+}
+
 /** Encrypt outgoing text into a wire envelope; establishes the session if needed. */
 /** A group's roster, shared E2E so every member can reach every other member. */
 export interface GroupInvite {
@@ -662,62 +737,19 @@ export async function receiveEnvelope(
     }
   }
 
-  // Master pinning (TOFU): a prekey claiming a DIFFERENT master for an already-
-  // pinned contact is rejected outright. A bare master change — without a valid,
-  // dual-signed rotation chain from the pinned master — is a possible MITM, so a
-  // higher epoch alone must never override the pin. Drop verified, Signal-style.
-  // (Rotation-chain acceptance arrives with the rotation flow.)
-  if (
-    envelope.type === 'prekey' &&
-    contact.peerMasterPub &&
-    cmp(envelope.x3dh.masterPub, contact.peerMasterPub) !== 0
-  ) {
-    const x = envelope.x3dh;
-
-    // (Conversation binding is enforced at the TOP of this function, for every
-    // prekey — an identity-change claim that does not derive this roomId never
-    // reaches this branch.)
-
-    // Retired master? Refuse outright and — importantly — WITHOUT touching
-    // `verified`. Otherwise anyone holding the abandoned key could degrade our
-    // trust in the contact's CURRENT identity just by sending. This is a dead
-    // end by design: the way back is a fresh identity setup, not this key.
-    if (contact.retiredMasters?.includes(await b64(x.masterPub))) {
-      // Record the attempt ONCE. The holder of the abandoned key can replay
-      // indefinitely, so this must be a contact state the user can look at, not
-      // a per-message alert — see Contact.retiredAttempt.
-      const first = !contact.retiredAttempt;
-      contact.retiredAttempt = true;
-      throw new RetiredIdentityError(first);
-    }
-
-    // NOTE: `verified` is deliberately NOT cleared here — see acceptMasterChange,
-    // which clears it at the moment the pin actually moves. Clearing it on
-    // receipt would let anyone who can reach our inbox burn the flag of an
-    // arbitrary contact, repeatedly and without holding any key: a verification
-    // DoS that trains the user to click the MITM warning away — exactly the
-    // precondition for a later false accept. `verified` describes the identity
-    // we have PINNED, and an unaccepted claim has not moved that pin.
-    //
-    // Remember the claimed identity so the user can deliberately accept it, but
-    // ONLY if it is internally consistent (device cert verifies under the
-    // claimed master). An inconsistent claim isn't even worth offering.
-    // A claim we are already showing must not alert again: it is replayable at
-    // will, so one warning per delivered message is the same harassment lever as
-    // the retired-master case. Dedup on CONTENT (this exact master), not on a
-    // flag — a genuinely different claim deserves a fresh warning.
-    const sameAsPending =
-      !!contact.pendingMaster && cmp(contact.pendingMaster.masterPub, x.masterPub) === 0;
-    if (await verifyDeviceCert(x.masterPub, x.epoch, x.identitySignPub, x.identityDhPub, x.deviceCert)) {
-      contact.pendingMaster = {
-        masterPub: x.masterPub,
-        epoch: x.epoch,
-        signPub: x.identitySignPub,
-        dhPub: x.identityDhPub,
-      };
-    }
-    throw new MasterChangedError(!sameAsPending);
-  }
+  // (The old master-mismatch branch that recorded pendingMaster and threw
+  // MasterChangedError/RetiredIdentityError from a bare prekey is GONE. Under
+  // master-based roomId the top-of-function authorisation already rejects any
+  // envelope whose master isn't the pinned one — a different master derives a
+  // different room and never reaches here as this contact. A legitimate master
+  // change is now handled deliberately, off two explicit paths, not off an
+  // unauthenticated prekey:
+  //   • a dual-signed ROTATION chain proves continuity → acceptRotation (keeps
+  //     verified, re-keys); and
+  //   • an UNPROVEN previousMaster hint surfaces a merge affordance the user
+  //     confirms → acceptMasterChange (clears verified).
+  // The retired-master defence moved to the GLOBAL, master-indexed denylist,
+  // checked before those paths and before auto-create — see lib/denylist.ts.)
 
   // Simultaneous initiation: we started a session and haven't heard back
   // (pendingHeader set) AND the peer also sent a prekey. Both can't keep their

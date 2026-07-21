@@ -1,7 +1,5 @@
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  ZIELVORGABE (xfail) — die zwei Vertrauenslabel der Tür (Stufe 3c)        ║
-// ║  HEUTE ROT: acceptRotation existiert noch nicht. Das ist beabsichtigt.    ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
+// Die zwei Vertrauenslabel der Tür (Stufe 3c): Kette beweist vs. Hinweis behauptet.
+// (War xfail-Zielvorgabe bis acceptRotation gebaut war; jetzt regulär.)
 //
 // Der Flip macht einen Master-Wechsel zu einem NEUEN Raum. Wie der Kontakt
 // wieder zusammenfindet, hängt an der BEWEISLAGE — und diese Unterscheidung
@@ -32,7 +30,7 @@
 import * as S from './.bundle/entry.js';
 
 let pass = 0, fail = 0;
-const ok = (n, c) => { if (c) { pass++; console.log('  ok  ', n); } else { fail++; console.log('  OFFEN', n); } };
+const ok = (n, c) => { if (c) { pass++; console.log('  ok  ', n); } else { fail++; console.log('  FAIL', n); } };
 const sodium = await S.getSodium();
 const b64 = (b) => sodium.to_base64(b, sodium.base64_variants.ORIGINAL);
 const hex = (x) => sodium.to_hex(x);

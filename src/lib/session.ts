@@ -18,6 +18,8 @@ import {
   openPayload,
   SEALED_ENVELOPE,
   verifyDeviceCert,
+  encodeDeviceList,
+  decodeDeviceList,
   encodeBundle,
   decodeBundle,
   encodeInitialHeader,
@@ -34,6 +36,7 @@ import {
   type Envelope,
   type Bytes,
   type MasterPub,
+  type DeviceList,
 } from '../crypto';
 import { bytesToB64, b64ToBytes } from './bytes';
 
@@ -85,6 +88,32 @@ export interface Contact {
    * the human part of the system. So the notice fires once, then lives here.
    */
   retiredAttempt?: boolean;
+  /**
+   * The MASTER under which THIS contact knows us — the local half of the
+   * master-based conversation key: roomId = computeMasterRoomId(ownMasterPub,
+   * peerMasterPub). Normally our current master; for a staleIdentity contact it
+   * is our PRE-LINK master (snapshotted at installGrant BEFORE the identity
+   * swap, because the peer still pins that one — losing it makes the stale
+   * conversation permanently un-addressable). Optional only on pre-3c records;
+   * the boot migration fills it.
+   */
+  ownMasterPub?: MasterPub;
+  /**
+   * The peer's most recently accepted, master-signed device list. The device-
+   * revocation guard checks presence here: a device whose cert verifies under
+   * the pinned master but which is absent from this list is refused. Absent on
+   * pre-3c records and at first contact (an implicit single-device list is
+   * synthesized until a devlist update arrives). Kept current via gossip.
+   */
+  peerDeviceList?: DeviceList;
+  /**
+   * Which roomId regime this record's `roomId` was derived under. Absent means
+   * the pre-3c device-DH regime (the migration default: "no marker = old"), so
+   * the boot migration knows to re-key it; 'master' means already migrated, so a
+   * second run is a no-op. This is the idempotency anchor — without it, an
+   * already-migrated contact cannot be told apart from an unmigrated one.
+   */
+  regime?: 'device' | 'master';
   bundle?: PreKeyBundle; // present when WE hold their code (needed to initiate)
   ratchet: RatchetState | null; // null until the session is established
   pendingHeader: InitialMessageHeader | null; // initiator attaches until first reply arrives
@@ -672,6 +701,9 @@ interface ContactWire {
   pendingMaster: { masterPub: string; epoch: number; signPub: string; dhPub: string } | null;
   retiredMasters: string[];
   retiredAttempt: boolean;
+  ownMasterPub: string | null;
+  peerDeviceList: string | null; // b64 of encodeDeviceList
+  regime: 'device' | 'master' | null; // null = pre-3c device-DH regime
   bundle: string | null; // bundle token (null if we only hold their identity)
   ratchet: string | null; // base64 of serializeState output
   pendingHeader: unknown | null;
@@ -710,6 +742,9 @@ export async function serializeContact(c: Contact): Promise<Bytes> {
       : null,
     retiredMasters: c.retiredMasters ?? [],
     retiredAttempt: c.retiredAttempt ?? false,
+    ownMasterPub: c.ownMasterPub ? await b64(c.ownMasterPub) : null,
+    peerDeviceList: c.peerDeviceList ? await b64(await encodeDeviceList(c.peerDeviceList)) : null,
+    regime: c.regime ?? null,
     bundle: c.bundle ? await encodeBundle(c.bundle) : null,
     ratchet: c.ratchet ? await b64(await serializeState(c.ratchet)) : null,
     pendingHeader: c.pendingHeader ? await encodeInitialHeader(c.pendingHeader) : null,
@@ -742,6 +777,9 @@ export async function deserializeContact(bytes: Bytes): Promise<Contact> {
       : undefined,
     retiredMasters: wire.retiredMasters?.length ? wire.retiredMasters : undefined,
     retiredAttempt: wire.retiredAttempt || undefined,
+    ownMasterPub: wire.ownMasterPub ? ((await unb64(wire.ownMasterPub)) as MasterPub) : undefined,
+    peerDeviceList: wire.peerDeviceList ? await decodeDeviceList(await unb64(wire.peerDeviceList)) : undefined,
+    regime: wire.regime ?? undefined,
     bundle: wire.bundle ? await decodeBundle(wire.bundle) : undefined,
     ratchet: wire.ratchet ? await deserializeState(await unb64(wire.ratchet)) : null,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

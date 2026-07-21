@@ -47,12 +47,15 @@ import {
   sendGroupRemove,
   sendGroupLeave,
   receiveEnvelope,
+  resolveContactByConv,
   acceptMasterChange,
   reconnectContact,
   MasterChangedError,
   RetiredIdentityError,
+  RevokedDeviceError,
   inboxRoom,
   computeRoomId,
+  computeMasterRoomId,
   type Contact,
   type MessageContent,
   type GroupInvite,
@@ -563,11 +566,21 @@ export function Messenger({ dek, onLock }: Props) {
         return; // handled in finally (ack + drop)
       }
 
-      let contact = contactsRef.current.find((c) => c.roomId === env.conv);
+      // RESOLVE (regime-robust): may use the legacy device-derivation for a
+      // not-yet-migrated contact. Resolution only — authorisation happens in
+      // receiveEnvelope against the master.
+      const myMaster = asMasterPub(id.master.publicKey);
+      let contact = await resolveContactByConv(contactsRef.current, env.conv, id.dh.publicKey, myMaster);
       if (!contact) {
-        // First contact from someone who holds our code — auto-create it.
         if (env.type !== 'prekey') return;
-        contact = await makeContactFromHeader(id.dh.publicKey, env.x3dh);
+        // AUTO-CREATE only on a MASTER-based conv that matches the sender's own
+        // claimed master. A device-based unknown conv is not a valid reason to
+        // mint a contact post-flip (Stage 3c): resolution may use the legacy
+        // derivation, creation may not — else the weaker path becomes a trust
+        // decision (the openInbound-fallback shape).
+        const masterConv = await computeMasterRoomId(myMaster, asMasterPub(env.x3dh.masterPub));
+        if (env.conv !== masterConv) return;
+        contact = await makeContactFromHeader(myMaster, env.x3dh);
         contactsRef.current = [...contactsRef.current, contact];
         messagesRef.current[contact.roomId] = [];
         await connectSend(contact);
@@ -600,6 +613,12 @@ export function Messenger({ dek, onLock }: Props) {
             setError(`⚠ Sicherheit: Jemand hat sich als ${displayName(contact)} mit einer bereits ersetzten Identität gemeldet — abgelehnt.`);
           }
           bump();
+        } else if (e instanceof RevokedDeviceError) {
+          // Dropped silently (no toast): a revoked device can replay forever, so
+          // per-message alerts would be the same fatigue lever as the retired
+          // case. Logged for diagnosis. Full "delivered to a no-longer-valid
+          // device" surfacing is the send-side status work (3d).
+          console.warn(`[recv] Prekey von widerrufenem Gerät von ${displayName(contact)} verworfen.`);
         }
         throw e; // drop the message (don't process the unpinned master)
       }
@@ -649,15 +668,15 @@ export function Messenger({ dek, onLock }: Props) {
     if (!id || !token) return;
     try {
       const bundle = await decodeBundle(token);
-      // Adding your OWN code would pass every check — your own cert verifies and
-      // computeRoomId(myDh, myDh) is valid — and silently create a "chat with
-      // yourself". With the copy and paste buttons now in one view, that is an
-      // easy two-tap misfire, so reject it explicitly.
-      if (bytesEqual(bundle.identityDhPub, id.dh.publicKey)) {
+      // Adding your OWN code would pass every check and silently create a "chat
+      // with yourself". Compare MASTERS, not device keys: under master-based
+      // rooms an own SECOND device (same master, different dh) must also be
+      // caught, and it would slip a dhPub-only guard.
+      if (bytesEqual(bundle.masterPub, id.master.publicKey)) {
         setError('Das ist dein eigener Verbindungscode.');
         return;
       }
-      const contact = await makeContact(id.dh.publicKey, bundle);
+      const contact = await makeContact(asMasterPub(id.master.publicKey), bundle);
       if (contactsRef.current.some((c) => c.roomId === contact.roomId)) {
         openChat(contact.roomId);
         return;
@@ -838,24 +857,52 @@ export function Messenger({ dek, onLock }: Props) {
   async function ensureMemberContact(m: GroupMember): Promise<Contact | null> {
     const id = identityRef.current;
     if (!id) return null;
-    const roomId = await computeRoomId(id.dh.publicKey, m.dhPub);
-    const existing = contactsRef.current.find((c) => c.roomId === roomId);
-    if (existing) return existing;
-    const contact: Contact = {
-      roomId,
-      // Group rosters carry v2 bundles (with the master); fall back to the device
-      // sign key if a legacy member has none (bundle-less members can't be messaged).
-      peerMasterPub: m.bundle?.masterPub ?? m.signPub,
-      peerEpoch: m.bundle?.epoch ?? 1,
-      peerSignPub: m.signPub,
-      peerDhPub: m.dhPub,
-      peerFingerprint: await identityFingerprint(m.signPub, m.dhPub),
-      peerName: m.name,
-      bundle: m.bundle,
-      hidden: true,
-      ratchet: null,
-      pendingHeader: null,
-    };
+    const myMaster = asMasterPub(id.master.publicKey);
+    const memberMaster = m.bundle?.masterPub;
+    // Master-based room when the roster entry carries a master (v2 bundles do);
+    // a legacy member without one stays on the device-DH room — frozen, since
+    // group device-revocation is v3 (it can't get a master room until re-invited
+    // with a v2 bundle). Resolve regime-robustly so a pre-flip member contact is
+    // found rather than duplicated.
+    let contact: Contact;
+    if (memberMaster) {
+      const roomId = await computeMasterRoomId(myMaster, asMasterPub(memberMaster));
+      const existing = await resolveContactByConv(contactsRef.current, roomId, id.dh.publicKey, myMaster);
+      if (existing) return existing;
+      contact = {
+        roomId,
+        peerMasterPub: memberMaster,
+        peerEpoch: m.bundle?.epoch ?? 1,
+        peerSignPub: m.signPub,
+        peerDhPub: m.dhPub,
+        peerFingerprint: await identityFingerprint(memberMaster, memberMaster),
+        peerName: m.name,
+        ownMasterPub: myMaster,
+        regime: 'master',
+        bundle: m.bundle,
+        hidden: true,
+        ratchet: null,
+        pendingHeader: null,
+      };
+    } else {
+      const roomId = await computeRoomId(id.dh.publicKey, m.dhPub);
+      const existing = contactsRef.current.find((c) => c.roomId === roomId);
+      if (existing) return existing;
+      contact = {
+        roomId,
+        peerMasterPub: m.signPub, // legacy fallback (no master in the roster)
+        peerEpoch: 1,
+        peerSignPub: m.signPub,
+        peerDhPub: m.dhPub,
+        peerFingerprint: await identityFingerprint(m.signPub, m.dhPub),
+        peerName: m.name,
+        regime: 'device',
+        bundle: m.bundle,
+        hidden: true,
+        ratchet: null,
+        pendingHeader: null,
+      };
+    }
     contactsRef.current = [...contactsRef.current, contact];
     await connectSend(contact);
     await saveContact(dek, contact);

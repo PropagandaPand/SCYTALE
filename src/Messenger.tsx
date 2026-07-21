@@ -52,7 +52,9 @@ import {
   acceptMasterChange,
   reconnectContact,
   migrateContactRoomId,
+  applyDeviceListUpdate,
   masterKeyB64,
+  sendDeviceList,
   MasterChangedError,
   RetiredIdentityError,
   RevokedDeviceError,
@@ -617,6 +619,22 @@ export function Messenger({ dek, onLock }: Props) {
   }
 
   // P confirmed the emoji → issue the grant, send it, then persist the list.
+  // Gossip our updated device list to every contact with an established session
+  // (revocation transport). Only sendable sessions: not stale, not hidden group
+  // members, and a ratchet must already exist. Best-effort per contact.
+  async function gossipDeviceList(list: Parameters<typeof sendDeviceList>[2]) {
+    const id = identityRef.current;
+    if (!id) return;
+    for (const c of contactsRef.current) {
+      if (c.hidden || c.staleIdentity || !c.ratchet) continue;
+      try {
+        await sendEnvelopeTo(c, await encryptAndPersist(c, () => sendDeviceList(id, c, list)));
+      } catch {
+        /* unreachable contact — best effort, they learn it next time */
+      }
+    }
+  }
+
   async function onPConfirmSas() {
     const id = identityRef.current;
     const session = linkSessionRef.current;
@@ -625,7 +643,11 @@ export function Messenger({ dek, onLock }: Props) {
     try {
       const currentList = await loadOrCreateOwnDeviceList(dek, id);
       if (!currentList) throw new Error('Geräteliste nicht verfügbar.');
-      await completeLinkOnP(dek, id, session, currentList, sendToInbox);
+      const newList = await completeLinkOnP(dek, id, session, currentList, sendToInbox);
+      // Gossip the updated list so contacts learn the new device (and, later,
+      // stop accepting a removed one). Best-effort: revocation takes effect for
+      // a contact once it has seen this newer, master-signed list.
+      await gossipDeviceList(newList);
       resetLink();
       setLinkView('done');
     } catch (e) {
@@ -788,6 +810,14 @@ export function Messenger({ dek, onLock }: Props) {
         await deleteGroupAction(content.groupId);
       } else if (content.kind === 'gleave') {
         await applyGroupLeave(content.groupId, contact);
+      } else if (content.kind === 'devlist') {
+        // Learn the peer's newer device list (revocation gossip). Verified +
+        // rollback-checked + denylist-guarded inside applyDeviceListUpdate; on
+        // success persist immediately (the list authorises future sends, so it
+        // must not live only in RAM — the v0.17.1 lesson).
+        if (await applyDeviceListUpdate(contact, content.list, retiredMastersRef.current)) {
+          await saveContact(dek, contact);
+        }
       } else {
         await appendMessage(contact.roomId, incomingMessage(content));
         if (!(viewRef.current === 'chat' && activeRoomRef.current === contact.roomId)) {

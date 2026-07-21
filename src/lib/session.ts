@@ -552,7 +552,8 @@ export type MessageContent =
   | { kind: 'group'; groupId: string; senderName?: string; inner: MessageContent }
   | { kind: 'ginvite'; group: GroupInvite }
   | { kind: 'gremove'; groupId: string } // "you were removed from this group"
-  | { kind: 'gleave'; groupId: string }; // "I left this group"
+  | { kind: 'gleave'; groupId: string } // "I left this group"
+  | { kind: 'devlist'; list: DeviceList }; // E2E gossip of my updated device list
 
 function prefixed(type: number, body: Uint8Array): Bytes {
   const out = new Uint8Array(1 + body.length);
@@ -564,7 +565,7 @@ function prefixed(type: number, body: Uint8Array): Bytes {
 // Frame: byte0 = 0 (text) | 1 (file) | 2 (profile).
 //   file:    [nameLen(2)][name][mimeLen(2)][mime][data]
 //   profile: [nameLen(2)][name][avatarLen(4)][avatar]
-function frameContent(c: MessageContent): Bytes {
+async function frameContent(c: MessageContent): Promise<Bytes> {
   if (c.kind === 'text') {
     const t = utf8.encode(c.text);
     const out = new Uint8Array(1 + t.length);
@@ -607,16 +608,17 @@ function frameContent(c: MessageContent): Bytes {
     return out;
   }
   if (c.kind === 'group') {
-    const json = JSON.stringify({ g: c.groupId, s: c.senderName ?? '', i: bytesToB64(frameContent(c.inner)) });
+    const json = JSON.stringify({ g: c.groupId, s: c.senderName ?? '', i: bytesToB64(await frameContent(c.inner)) });
     return prefixed(3, utf8.encode(json));
   }
   if (c.kind === 'gremove') return prefixed(5, utf8.encode(c.groupId));
   if (c.kind === 'gleave') return prefixed(6, utf8.encode(c.groupId));
+  if (c.kind === 'devlist') return prefixed(7, await encodeDeviceList(c.list));
   // ginvite
   return prefixed(4, utf8.encode(JSON.stringify(c.group)));
 }
 
-function unframeContent(bytes: Bytes): MessageContent {
+async function unframeContent(bytes: Bytes): Promise<MessageContent> {
   if (bytes[0] === 0) return { kind: 'text', text: utf8.decode(bytes.slice(1)) };
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 
@@ -632,13 +634,14 @@ function unframeContent(bytes: Bytes): MessageContent {
   }
   if (bytes[0] === 3) {
     const j = JSON.parse(utf8.decode(bytes.slice(1)));
-    return { kind: 'group', groupId: j.g, senderName: j.s || undefined, inner: unframeContent(b64ToBytes(j.i)) };
+    return { kind: 'group', groupId: j.g, senderName: j.s || undefined, inner: await unframeContent(b64ToBytes(j.i)) };
   }
   if (bytes[0] === 4) {
     return { kind: 'ginvite', group: JSON.parse(utf8.decode(bytes.slice(1))) as GroupInvite };
   }
   if (bytes[0] === 5) return { kind: 'gremove', groupId: utf8.decode(bytes.slice(1)) };
   if (bytes[0] === 6) return { kind: 'gleave', groupId: utf8.decode(bytes.slice(1)) };
+  if (bytes[0] === 7) return { kind: 'devlist', list: await decodeDeviceList(bytes.slice(1)) };
 
   // Only type 1 is a real file. Anything else is a corrupt/unknown frame — throw
   // so it's dropped, never rendered as a junk "file" in the chat (e.g. a mangled
@@ -677,7 +680,7 @@ async function sendContent(me: IdentityKeys, contact: Contact, content: MessageC
     );
     contact.pendingHeader = header;
   }
-  const message = await ratchetEncrypt(contact.ratchet, frameContent(content));
+  const message = await ratchetEncrypt(contact.ratchet, await frameContent(content));
   const conv = contact.roomId;
   const envelope = contact.pendingHeader
     ? ({ type: 'prekey', conv, x3dh: contact.pendingHeader, message } as const)
@@ -731,6 +734,11 @@ export async function sendGroupRemove(me: IdentityKeys, contact: Contact, groupI
 
 export async function sendGroupLeave(me: IdentityKeys, contact: Contact, groupId: string): Promise<Bytes> {
   return sendContent(me, contact, { kind: 'gleave', groupId });
+}
+
+/** Gossip our updated, master-signed device list to a contact (revocation). */
+export async function sendDeviceList(me: IdentityKeys, contact: Contact, list: DeviceList): Promise<Bytes> {
+  return sendContent(me, contact, { kind: 'devlist', list });
 }
 
 /** Decrypt an incoming envelope; establishes the responder session on first contact. */
@@ -832,7 +840,7 @@ export async function receiveEnvelope(
   }
 
   try {
-    return unframeContent(await ratchetDecrypt(contact.ratchet, envelope.message));
+    return await unframeContent(await ratchetDecrypt(contact.ratchet, envelope.message));
   } catch (e) {
     if (freshHandshake) {
       // The derived session is provably wrong — don't keep half a session around,

@@ -2,7 +2,7 @@
 
 SCYTALE ist gegen **anlasslose Massenüberwachung** gebaut (Chatkontrolle /
 CSAR). Dieses Dokument ist die genaue Aufschlüsselung aller Mechanismen und
-sagt ehrlich, was geschützt ist — und was nicht. Stand: v0.18.0.
+sagt ehrlich, was geschützt ist — und was nicht. Stand: v0.19.0 (Stufe 3c).
 
 **Leitprinzipien:** niemals eigene Krypto erfinden (vetted Primitiven +
 etablierte Protokolle: X3DH, Double Ratchet); der Server ist ein **dummer
@@ -132,6 +132,50 @@ Primitiven beim Start.
   welchen Zweig eine Nachricht nimmt. Nebeneffekt: ein Zweitgerät des Peers kann
   die Session nicht mehr stillschweigend überschreiben — Per-Device-Sessions
   sind Aufgabe von Stufe 3c, kein Zufallsprodukt dieses Pfads.
+
+### Stufe 3c — master-basierter `roomId`, Geräte-Revocation, zweiseitige Tür
+
+- **`roomId` ist master-basiert** (`computeMasterRoomId(eigenerMaster, peerMaster)`,
+  sortiert, mit Domain-Präfix gegen Kollision mit dem alten Geräte-DH-Schema): eine
+  Konversation ist Eigenschaft der **Personen**, nicht der Gerätepaare. Die
+  Autorisierung eines Prekeys ist damit `bytesEqual(behaupteterMaster, gepinnter
+  Master)` — der Peer-`dhPub` ist rostersichtbar und bindet nicht, nur der Master,
+  weil nur seine Geräte einen Cert darunter halten. Fehlschlag = **Ablehnung, nie**
+  in einen Tür-Zweig (das wäre der v0.16.4-Downgrade zurück).
+- **Migration (device→master) ist crash-sicher:** re-**verschlüsselt** unter der
+  neuen roomId-AAD (nie umbenennen — sonst wirft `open()` und der Kontakt
+  verschwände still), schreibt das Neue **vor** dem Löschen des Alten, und mischt
+  bei einer crash-unterbrochenen Doppelung nach „lebende Session gewinnt" statt
+  blind zu überschreiben. Ein `regime`-Marker macht sie idempotent. Alle Re-Key-
+  Stellen (Boot, `acceptMasterChange`, `reconnectContact`, Rotation) laufen durch
+  **eine** Routine.
+- **Geräte-Revocation (Cert UND Listenpräsenz):** ein Prekey von einem Gerät, dessen
+  Cert unter dem gepinnten Master gilt, das aber **nicht in der akzeptierten,
+  master-signierten Geräteliste** steht, wird abgelehnt (`RevokedDeviceError`). Die
+  Liste wird nie implizit aus dem geprüften Gerät gebaut (selbstreferenziell); ein
+  zweites Gerät wird nur durch eine **echte devlist-Aktualisierung** (E2E-Gossip,
+  verifiziert + rollback-geprüft) legitimiert. **Best-effort und so dokumentiert:**
+  Revocation greift für einen Kontakt, sobald er die neuere Liste gesehen hat —
+  dieselbe Eigenschaft wie bei Signal/Element. Der Guard sitzt **vor** dem
+  sim-init-Zweig, sonst zerstörte ein widerrufenes Gerät über den Tie-Break den
+  Live-Ratchet.
+- **Zweiseitige Tür, zwei Vertrauenslabel — nie verschmolzen:**
+  - **Dual-signierte Rotation** (Kette vom gepinnten Master, `verifyRotation`):
+    kryptografisch **bewiesene** Kontinuität → `acceptRotation` schlüsselt den Raum
+    automatisch um und **behält `verified`**.
+  - **Unbewiesener `previousMaster`-Hinweis** (nicht signiert, nicht signierbar,
+    **ausserhalb der AAD** — er authentifiziert nichts): löst nur eine **Merge-
+    Affordance** aus („gibt an, X zu sein — nichts belegt das — Sicherheitsnummer
+    vergleichen"); erst der bewusste `acceptMasterChange` pinnt um und setzt
+    `verified=false`. Kette **beweist** → umschlüsseln; Hinweis **behauptet** → nur
+    fragen.
+- **Denylist global nach Master indiziert** (nicht mehr am Kontakt): löst die
+  Zirkularität (Kontakt aus Master ableiten, aber Master am Kontakt) und sitzt damit
+  strukturell **vor** jeder Zustandsberührung — auf dem Rotations- **und** dem
+  Auto-Create-Pfad. Ein behaupteter Alt-Master auf der Sperrliste wird verworfen,
+  bevor irgendein Lookup passiert; so bleibt kein Downgrade-Pfad neben dem
+  bewachten.
+
 - **`verified` fällt nur durch eine Nutzeraktion**, nie durch Eingehendes. Eine
   Behauptung setzt das Flag **nicht** zurück; erst `acceptMasterChange` — also
   das bewusste Umpinnen — löscht es. Andernfalls könnte jeder, der unsere Inbox
@@ -463,6 +507,13 @@ Header angezeigte **Versionsnummer** hilft beim Abgleich, welcher Build läuft.
 - **Gruppen v1/v2**: „Soft"-Membership per Pairwise-Fan-out ohne kryptografisches
   Re-Keying — ein entferntes Mitglied behält alten Verlauf. Echte Forward-/
   Post-Compromise-Sicherheit bei Mitgliederwechsel bräuchte Sender-Keys/MLS (v3).
+- **Geräte-Revocation greift NICHT in Gruppen** (3c-Grenze): der Bearer-Guard
+  prüft die master-signierte Geräteliste nur für 1:1-Kontakte. Gruppen-Mitglieder
+  entstehen über `ensureMemberContact` ohne `peerDeviceList`, also ist der Guard
+  für sie aus — ein Fan-out an ein widerrufenes Gerät eines Mitglieds wird nicht
+  blockiert. Dieselbe Roster-Fläche, auf der master-basierte Bindung ohnehin nicht
+  mehr gegen ein Zweitgerät verteidigt. Kommt mit v3/MLS; als ausführbare
+  Zielvorgabe festgehalten in `tests/group-revocation.xfail.test.mjs`.
 - **Code-Delivery-Vertrauen**: in der Testphase `autoUpdate` (Server kann Code
   still aktualisieren) → vor Release auf `prompt`. Mitigiert per Reproducible
   Build, nicht eliminiert.

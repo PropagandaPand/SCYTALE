@@ -10,7 +10,7 @@ console.log('\n[QR-Format-Versionierung]');
 const dev = sodium.crypto_sign_keypair();
 const dh = sodium.crypto_box_keypair();
 const eph = sodium.crypto_box_keypair();
-const spk = { id: 7, pub: dh.publicKey, signature: new Uint8Array(64) }; // v2 (Stage 3d) carries N's signed prekey
+const spk = { id: 7, pub: dh.publicKey, signature: await L.sign(dh.publicKey, dev.privateKey) }; // v2 (Stage 3d) carries N's signed prekey
 const req = { deviceSignPub: dev.publicKey, deviceDhPub: dh.publicKey, sasEphPub: eph.publicKey, signedPreKey: spk };
 const token = await L.encodeLinkRequest(req);
 const rt = await L.decodeLinkRequest(token);

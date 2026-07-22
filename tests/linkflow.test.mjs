@@ -22,7 +22,7 @@ console.log('\n[Kopplungs-Krypto: Offer trägt den Master, SAS bindet ihn]');
 
 // 1. N builds the QR request; P decodes it.
 const req = { deviceSignPub: nSign.publicKey, deviceDhPub: nDh.publicKey, sasEphPub: nEph.publicKey,
-  signedPreKey: { id: 3, pub: nDh.publicKey, signature: new Uint8Array(64) } };
+  signedPreKey: { id: 3, pub: nDh.publicKey, signature: await S.sign(nDh.publicKey, nSign.privateKey) } };
 const qr = await S.encodeLinkRequest(req);
 const gotReq = await S.decodeLinkRequest(qr);
 ok('QR-Roundtrip erhält N-Keys',

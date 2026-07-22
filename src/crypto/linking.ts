@@ -36,6 +36,7 @@
  * never over this QR channel.
  */
 import { verifyDeviceCert, signDeviceCert } from './master';
+import { verify } from './identity';
 import {
   signDeviceList,
   verifyDeviceList,
@@ -183,6 +184,13 @@ export async function createLinkGrant(
 ): Promise<{ grant: LinkGrant; newList: DeviceList }> {
   if (deviceInList(currentList, req.deviceSignPub)) {
     throw new Error('Dieses Gerät ist bereits gekoppelt.');
+  }
+  // Verify N's signed-prekey self-signature BEFORE the master vouches for it. The
+  // linking SAS binds only the two masters + ephemerals, not the SPK, so a QR-tamper
+  // could otherwise splice an attacker's SPK into a master-signed list (peers would
+  // then fail to initiate to N → silent inbound reachability DoS). (Review fund 3.)
+  if (!(await verify(req.signedPreKey.pub, req.signedPreKey.signature, req.deviceSignPub))) {
+    throw new Error('Signed-Prekey-Signatur des neuen Geräts ungültig — Kopplung abgebrochen.');
   }
   const deviceCert = await signDeviceCert(masterPriv, epoch, req.deviceSignPub, req.deviceDhPub);
   const entry: DeviceEntry = {

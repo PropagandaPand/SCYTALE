@@ -113,6 +113,9 @@ export async function verifyDeviceList(
   }
   for (const d of list.devices) {
     if (!(await verifyDeviceCert(list.masterPub, list.epoch, d.signPub, d.dhPub, d.deviceCert))) return false;
+    // A carried signed prekey must be self-signed by the device it belongs to, so a
+    // spliced/forged SPK is rejected everywhere the list is verified (Review fund 3).
+    if (d.signedPreKey && !(await verify(d.signedPreKey.pub, d.signedPreKey.signature, d.signPub))) return false;
   }
   return true;
 }

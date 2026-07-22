@@ -37,7 +37,7 @@ import {
   completeLinkOnP,
   type LinkSession,
 } from './lib/linkflow';
-import { loadOrCreateOwnDeviceList } from './lib/devices';
+import { loadOrCreateOwnDeviceList, adoptDeviceList } from './lib/devices';
 import {
   makeContact,
   makeContactFromHeader,
@@ -547,6 +547,35 @@ export function Messenger({ dek, onLock }: Props) {
     }
   }
 
+  // When a peer device is revoked, sweep this conversation's still-open delivery
+  // rows for that device to 'stale' — so the aggregate drops it from the CURRENT
+  // device set (Review fund 6): a message the person actually received on their
+  // other devices stops showing a permanent partial-failure. A 'sent' row stays
+  // (once delivered, always delivered).
+  function sweepRevokedDeliveries(contact: Contact) {
+    const list = contact.peerDeviceList;
+    const arr = messagesRef.current[contact.roomId];
+    if (!list || !arr) return;
+    const live = new Set(list.devices.map((d) => bytesToB64(d.signPub)));
+    let changed = false;
+    for (let i = 0; i < arr.length; i++) {
+      const dels = arr[i].deliveries;
+      if (!dels) continue;
+      const updated = dels.map((d) =>
+        d.status !== 'stale' && d.status !== 'sent' && !live.has(d.device) ? { ...d, status: 'stale' as const } : d,
+      );
+      if (updated.some((d, k) => d !== dels[k])) {
+        arr[i] = { ...arr[i], deliveries: updated };
+        changed = true;
+      }
+    }
+    if (changed) {
+      void saveMessages(dek, contact.roomId, arr);
+      commitMessages();
+      bump();
+    }
+  }
+
   // ── roomId migration (device-DH → master) ──────────────────────────
   // Move one contact's storage AND its in-memory maps from oldRoomId to its
   // already-set contact.roomId. The single crash-safe routine every mutation
@@ -817,6 +846,26 @@ export function Messenger({ dek, onLock }: Props) {
         /* unreachable contact — best effort, they learn it next time */
       }
     }
+    // Also deliver my updated list to my OWN other devices (via the self-contact), so
+    // a device linked earlier learns about a sibling linked later and self-syncs to
+    // it too (Review fund 4). The recipient adopts it into its stored own list.
+    const self = await ensureSelfContact();
+    if (self && self.peerDeviceList && self.peerDeviceList.devices.length >= 2) {
+      try {
+        const { deliveries } = await enqueueInbox(async () => {
+          const r = await fanoutDeliveries(id, self, { kind: 'devlist', list }, randomMid(), id.sign.publicKey);
+          await saveContact(dek, self);
+          return r;
+        });
+        for (const d of deliveries) {
+          const room = await inboxRoom(d.deviceSignPub);
+          connectDeviceInbox(room);
+          relaysRef.current.get(room)?.send(d.sealed, randomMid());
+        }
+      } catch {
+        /* best effort */
+      }
+    }
   }
 
   async function onPConfirmSas() {
@@ -1015,6 +1064,14 @@ export function Messenger({ dek, onLock }: Props) {
         // must not live only in RAM — the v0.17.1 lesson).
         if (await applyDeviceListUpdate(contact, content.list, retiredMastersRef.current)) {
           await saveContact(dek, contact);
+          sweepRevokedDeliveries(contact); // fund 6: drop revoked devices from open bubbles
+          // If this is MY OWN list (delivered from my primary to the self-contact),
+          // adopt it as my stored own list too, so a secondary device's self-sync
+          // targets a later-linked sibling as well (Review fund 4).
+          if (bytesEqual(contact.peerMasterPub, id.master.publicKey)) {
+            await adoptDeviceList(dek, id, content.list);
+            setMultiDevice(content.list.devices.length > 1);
+          }
         }
       } else if (content.kind === 'rotation') {
         // A dual-signed rotation PROVES the peer's master continuity → acceptRotation

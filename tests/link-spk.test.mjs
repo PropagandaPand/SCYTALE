@@ -58,5 +58,12 @@ ok('bundleFromDeviceEntry(N) initiierbar', S.bundleFromDeviceEntry(master.public
 const tampered = { ...newList, devices: newList.devices.map((d) => (eqh(d.signPub, N.id.sign.publicKey) ? { ...d, signedPreKey: { ...ne.signedPreKey, pub: (sodium.crypto_box_keypair()).publicKey } } : d)) };
 ok('gefälschter N-SPK bricht die Master-Signatur (Negativkontrolle)', (await S.verifyDeviceList(tampered, master.publicKey, 1)) === false);
 
+// FUND 3: a QR-tampered SPK (valid-looking pub, but signature NOT by N's device key)
+// must be refused by createLinkGrant — the master won't vouch for an unverified SPK.
+const badReq = { ...req, signedPreKey: { id: 9, pub: (sodium.crypto_box_keypair()).publicKey, signature: new Uint8Array(64) } };
+let grantRejected = false;
+try { await S.createLinkGrant(master.privateKey, master.publicKey, 1, currentList, badReq); } catch { grantRejected = true; }
+ok('createLinkGrant lehnt einen QR-getamperten SPK ab (Fund 3)', grantRejected === true);
+
 console.log(`\n${pass} ok, ${fail} fail`);
 process.exit(fail ? 1 : 0);

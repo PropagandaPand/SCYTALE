@@ -329,6 +329,16 @@ export function Messenger({ dek, onLock }: Props) {
   const commitMessages = () => setMessages({ ...messagesRef.current });
 
   async function appendMessage(roomId: string, msg: ChatMessage) {
+    // Hydrate a COLD room from storage before appending. Boot preloads every
+    // contact/group room (init effect), so post-boot `undefined` means a room with
+    // no card — e.g. a self-sync display room for a peer this device hasn't added
+    // yet. Without this, the first append would start from [] and saveMessages would
+    // overwrite the persisted self-synced history (Review fund, LOW, cross-session).
+    // Re-check AFTER the await: never clobber a value a concurrent path just set.
+    if (messagesRef.current[roomId] === undefined) {
+      const persisted = await loadMessages(dek, roomId);
+      if (messagesRef.current[roomId] === undefined) messagesRef.current[roomId] = persisted;
+    }
     messagesRef.current[roomId] = [...(messagesRef.current[roomId] ?? []), msg];
     commitMessages();
     await saveMessages(dek, roomId, messagesRef.current[roomId]);
@@ -1180,10 +1190,11 @@ export function Messenger({ dek, onLock }: Props) {
       // already have SELF-SYNCED sent messages into exactly this roomId before I
       // added the peer here (the display room = computeMasterRoomId(myMaster, peer)).
       // Unconditional `= []` would silently discard that history (Review fund, LOW).
-      // Fall back to the PERSISTED log (loadMessages → [] if none), so a self-sync
-      // from a previous session survives adding the contact too, not just this one.
-      messagesRef.current[contact.roomId] =
-        messagesRef.current[contact.roomId] ?? (await loadMessages(dek, contact.roomId));
+      // Load the PERSISTED log first (→ [] if none), THEN read messagesRef — reading
+      // it only AFTER the await keeps a concurrent onInbox self-sync (addBundle is a
+      // UI handler, not enqueueInbox-serialised) from being overwritten (TOCTOU).
+      const persistedLog = await loadMessages(dek, contact.roomId);
+      messagesRef.current[contact.roomId] = messagesRef.current[contact.roomId] ?? persistedLog;
       commitMessages();
       await saveContact(dek, contact);
       await connectSend(contact);

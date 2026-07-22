@@ -10,21 +10,23 @@ console.log('\n[QR-Format-Versionierung]');
 const dev = sodium.crypto_sign_keypair();
 const dh = sodium.crypto_box_keypair();
 const eph = sodium.crypto_box_keypair();
-const req = { deviceSignPub: dev.publicKey, deviceDhPub: dh.publicKey, sasEphPub: eph.publicKey };
+const spk = { id: 7, pub: dh.publicKey, signature: new Uint8Array(64) }; // v2 (Stage 3d) carries N's signed prekey
+const req = { deviceSignPub: dev.publicKey, deviceDhPub: dh.publicKey, sasEphPub: eph.publicKey, signedPreKey: spk };
 const token = await L.encodeLinkRequest(req);
 const rt = await L.decodeLinkRequest(token);
-ok('roundtrip erhält alle drei Keys',
+ok('roundtrip erhält alle Keys + Signed Prekey',
   sodium.to_hex(rt.deviceSignPub) === sodium.to_hex(dev.publicKey) &&
   sodium.to_hex(rt.deviceDhPub) === sodium.to_hex(dh.publicKey) &&
-  sodium.to_hex(rt.sasEphPub) === sodium.to_hex(eph.publicKey));
+  sodium.to_hex(rt.sasEphPub) === sodium.to_hex(eph.publicKey) &&
+  rt.signedPreKey.id === 7 && sodium.to_hex(rt.signedPreKey.pub) === sodium.to_hex(dh.publicKey));
 
-// A "v2" payload: different version byte AND different length.
-const v2 = new Uint8Array(1 + 32 + 32 + 32 + 16);
-v2[0] = 2;
-const v2tok = sodium.to_base64(v2, sodium.base64_variants.URLSAFE_NO_PADDING);
+// A future "v3" payload: different version byte → version error, not "invalid".
+const v3 = new Uint8Array(1 + 32 + 32 + 32 + 16);
+v3[0] = 3;
+const v3tok = sodium.to_base64(v3, sodium.base64_variants.URLSAFE_NO_PADDING);
 let msg = '';
-try { await L.decodeLinkRequest(v2tok); } catch (e) { msg = e.message; }
-ok('v2-Payload meldet Versions-Fehler, nicht "ungültig"', /Format-Version 2/.test(msg));
+try { await L.decodeLinkRequest(v3tok); } catch (e) { msg = e.message; }
+ok('v3-Payload meldet Versions-Fehler, nicht "ungültig"', /Format-Version 3/.test(msg));
 ok('Versions-Fehler nennt Update als Ausweg', /aktualisieren/i.test(msg));
 
 let msg2 = '';
@@ -32,7 +34,7 @@ try { await L.decodeLinkRequest('!!!not base64!!!'); } catch (e) { msg2 = e.mess
 ok('echter Müll bleibt "Ungültiger Kopplungs-Code"', /Ungültiger Kopplungs-Code/.test(msg2));
 
 let msg3 = '';
-const short = new Uint8Array([1, 2, 3]);
+const short = new Uint8Array([2, 1, 2, 3]); // current version byte, wrong length
 try { await L.decodeLinkRequest(sodium.to_base64(short, sodium.base64_variants.URLSAFE_NO_PADDING)); }
 catch (e) { msg3 = e.message; }
 ok('richtige Version, falsche Länge -> ungültig', /Ungültiger Kopplungs-Code/.test(msg3));

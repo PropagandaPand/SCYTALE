@@ -2,6 +2,7 @@ import { useEffect, useReducer, useRef, useState, type ChangeEvent } from 'react
 import { loadOrCreateIdentity, fingerprintOf } from './lib/identity';
 import {
   loadOrCreatePreKeys,
+  ownSpkPublic,
   savePreKeys,
   currentBundle,
   findSignedPreKey,
@@ -615,9 +616,10 @@ export function Messenger({ dek, onLock }: Props) {
   // N starts: show our QR, then wait for P's offer on our inbox.
   async function startJoinAsNewDevice() {
     const id = identityRef.current;
-    if (!id) return;
+    const pre = prekeysRef.current;
+    if (!id || !pre) return;
     setError('');
-    const { session, qrToken } = await startLinkOnN(id);
+    const { session, qrToken } = await startLinkOnN(id, ownSpkPublic(pre));
     linkSessionRef.current = session;
     linkConfirmedRef.current = false;
     linkPendingGrantRef.current = null;
@@ -760,11 +762,12 @@ export function Messenger({ dek, onLock }: Props) {
 
   async function onPConfirmSas() {
     const id = identityRef.current;
+    const pre = prekeysRef.current;
     const session = linkSessionRef.current;
-    if (!id || !session) return;
+    if (!id || !pre || !session) return;
     setLinkBusy(true);
     try {
-      const currentList = await loadOrCreateOwnDeviceList(dek, id);
+      const currentList = await loadOrCreateOwnDeviceList(dek, id, ownSpkPublic(pre));
       if (!currentList) throw new Error('Geräteliste nicht verfügbar.');
       const newList = await completeLinkOnP(dek, id, session, currentList, sendToInbox);
       // Gossip the updated list so contacts learn the new device (and, later,

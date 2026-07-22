@@ -19,6 +19,7 @@ import {
   type SignedPreKey,
   type OneTimePreKey,
   type PreKeyBundle,
+  type SignedPreKeyPublic,
 } from '../crypto';
 import { loadRecord, saveRecord } from './db';
 
@@ -146,6 +147,12 @@ export async function savePreKeys(dek: CryptoKey, st: PreKeyState): Promise<void
  */
 export function currentBundle(identity: IdentityKeys, st: PreKeyState): PreKeyBundle {
   return buildBundle(identity, st.signedPreKey);
+}
+
+/** Our signed prekey in the PUBLIC form the device list carries (Stage 3d), so a
+ *  peer can initiate X3DH to this device even before it ever wrote to them. */
+export function ownSpkPublic(st: PreKeyState): SignedPreKeyPublic {
+  return { id: st.signedPreKey.id, pub: st.signedPreKey.keyPair.publicKey, signature: st.signedPreKey.signature };
 }
 
 export function findSignedPreKey(st: PreKeyState, id: number): SignedPreKey | undefined {

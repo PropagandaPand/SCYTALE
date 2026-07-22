@@ -41,7 +41,6 @@ import {
   makeContact,
   makeContactFromHeader,
   sendMessage,
-  sendFile,
   sendProfile,
   sendGroupMessage,
   sendGroupInvite,
@@ -51,6 +50,7 @@ import {
   resolveContactByConv,
   hasSession,
   randomMid,
+  fanoutDeliveries,
   acceptMasterChange,
   acceptRotation,
   reconnectContact,
@@ -92,7 +92,7 @@ import {
   type Sticker,
 } from './lib/stickers';
 import { pushSupported, enablePush, disablePush, currentSubscription } from './lib/push';
-import { loadMessages, saveMessages, clearMessages, type ChatMessage } from './lib/messages';
+import { loadMessages, saveMessages, clearMessages, aggregateDelivery, type ChatMessage, type DeviceDelivery } from './lib/messages';
 import { RelayClient, type RelayStatus } from './lib/relay';
 import { makeQr } from './lib/qr';
 import { bytesToB64, b64ToBytes } from './lib/bytes';
@@ -143,6 +143,37 @@ function incomingMessage(content: MessageContent, mid: string): ChatMessage {
   }
   // text (profile is handled separately and never reaches here)
   return { mine: false, text: content.kind === 'text' ? content.text : '', ts: Date.now(), mid };
+}
+
+// The delivery indicator for one of MY messages. Stage 3d: derive the honest
+// AGGREGATE over per-device deliveries (all sent → ✓✓; some sent → "an N/M
+// Geräten"; none → ⚠); a `stale` device (revoked in flight) is out of the
+// denominator. Falls back to the legacy single status for groups / pre-3d rows.
+function msgStatusEl(m: ChatMessage) {
+  let kind: 'sent' | 'pending' | 'partial' | 'failed' = 'sent';
+  let text: string | undefined;
+  if (m.deliveries && m.deliveries.length) {
+    const a = aggregateDelivery(m.deliveries);
+    kind = a.label;
+    if (a.label === 'partial') text = `an ${a.sent}/${a.total} Geräten`;
+  } else if (m.status === 'failed') {
+    kind = 'failed';
+  } else if (m.status === 'pending') {
+    kind = 'pending';
+  }
+  if (kind === 'failed') {
+    return (
+      <span className="msg-failed" title="Nicht zugestellt">
+        ⚠ nicht zugestellt
+      </span>
+    );
+  }
+  return (
+    <span className="msg-check" title={text} style={{ opacity: kind === 'pending' ? 0.35 : 1 }}>
+      <IconDoubleCheck size={13} />
+      {kind === 'partial' && <span className="msg-partial"> {text}</span>}
+    </span>
+  );
 }
 
 function downloadFile(f: { name: string; mime: string; dataB64: string }) {
@@ -378,20 +409,34 @@ export function Messenger({ dek, onLock }: Props) {
       }, 10_000),
     );
   }
-  function markStatus(mid: string | null, status: 'sent' | 'failed', errorMsg?: string) {
+  function markStatus(id: string | null, status: 'sent' | 'failed', errorMsg?: string) {
     if (status === 'failed' && errorMsg) setError(errorMsg);
-    if (!mid) return;
-    clearAckTimer(mid);
+    if (!id) return;
+    clearAckTimer(id);
     for (const roomId of Object.keys(messagesRef.current)) {
       const arr = messagesRef.current[roomId];
-      const idx = arr.findIndex((m) => m.mid === mid);
+      // Stage 3d fan-out: `id` is a per-DEVICE deliveryId. Update just that delivery
+      // (per-delivery "once sent always sent"), then the bubble re-derives its
+      // aggregate at render (aggregateDelivery). A failure of ONE device never
+      // rolls back the others.
+      const fi = arr.findIndex((m) => m.deliveries?.some((d) => d.deliveryId === id));
+      if (fi >= 0) {
+        const dels = arr[fi].deliveries!;
+        const d = dels.find((x) => x.deliveryId === id)!;
+        if (d.status === 'sent' || d.status === 'stale') return; // terminal per delivery
+        arr[fi] = { ...arr[fi], deliveries: dels.map((x) => (x.deliveryId === id ? { ...x, status } : x)) };
+        void saveMessages(dek, roomId, arr);
+        commitMessages();
+        bump();
+        return;
+      }
+      // Legacy single-status (groups / pre-3d records).
+      const idx = arr.findIndex((m) => m.mid === id);
       if (idx >= 0) {
         const cur = arr[idx].status;
         if (cur === status) return;
         // INVARIANT: once 'sent' (relay durably has it), always 'sent'. A late
-        // nack/timeout must never downgrade a confirmed delivery — that would
-        // make the checkmark lie in the other direction. Only failed → sent
-        // (recovery after a reconnect flush) is allowed.
+        // nack/timeout must never downgrade a confirmed delivery.
         if (cur === 'sent') return;
         arr[idx] = { ...arr[idx], status };
         void saveMessages(dek, roomId, arr);
@@ -400,6 +445,46 @@ export function Messenger({ dek, onLock }: Props) {
         return;
       }
     }
+  }
+
+  // A relay to ONE peer device's inbox (Stage 3d fan-out). Ack/nack carry the
+  // per-delivery id, so markStatus finds the right per-device entry.
+  function connectDeviceInbox(room: string) {
+    if (relaysRef.current.has(room)) return;
+    const client = new RelayClient(room, {
+      onAck: (id) => markStatus(id, 'sent'),
+      onNack: (id) => markStatus(id, 'failed', 'An ein Gerät nicht zugestellt — Postfach voll.'),
+    });
+    relaysRef.current.set(room, client);
+    client.connect();
+  }
+
+  // Encrypt `content` for EVERY authorised peer device and send each copy to its
+  // own inbox, all sharing one `mid`. The advanced per-device sessions are persisted
+  // BEFORE anything hits the wire, on the send serialization chain (Invariant I/II
+  // per session). Returns the per-device delivery rows for the local bubble.
+  async function fanoutSend(contact: Contact, content: MessageContent, mid: string): Promise<DeviceDelivery[]> {
+    const id = identityRef.current;
+    if (!id) return [];
+    const { deliveries, unreachable } = await enqueueInbox(async () => {
+      const r = await fanoutDeliveries(id, contact, content, mid);
+      await saveContact(dek, contact); // persist advanced sessions before the wire
+      return r;
+    });
+    const rows: DeviceDelivery[] = [];
+    for (const d of deliveries) {
+      const deliveryId = randomMid();
+      const room = await inboxRoom(d.deviceSignPub);
+      connectDeviceInbox(room);
+      relaysRef.current.get(room)?.send(d.sealed, deliveryId);
+      startAckTimer(deliveryId);
+      rows.push({ device: bytesToB64(d.deviceSignPub), deliveryId, status: 'pending' });
+    }
+    // A device we can't initiate to yet (authorised, but no signed prekey learned)
+    // is out of the reachable set — 'stale' drops it from the denominator, never a
+    // permanent failure. It becomes reachable once its list SPK is gossiped.
+    for (const u of unreachable) rows.push({ device: bytesToB64(u), deliveryId: '', status: 'stale' });
+    return rows;
   }
 
   // ── roomId migration (device-DH → master) ──────────────────────────
@@ -1493,20 +1578,13 @@ export function Messenger({ dek, onLock }: Props) {
     if (!contact) return;
     try {
       // ONE E2E mid: stamped into the AEAD frame, reused for the local echo and
-      // (Stage 3d) shared across every fan-out + self-sync copy so they dedup.
+      // shared across every fan-out (+ self-sync) copy so they dedup. fanoutSend
+      // encrypts per authorised device, persists the advanced sessions before the
+      // wire, and returns per-device delivery rows for the aggregate bubble.
       const mid = randomMid();
-      const envelope = await encryptAndPersist(contact, () => sendMessage(id, contact, text, mid));
-      let room = sendRoomRef.current.get(contact.roomId);
-      if (!room) {
-        await connectSend(contact);
-        room = sendRoomRef.current.get(contact.roomId);
-      }
-      const relay = room ? relaysRef.current.get(room) : undefined;
-      relay?.send(envelope, mid);
-      await appendMessage(activeRoom, { mine: true, text, ts: Date.now(), mid, status: 'pending' });
-      startAckTimer(mid);
+      const deliveries = await fanoutSend(contact, { kind: 'text', text }, mid);
+      await appendMessage(activeRoom, { mine: true, text, ts: Date.now(), mid, deliveries });
       setMsgInput('');
-      await saveContact(dek, contact);
       void ensureProfileSent(contact);
       bump();
     } catch (e) {
@@ -1557,9 +1635,8 @@ export function Messenger({ dek, onLock }: Props) {
       }
       const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
       if (!contact) return;
-      await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendFile(id, contact, name, mime, data, mid)), mid);
-      await appendMessage(contact.roomId, { ...localMsg, status: 'pending' });
-      startAckTimer(mid);
+      const deliveries = await fanoutSend(contact, { kind: 'file', name, mime, data }, mid);
+      await appendMessage(contact.roomId, { ...localMsg, deliveries });
       await saveContact(dek, contact);
       bump();
     } catch (err) {
@@ -1613,13 +1690,8 @@ export function Messenger({ dek, onLock }: Props) {
       }
       const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
       if (!contact) return;
-      await sendEnvelopeTo(
-        contact,
-        await encryptAndPersist(contact, () => sendFile(id, contact, STICKER_FILENAME, st.mime, data, mid)),
-        mid,
-      );
-      await appendMessage(contact.roomId, { ...localMsg, status: 'pending' });
-      startAckTimer(mid);
+      const deliveries = await fanoutSend(contact, { kind: 'file', name: STICKER_FILENAME, mime: st.mime, data }, mid);
+      await appendMessage(contact.roomId, { ...localMsg, deliveries });
       bump();
     } catch (err) {
       setError('Sticker fehlgeschlagen: ' + (err as Error).message);
@@ -1703,9 +1775,8 @@ export function Messenger({ dek, onLock }: Props) {
       }
       const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
       if (!contact) return;
-      await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendFile(id, contact, name, mime, data, mid)), mid);
-      await appendMessage(contact.roomId, { ...localMsg, status: 'pending' });
-      startAckTimer(mid);
+      const deliveries = await fanoutSend(contact, { kind: 'file', name, mime, data }, mid);
+      await appendMessage(contact.roomId, { ...localMsg, deliveries });
       await saveContact(dek, contact);
       bump();
     } catch (e) {
@@ -2449,16 +2520,7 @@ export function Messenger({ dek, onLock }: Props) {
               )}
               <span className="meta">
                 {fmtClock(m.ts)}
-                {m.mine &&
-                  (m.status === 'failed' ? (
-                    <span className="msg-failed" title="Nicht zugestellt">
-                      ⚠ nicht zugestellt
-                    </span>
-                  ) : (
-                    <span className="msg-check" style={{ opacity: m.status === 'pending' ? 0.35 : 1 }}>
-                      <IconDoubleCheck size={13} />
-                    </span>
-                  ))}
+                {m.mine && msgStatusEl(m)}
               </span>
             </div>
           ))}
@@ -2565,16 +2627,7 @@ export function Messenger({ dek, onLock }: Props) {
               )}
               <span className="meta">
                 {fmtClock(m.ts)}
-                {m.mine &&
-                  (m.status === 'failed' ? (
-                    <span className="msg-failed" title="Nicht zugestellt">
-                      ⚠ nicht zugestellt
-                    </span>
-                  ) : (
-                    <span className="msg-check" style={{ opacity: m.status === 'pending' ? 0.35 : 1 }}>
-                      <IconDoubleCheck size={13} />
-                    </span>
-                  ))}
+                {m.mine && msgStatusEl(m)}
               </span>
             </div>
           ))}

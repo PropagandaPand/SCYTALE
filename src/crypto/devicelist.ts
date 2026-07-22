@@ -18,11 +18,25 @@ import { sign, verify } from './identity';
 import { verifyDeviceCert, epochBytes } from './master';
 import { concatBytes, utf8, b64encode, b64decode } from './codec';
 import type { Bytes } from './types';
+import type { PreKeyBundle } from './prekeys';
+
+/** A device's SIGNED prekey, public half — the ONE stable prekey (Signal cadence,
+ *  rotates rarely). Carried in the device list so a peer can INITIATE X3DH to a
+ *  device it never heard from (Stage 3d fan-out). There are no one-time prekeys
+ *  for a silent device (no prekey server), so the no-OPK X3DH is used. `pub` is
+ *  bound into the master-signed listMsg → a stale SPK travels only with a stale
+ *  (lower-version) list, which isNewerDeviceList rejects (rollback protection). */
+export interface SignedPreKeyPublic {
+  id: number;
+  pub: Bytes; // X25519 signed-prekey public
+  signature: Bytes; // device identity-sign key's signature over pub
+}
 
 export interface DeviceEntry {
   signPub: Bytes; // Ed25519 device
   dhPub: Bytes; // X25519 device
   deviceCert: Bytes; // master sig over (epoch, signPub, dhPub)
+  signedPreKey?: SignedPreKeyPublic; // present on 3d lists → enables initiating to a silent device
 }
 
 export interface DeviceList {
@@ -46,7 +60,14 @@ function listMsg(masterPub: Bytes, epoch: number, version: number, devices: Devi
   // masterPub is signed along: it costs nothing and removes a whole class of
   // confusion where a signature verifies under a key the message never named.
   const parts: Bytes[] = [CTX, masterPub, epochBytes(epoch), epochBytes(version)];
-  for (const d of sorted) parts.push(d.signPub, d.dhPub);
+  // The SIGNED-prekey public is bound in too (when present), so the master vouches
+  // for it and it can't be spliced/rolled back independently of the list version.
+  // A device WITHOUT a signed prekey (legacy/v1 list) pushes nothing extra → the
+  // signed message is byte-identical to the old format, so old lists still verify.
+  for (const d of sorted) {
+    parts.push(d.signPub, d.dhPub);
+    if (d.signedPreKey) parts.push(d.signedPreKey.pub);
+  }
   return concatBytes(...parts);
 }
 
@@ -118,18 +139,23 @@ export function deviceInList(list: DeviceList, deviceSignPub: Bytes): boolean {
 
 // --- (de)serialisation — used for vault storage AND for wire distribution ---
 
+interface WireSpk {
+  id: number;
+  pub: string;
+  signature: string;
+}
 interface DeviceListWire {
-  v: 1;
+  v: 1 | 2; // v2 (Stage 3d) added the optional per-device signedPreKey
   masterPub: string;
   epoch: number;
   version: number;
-  devices: { signPub: string; dhPub: string; deviceCert: string }[];
+  devices: { signPub: string; dhPub: string; deviceCert: string; signedPreKey?: WireSpk }[];
   listSig: string;
 }
 
 export async function encodeDeviceList(list: DeviceList): Promise<Bytes> {
   const wire: DeviceListWire = {
-    v: 1,
+    v: 2,
     masterPub: await b64encode(list.masterPub),
     epoch: list.epoch,
     version: list.version,
@@ -138,6 +164,15 @@ export async function encodeDeviceList(list: DeviceList): Promise<Bytes> {
         signPub: await b64encode(d.signPub),
         dhPub: await b64encode(d.dhPub),
         deviceCert: await b64encode(d.deviceCert),
+        ...(d.signedPreKey
+          ? {
+              signedPreKey: {
+                id: d.signedPreKey.id,
+                pub: await b64encode(d.signedPreKey.pub),
+                signature: await b64encode(d.signedPreKey.signature),
+              },
+            }
+          : {}),
       })),
     ),
     listSig: await b64encode(list.listSig),
@@ -147,7 +182,7 @@ export async function encodeDeviceList(list: DeviceList): Promise<Bytes> {
 
 export async function decodeDeviceList(bytes: Bytes): Promise<DeviceList> {
   const wire = JSON.parse(utf8.decode(bytes)) as DeviceListWire;
-  if (wire.v !== 1) throw new Error('Unbekanntes DeviceList-Format.');
+  if (wire.v !== 1 && wire.v !== 2) throw new Error('Unbekanntes DeviceList-Format.');
   return {
     masterPub: await b64decode(wire.masterPub),
     epoch: wire.epoch,
@@ -157,8 +192,34 @@ export async function decodeDeviceList(bytes: Bytes): Promise<DeviceList> {
         signPub: await b64decode(d.signPub),
         dhPub: await b64decode(d.dhPub),
         deviceCert: await b64decode(d.deviceCert),
+        ...(d.signedPreKey
+          ? {
+              signedPreKey: {
+                id: d.signedPreKey.id,
+                pub: await b64decode(d.signedPreKey.pub),
+                signature: await b64decode(d.signedPreKey.signature),
+              },
+            }
+          : {}),
       })),
     ),
     listSig: await b64decode(wire.listSig),
+  };
+}
+
+/** Build a PreKeyBundle for INITIATING X3DH to a specific device from its list
+ *  entry, so we can fan out to a device we have no session with. Returns null if
+ *  the entry carries no signed prekey (a legacy/v1 device we can't initiate to —
+ *  we can still RECEIVE from it). No one-time prekey: silent devices have none. */
+export function bundleFromDeviceEntry(masterPub: Bytes, epoch: number, entry: DeviceEntry): PreKeyBundle | null {
+  if (!entry.signedPreKey) return null;
+  return {
+    masterPub,
+    epoch,
+    deviceCert: entry.deviceCert,
+    identitySignPub: entry.signPub,
+    identityDhPub: entry.dhPub,
+    signedPreKey: { id: entry.signedPreKey.id, pub: entry.signedPreKey.pub, signature: entry.signedPreKey.signature },
+    oneTimePreKey: undefined,
   };
 }

@@ -82,8 +82,7 @@ if (typeof S.computeMasterRoomId === 'function') {
     peerDhPub: bobGood.dh.publicKey,
     peerFingerprint: 'fp',
     peerDeviceList: list, // ← ZIEL-FELD, heute von receiveEnvelope ignoriert
-    ratchet: null,
-    pendingHeader: null,
+    sessions: new Map(),
   };
 
   // A prekey from the REVOKED device: cert valid, master matches, room matches —

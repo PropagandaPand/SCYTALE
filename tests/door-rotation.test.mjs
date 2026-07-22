@@ -52,8 +52,7 @@ const mkContact = async () => ({
   peerFingerprint: 'fp',
   verified: true,
   regime: 'master',
-  ratchet: null,
-  pendingHeader: null,
+  sessions: new Map(),
 });
 
 console.log('\n[Zielvorgabe: Tür — Kette beweist vs. Hinweis behauptet]');

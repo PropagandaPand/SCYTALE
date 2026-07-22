@@ -41,8 +41,7 @@ const contact = {
   peerDhPub: first.dh.publicKey,
   peerFingerprint: 'fp',
   regime: 'master',
-  ratchet: null,
-  pendingHeader: null,
+  sessions: new Map(),
 };
 
 // The implicit rule already holds (deviceAuthorized is built): only the pinned

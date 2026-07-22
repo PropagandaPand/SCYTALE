@@ -46,7 +46,7 @@ const first = await S.openPayload(bob, await S.sendMessage(alice, aliceContact, 
 const firstEnv = await S.decodeEnvelope(first.payload);
 const bobContact = await S.makeContactFromHeader(S.asMasterPub(bob.master.publicKey), firstEnv.x3dh);
 await S.receiveEnvelope(bob, bobContact, firstEnv, bobLookup);
-ok('Vorbedingung: Bobs Kontakt für Alice etabliert', bobContact.ratchet !== null);
+ok('Vorbedingung: Bobs Kontakt für Alice etabliert', S.hasSession(bobContact));
 
 // Alice's device list has TWO devices, signed under alice's master. Alice gossips.
 const aliceList = await S.signDeviceList(alice.master.privateKey, alice.master.publicKey, 1, 2, [

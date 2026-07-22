@@ -44,9 +44,11 @@ const bobBundle = S.currentBundle(bob, { signedPreKey: bobSpk, oneTimePreKeys: [
 // Alice initiates to Bob and is now the INITIATOR IN-FLIGHT (ratchet + pendingHeader).
 const aliceContact = await S.makeContact(S.asMasterPub(alice.master.publicKey), bobBundle);
 await S.sendMessage(alice, aliceContact, 'hallo Bob');
-const ratchetBefore = aliceContact.ratchet;
+// The initiator session lives under Bob's device (Stage 3d per-device sessions).
+const aSess = () => S.sessionFor(aliceContact, bob.sign.publicKey);
+const ratchetBefore = aSess()?.ratchet;
 ok('Vorbedingung: in-flight-Initiator (Ratchet + pendingHeader gesetzt)',
-  aliceContact.ratchet !== null && aliceContact.pendingHeader !== null);
+  aSess()?.ratchet != null && aSess()?.pendingHeader != null);
 
 console.log('\n[DA-4: gefälschtes Prekey zerstört die in-flight-Session NICHT]');
 // Forged prekey: bob's PUBLIC master + signPub (pass the top guards), garbage cert.
@@ -73,8 +75,8 @@ try {
 // NEGATIVE CONTROL: if the forged cert were NOT rejected, the whole test is
 // meaningless — assert it actually threw.
 ok('gefälschtes Prekey wird abgewiesen (Negativkontrolle)', threwPrekey === true);
-ok('Ratchet UNVERÄNDERT (nicht genullt)', aliceContact.ratchet !== null && aliceContact.ratchet === ratchetBefore);
-ok('pendingHeader UNVERÄNDERT (nicht gelöscht)', aliceContact.pendingHeader !== null);
+ok('Ratchet UNVERÄNDERT (nicht genullt)', ratchetBefore != null && aSess()?.ratchet === ratchetBefore);
+ok('pendingHeader UNVERÄNDERT (nicht gelöscht)', aSess()?.pendingHeader != null);
 
 console.log('\n[F: gefälschtes msg löscht pendingHeader NICHT]');
 const forgedMsg = { type: 'msg', conv: aliceContact.roomId, message: new Uint8Array(48) };
@@ -85,8 +87,8 @@ try {
   threwMsg = true;
 }
 ok('gefälschtes msg wird abgewiesen (Negativkontrolle)', threwMsg === true);
-ok('pendingHeader nach gefälschtem msg noch gesetzt', aliceContact.pendingHeader !== null);
-ok('Ratchet nach gefälschtem msg noch da', aliceContact.ratchet !== null);
+ok('pendingHeader nach gefälschtem msg noch gesetzt', aSess()?.pendingHeader != null);
+ok('Ratchet nach gefälschtem msg noch da', aSess()?.ratchet != null);
 
 console.log(`\n${pass} ok, ${fail} fail`);
 process.exit(fail ? 1 : 0);

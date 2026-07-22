@@ -31,8 +31,7 @@ const mkContact = async () => ({
   peerFingerprint: 'fp',
   verified: true,
   regime: 'master',
-  ratchet: null,
-  pendingHeader: null,
+  sessions: new Map(),
 });
 
 const envelope = (conv, idty, masterPub, cert) => ({

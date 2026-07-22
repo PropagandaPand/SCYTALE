@@ -49,6 +49,7 @@ import {
   sendGroupLeave,
   receiveEnvelope,
   resolveContactByConv,
+  hasSession,
   acceptMasterChange,
   acceptRotation,
   reconnectContact,
@@ -463,7 +464,7 @@ export function Messenger({ dek, onLock }: Props) {
     }
 
     // Group by the TARGET master-roomId to detect crash-interrupted duplicates.
-    const score = (c: Contact) => (c.ratchet ? 1_000_000 : 0) + (messagesRef.current[c.roomId]?.length ?? 0);
+    const score = (c: Contact) => (hasSession(c) ? 1_000_000 : 0) + (messagesRef.current[c.roomId]?.length ?? 0);
     const byTarget = new Map<string, Contact[]>();
     for (const c of contactsRef.current) {
       if (c.regime !== 'master' && !c.ownMasterPub) continue; // hard case, skip
@@ -661,7 +662,7 @@ export function Messenger({ dek, onLock }: Props) {
     const id = identityRef.current;
     if (!id) return;
     for (const c of contactsRef.current) {
-      if (c.hidden || c.staleIdentity || !c.ratchet) continue;
+      if (c.hidden || c.staleIdentity || !hasSession(c)) continue;
       try {
         await sendEnvelopeTo(c, await encryptAndPersist(c, () => sendDeviceList(id, c, list)));
       } catch {
@@ -794,7 +795,7 @@ export function Messenger({ dek, onLock }: Props) {
         await saveContact(dek, contact);
       }
 
-      const wasNew = contact.ratchet === null;
+      const wasNew = !hasSession(contact);
       let content;
       try {
         content = await receiveEnvelope(id, contact, env, lookup);
@@ -1147,8 +1148,7 @@ export function Messenger({ dek, onLock }: Props) {
         regime: 'master',
         bundle: m.bundle,
         hidden: true,
-        ratchet: null,
-        pendingHeader: null,
+        sessions: new Map(),
       };
     } else {
       const roomId = await computeRoomId(id.dh.publicKey, m.dhPub);
@@ -1165,8 +1165,7 @@ export function Messenger({ dek, onLock }: Props) {
         regime: 'device',
         bundle: m.bundle,
         hidden: true,
-        ratchet: null,
-        pendingHeader: null,
+        sessions: new Map(),
       };
     }
     contactsRef.current = [...contactsRef.current, contact];
@@ -1704,7 +1703,7 @@ export function Messenger({ dek, onLock }: Props) {
   async function ensureProfileSent(contact: Contact) {
     const id = identityRef.current;
     const p = myProfileRef.current;
-    if (!id || !contact.ratchet || profileSentRef.current.has(contact.roomId)) return;
+    if (!id || !hasSession(contact) || profileSentRef.current.has(contact.roomId)) return;
     if (!p.name && !p.avatarB64) return;
     try {
       const envelope = await encryptAndPersist(contact, () =>
@@ -1725,7 +1724,7 @@ export function Messenger({ dek, onLock }: Props) {
 
   async function broadcastProfile() {
     profileSentRef.current.clear();
-    for (const c of contactsRef.current) if (c.ratchet) await ensureProfileSent(c);
+    for (const c of contactsRef.current) if (hasSession(c)) await ensureProfileSent(c);
   }
 
   async function togglePush() {
@@ -2294,7 +2293,7 @@ export function Messenger({ dek, onLock }: Props) {
                         </div>
                         <div className="conv-line2">
                           <span className="conv-last">
-                            {item.last ? lastPreview(item.last) : item.contact.ratchet ? 'Verbunden' : 'Neu — sag Hallo'}
+                            {item.last ? lastPreview(item.last) : hasSession(item.contact) ? 'Verbunden' : 'Neu — sag Hallo'}
                           </span>
                           {item.unread > 0 && <span className="unread">{item.unread}</span>}
                         </div>

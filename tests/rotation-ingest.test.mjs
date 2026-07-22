@@ -82,7 +82,7 @@ const r = await S.acceptRotation(bobContact, content.statement, new Set());
 ok('re-gepinnt auf den NEUEN Master', S.bytesEqual(bobContact.peerMasterPub, aliceNewMaster.publicKey));
 ok('verified BEHALTEN (bewiesene Kontinuität)', bobContact.verified === true);
 ok('roomId umgeschlüsselt', r.newRoomId === bobContact.roomId && r.newRoomId !== roomBefore);
-ok('Ratchet genullt (frisches X3DH unter neuem Master)', bobContact.ratchet === null);
+ok('Alle Sessions geleert (frisches X3DH unter neuem Master)', !S.hasSession(bobContact) && bobContact.sessions.size === 0);
 
 console.log(`\n${pass} ok, ${fail} fail`);
 process.exit(fail ? 1 : 0);

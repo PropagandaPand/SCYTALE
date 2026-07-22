@@ -2,7 +2,7 @@
 
 SCYTALE ist gegen **anlasslose Massenüberwachung** gebaut (Chatkontrolle /
 CSAR). Dieses Dokument ist die genaue Aufschlüsselung aller Mechanismen und
-sagt ehrlich, was geschützt ist — und was nicht. Stand: v0.20.0 (Stufe 3d
+sagt ehrlich, was geschützt ist — und was nicht. Stand: v0.20.1 (Stufe 3d
 Multi-Device: Fan-out + Per-Device-Sessions + Self-Sync).
 
 **Leitprinzipien:** niemals eigene Krypto erfinden (vetted Primitiven +
@@ -607,6 +607,19 @@ Header angezeigte **Versionsnummer** hilft beim Abgleich, welcher Build läuft.
   Liste sieht. **Reihenfolge über Geräte** ist Ankunfts-, nicht Compose-Zeit —
   eine offline nachgeladene Kopie kann out-of-order einsortiert werden (echte
   chronologische Konvergenz bräuchte einen autor-gestempelten Zeitstempel im Frame).
+- **Zustell-Banner vs. Bubble (kosmetische 3d-Restkanten)**: der Zustell-Status
+  jeder Nachricht ist die *Bubble* (`aggregateDelivery` über die aktuelle
+  Geräteliste — stale/widerrufene Geräte fallen aus dem Nenner, siehe Test).
+  Das globale Fehler-Banner ist nur ein zusätzlicher Hinweis und feuert seit
+  v0.20.1 ausschließlich bei einem echten `pending→failed`-Übergang, nie für eine
+  terminale (`sent`/`stale`) Zustellung. Zwei benigne Restkanten bleiben, beide
+  ohne Krypto- oder Bubble-Auswirkung: (a) ein **missgebildeter Relay-Nack ohne
+  `mid`** kann das Banner heben, obwohl keine Nachricht zuzuordnen ist — der echte
+  Fehlschlag wird vom per-Zustellung armierten 10s-Timeout ohnehin *mit* Zuordnung
+  gefangen; (b) feuert dieser Timeout (echter Timeout) *bevor* ein >10s später
+  eintreffender Geräte-Widerruf die Zeile auf `stale` kippt, bleibt das Banner
+  sichtbar, während die Bubble am Ende „zugestellt" aggregiert. Beides betrifft nur
+  den Hinweis-Text, nicht den authentifizierten Zustell-Zustand.
 - **Code-Delivery-Vertrauen**: in der Testphase `autoUpdate` (Server kann Code
   still aktualisieren) → vor Release auf `prompt`. Mitigiert per Reproducible
   Build, nicht eliminiert.

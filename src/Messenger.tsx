@@ -274,6 +274,9 @@ export function Messenger({ dek, onLock }: Props) {
   const [renameInput, setRenameInput] = useState('');
   const [scanning, setScanning] = useState(false);
   const [chatMenu, setChatMenu] = useState(false);
+  // True once this account has more than one linked device (from the own device
+  // list). Drives the "groups don't sync to your other devices yet" note (3e).
+  const [multiDevice, setMultiDevice] = useState(false);
   const [recording, setRecording] = useState(false);
   const [recSeconds, setRecSeconds] = useState(0);
   const [myAvatarB64, setMyAvatarB64] = useState('');
@@ -517,6 +520,7 @@ export function Messenger({ dek, onLock }: Props) {
     }
     const ownList = await loadOrCreateOwnDeviceList(dek, id, ownSpkPublic(pre));
     if (ownList) await applyDeviceListUpdate(c, ownList, retiredMastersRef.current);
+    setMultiDevice((ownList?.devices.length ?? 1) > 1);
     await saveContact(dek, c);
     return c;
   }
@@ -2684,6 +2688,11 @@ export function Messenger({ dek, onLock }: Props) {
             </span>
             Verschlüsselt · Ende-zu-Ende
           </div>
+          {multiDevice && (
+            <div className="enc-pill" title="Gruppen synchronisieren noch nicht auf deine anderen Geräte (kommt mit v3).">
+              ⓘ Gruppen synchen noch nicht auf deine anderen Geräte
+            </div>
+          )}
           {msgs.map((m, i) => (
             <div
               key={`${m.ts}-${i}`}

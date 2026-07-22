@@ -575,15 +575,21 @@ Header angezeigte **Versionsnummer** hilft beim Abgleich, welcher Build läuft.
   symmetrisch (gleiches SK, gleiche Ratchet-Sicherheit) — „Gewinnen" bringt
   keinen Vorteil außer, welche in-flight Erst-Nachricht das Rennen überlebt.
   Grinden auf einen kleinen Schlüssel ist damit nutzlos.
-- **Bewiesene Tür — Producer noch nicht verdrahtet**: der **Empfangspfad** der
-  dual-signierten Rotation ist vollständig (`acceptRotation` behält `verified`,
-  über `kind:'rotation'` erreichbar und e2e-getestet). Der **Producer** — die
-  automatische Co-Signatur beim Device-Linking — fehlt noch, weil das gelinkte
-  Gerät den *neuen* Master-Privkey nie hält (Signal-Modell) und die Rotations-
-  Epoche `> e_alt` **und** `≤ e_shared` sein muss, was P beim Linken zu einem
-  Epochen-Bump + Re-Gossip zwingt (eigener design-gelockter Schritt). Bis dahin
-  kollabiert eine reale Master-Rotation auf den sicheren **TOFU-Bruch**
-  (`acceptMasterChange`, `verified` gelöscht, Safety Number neu vergleichen).
+- **Bewiesene Tür — Producer bewusst verworfen (Design-Lock)**: der **Empfangspfad**
+  der dual-signierten Rotation ist vorhanden (`acceptRotation` behält `verified`,
+  über `kind:'rotation'` erreichbar, e2e-getestet), aber **dormant** — es gibt
+  keinen automatischen **Producer**, der eine echte Rotations-Kette erzeugt. Der
+  Producer (Co-Signatur beim Device-Linking) wurde nach einem Design-Lock
+  **verworfen**: das gelinkte Gerät hält den neuen Master-Privkey nie (Signal-
+  Modell), die Epoche müsste `> e_alt` **und** `≤ e_shared` sein (im Normalfall
+  unerfüllbar → P müsste seine persistente Identität bumpen + die ganze
+  Kontaktliste re-gossippen), und der bewiesene Re-Key kollidiert mit dem
+  bewusst auf den Alt-Master gepinnten `ownMasterPub` (die „erfolgreiche" Rotation
+  würde Kontakt und Gerät in **verschiedene Räume** stranden). Kosten und Ripple
+  überwiegen den seltenen Nutzen (eine gesparte Safety-Number-Neuprüfung) klar.
+  Jede reale Master-Rotation läuft daher über den sicheren **TOFU-Bruch**
+  (`acceptMasterChange`, `verified` gelöscht, Safety Number neu vergleichen) —
+  dieselbe eine Neuprüfung, ohne die Bruchgefahr.
 - **Sender-Rate-Limiting**: die Queue ist gedeckelt (`MAX_QUEUE`), aber ein
   echtes Pro-Sender-Rate-Limit gegen gezieltes Fluten fehlt noch.
 

@@ -557,6 +557,15 @@ export async function acceptRotation(
   contact.ratchet = null; // fresh X3DH under the new master
   contact.pendingHeader = null;
   contact.ratchetDeviceSignPub = undefined; // ratchet gone → forget its device
+  // The old device list was signed under the OLD master; keeping it would make
+  // deviceAuthorized revoke every real device of the NEW master (RevokedDeviceError)
+  // until fresh gossip. Drop it → implicit single-device until a new master-signed
+  // list arrives. NOTE: this receive path is currently DORMANT — no automatic
+  // producer creates a real rotation chain (the co-signed linking producer was
+  // dropped after the design-lock; every rotation collapses to acceptMasterChange).
+  // Full post-rotation device REACHABILITY (which device backs the new session)
+  // is producer-dependent and intentionally out of scope here.
+  contact.peerDeviceList = undefined;
   const newRoomId = await computeMasterRoomId(contact.ownMasterPub, asMasterPub(statement.newMasterPub));
   contact.roomId = newRoomId;
   contact.regime = 'master';

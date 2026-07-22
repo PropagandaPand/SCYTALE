@@ -2,6 +2,7 @@ import { useEffect, useReducer, useRef, useState, type ChangeEvent } from 'react
 import { loadOrCreateIdentity, fingerprintOf } from './lib/identity';
 import {
   loadOrCreatePreKeys,
+  ownSpkPublic,
   savePreKeys,
   currentBundle,
   findSignedPreKey,
@@ -36,12 +37,11 @@ import {
   completeLinkOnP,
   type LinkSession,
 } from './lib/linkflow';
-import { loadOrCreateOwnDeviceList } from './lib/devices';
+import { loadOrCreateOwnDeviceList, adoptDeviceList } from './lib/devices';
 import {
   makeContact,
   makeContactFromHeader,
   sendMessage,
-  sendFile,
   sendProfile,
   sendGroupMessage,
   sendGroupInvite,
@@ -49,6 +49,9 @@ import {
   sendGroupLeave,
   receiveEnvelope,
   resolveContactByConv,
+  hasSession,
+  randomMid,
+  fanoutDeliveries,
   acceptMasterChange,
   acceptRotation,
   reconnectContact,
@@ -90,7 +93,7 @@ import {
   type Sticker,
 } from './lib/stickers';
 import { pushSupported, enablePush, disablePush, currentSubscription } from './lib/push';
-import { loadMessages, saveMessages, clearMessages, type ChatMessage } from './lib/messages';
+import { loadMessages, saveMessages, clearMessages, aggregateDelivery, type ChatMessage, type DeviceDelivery } from './lib/messages';
 import { RelayClient, type RelayStatus } from './lib/relay';
 import { makeQr } from './lib/qr';
 import { bytesToB64, b64ToBytes } from './lib/bytes';
@@ -130,16 +133,48 @@ function hexOf(b: Uint8Array): string {
   return s;
 }
 
-function incomingMessage(content: MessageContent): ChatMessage {
+function incomingMessage(content: MessageContent, mid: string): ChatMessage {
   if (content.kind === 'file') {
     return {
       mine: false,
       ts: Date.now(),
+      mid,
       file: { name: content.name, mime: content.mime, dataB64: bytesToB64(content.data) },
     };
   }
   // text (profile is handled separately and never reaches here)
-  return { mine: false, text: content.kind === 'text' ? content.text : '', ts: Date.now() };
+  return { mine: false, text: content.kind === 'text' ? content.text : '', ts: Date.now(), mid };
+}
+
+// The delivery indicator for one of MY messages. Stage 3d: derive the honest
+// AGGREGATE over per-device deliveries (all sent → ✓✓; some sent → "an N/M
+// Geräten"; none → ⚠); a `stale` device (revoked in flight) is out of the
+// denominator. Falls back to the legacy single status for groups / pre-3d rows.
+function msgStatusEl(m: ChatMessage) {
+  let kind: 'sent' | 'pending' | 'partial' | 'failed' = 'sent';
+  let text: string | undefined;
+  if (m.deliveries && m.deliveries.length) {
+    const a = aggregateDelivery(m.deliveries);
+    kind = a.label;
+    if (a.label === 'partial') text = `an ${a.sent}/${a.total} Geräten`;
+  } else if (m.status === 'failed') {
+    kind = 'failed';
+  } else if (m.status === 'pending') {
+    kind = 'pending';
+  }
+  if (kind === 'failed') {
+    return (
+      <span className="msg-failed" title="Nicht zugestellt">
+        ⚠ nicht zugestellt
+      </span>
+    );
+  }
+  return (
+    <span className="msg-check" title={text} style={{ opacity: kind === 'pending' ? 0.35 : 1 }}>
+      <IconDoubleCheck size={13} />
+      {kind === 'partial' && <span className="msg-partial"> {text}</span>}
+    </span>
+  );
 }
 
 function downloadFile(f: { name: string; mime: string; dataB64: string }) {
@@ -239,6 +274,9 @@ export function Messenger({ dek, onLock }: Props) {
   const [renameInput, setRenameInput] = useState('');
   const [scanning, setScanning] = useState(false);
   const [chatMenu, setChatMenu] = useState(false);
+  // True once this account has more than one linked device (from the own device
+  // list). Drives the "groups don't sync to your other devices yet" note (3e).
+  const [multiDevice, setMultiDevice] = useState(false);
   const [recording, setRecording] = useState(false);
   const [recSeconds, setRecSeconds] = useState(0);
   const [myAvatarB64, setMyAvatarB64] = useState('');
@@ -375,27 +413,182 @@ export function Messenger({ dek, onLock }: Props) {
       }, 10_000),
     );
   }
-  function markStatus(mid: string | null, status: 'sent' | 'failed', errorMsg?: string) {
-    if (status === 'failed' && errorMsg) setError(errorMsg);
-    if (!mid) return;
-    clearAckTimer(mid);
+  function markStatus(id: string | null, status: 'sent' | 'failed', errorMsg?: string) {
+    if (!id) {
+      if (status === 'failed' && errorMsg) setError(errorMsg);
+      return;
+    }
+    clearAckTimer(id);
+    // The global error banner (setError) fires ONLY when a delivery ACTUALLY
+    // transitions to failed — never for a terminal (sent/stale) row. Otherwise a
+    // late ack-timeout on a delivery we already swept to 'stale' (a revoked device)
+    // would pop "not delivered" while the bubble shows delivered (Review-2 fund).
     for (const roomId of Object.keys(messagesRef.current)) {
       const arr = messagesRef.current[roomId];
-      const idx = arr.findIndex((m) => m.mid === mid);
-      if (idx >= 0) {
-        const cur = arr[idx].status;
-        if (cur === status) return;
-        // INVARIANT: once 'sent' (relay durably has it), always 'sent'. A late
-        // nack/timeout must never downgrade a confirmed delivery — that would
-        // make the checkmark lie in the other direction. Only failed → sent
-        // (recovery after a reconnect flush) is allowed.
-        if (cur === 'sent') return;
-        arr[idx] = { ...arr[idx], status };
+      // Stage 3d fan-out: `id` is a per-DEVICE deliveryId. Update just that delivery
+      // (per-delivery "once sent always sent"), then the bubble re-derives its
+      // aggregate at render (aggregateDelivery). A failure of ONE device never
+      // rolls back the others.
+      const fi = arr.findIndex((m) => m.deliveries?.some((d) => d.deliveryId === id));
+      if (fi >= 0) {
+        const dels = arr[fi].deliveries!;
+        const d = dels.find((x) => x.deliveryId === id)!;
+        if (d.status === 'sent' || d.status === 'stale') return; // terminal per delivery — no change, no banner
+        arr[fi] = { ...arr[fi], deliveries: dels.map((x) => (x.deliveryId === id ? { ...x, status } : x)) };
+        if (status === 'failed' && errorMsg) setError(errorMsg);
         void saveMessages(dek, roomId, arr);
         commitMessages();
         bump();
         return;
       }
+      // Legacy single-status (groups / pre-3d records).
+      const idx = arr.findIndex((m) => m.mid === id);
+      if (idx >= 0) {
+        const cur = arr[idx].status;
+        if (cur === status) return;
+        // INVARIANT: once 'sent' (relay durably has it), always 'sent'. A late
+        // nack/timeout must never downgrade a confirmed delivery.
+        if (cur === 'sent') return;
+        arr[idx] = { ...arr[idx], status };
+        if (status === 'failed' && errorMsg) setError(errorMsg);
+        void saveMessages(dek, roomId, arr);
+        commitMessages();
+        bump();
+        return;
+      }
+    }
+  }
+
+  // A relay to ONE peer device's inbox (Stage 3d fan-out). Ack/nack carry the
+  // per-delivery id, so markStatus finds the right per-device entry.
+  function connectDeviceInbox(room: string) {
+    if (relaysRef.current.has(room)) return;
+    const client = new RelayClient(room, {
+      onAck: (id) => markStatus(id, 'sent'),
+      onNack: (id) => markStatus(id, 'failed', 'An ein Gerät nicht zugestellt — Postfach voll.'),
+    });
+    relaysRef.current.set(room, client);
+    client.connect();
+  }
+
+  // Encrypt `content` for EVERY authorised peer device and send each copy to its
+  // own inbox, all sharing one `mid`. The advanced per-device sessions are persisted
+  // BEFORE anything hits the wire, on the send serialization chain (Invariant I/II
+  // per session). Returns the per-device delivery rows for the local bubble.
+  async function fanoutSend(contact: Contact, content: MessageContent, mid: string): Promise<DeviceDelivery[]> {
+    const id = identityRef.current;
+    if (!id) return [];
+    const { deliveries, unreachable } = await enqueueInbox(async () => {
+      const r = await fanoutDeliveries(id, contact, content, mid);
+      await saveContact(dek, contact); // persist advanced sessions before the wire
+      return r;
+    });
+    const rows: DeviceDelivery[] = [];
+    for (const d of deliveries) {
+      const deliveryId = randomMid();
+      const room = await inboxRoom(d.deviceSignPub);
+      connectDeviceInbox(room);
+      relaysRef.current.get(room)?.send(d.sealed, deliveryId);
+      startAckTimer(deliveryId);
+      rows.push({ device: bytesToB64(d.deviceSignPub), deliveryId, status: 'pending' });
+    }
+    // A device we can't initiate to yet (authorised, but no signed prekey learned)
+    // is out of the reachable set — 'stale' drops it from the denominator, never a
+    // permanent failure. It becomes reachable once its list SPK is gossiped.
+    for (const u of unreachable) rows.push({ device: bytesToB64(u), deliveryId: '', status: 'stale' });
+    return rows;
+  }
+
+  // The hidden "self" contact: peerMaster == MY master, peerDeviceList == my own
+  // device list, so I can fan out to my OTHER devices (self-sync). Its sessions are
+  // to my devices; it never shows in the UI. Refreshed to my current device list so
+  // a revoked own device is pruned (applyDeviceListUpdate also drops its session).
+  async function ensureSelfContact(): Promise<Contact | null> {
+    const id = identityRef.current;
+    const pre = prekeysRef.current;
+    if (!id || !pre) return null;
+    const myMaster = asMasterPub(id.master.publicKey);
+    const roomId = await computeMasterRoomId(myMaster, myMaster);
+    let c = contactsRef.current.find((x) => x.roomId === roomId);
+    if (!c) {
+      c = {
+        roomId,
+        peerMasterPub: id.master.publicKey,
+        peerEpoch: id.epoch,
+        peerSignPub: id.sign.publicKey,
+        peerDhPub: id.dh.publicKey,
+        peerFingerprint: '',
+        ownMasterPub: myMaster,
+        regime: 'master',
+        verified: true,
+        hidden: true,
+        sessions: new Map(),
+      };
+      contactsRef.current = [...contactsRef.current, c];
+    }
+    const ownList = await loadOrCreateOwnDeviceList(dek, id, ownSpkPublic(pre));
+    if (ownList) await applyDeviceListUpdate(c, ownList, retiredMastersRef.current);
+    setMultiDevice((ownList?.devices.length ?? 1) > 1);
+    await saveContact(dek, c);
+    return c;
+  }
+
+  // Mirror a message I sent to my OWN other devices (Stage 3d self-sync). The copy
+  // carries the TARGET peer's master so the receiving device files it under the
+  // right conversation room, plus the original mid so it dedups against the peer's
+  // own fan-out copy. Excludes my current device. Fire-and-forget; no status UI.
+  async function syncToOwnDevices(targetPeerMaster: Bytes, origin: 'sent' | 'recv', innerMid: string, ts: number, inner: MessageContent) {
+    const id = identityRef.current;
+    if (!id) return;
+    const self = await ensureSelfContact();
+    if (!self || !self.peerDeviceList || self.peerDeviceList.devices.length < 2) return; // no other device
+    const content: MessageContent = { kind: 'sync', targetPeerMaster, origin, innerMid, ts, inner };
+    const { deliveries } = await enqueueInbox(async () => {
+      const r = await fanoutDeliveries(id, self, content, randomMid(), id.sign.publicKey);
+      await saveContact(dek, self);
+      return r;
+    });
+    for (const d of deliveries) {
+      const room = await inboxRoom(d.deviceSignPub);
+      connectDeviceInbox(room);
+      relaysRef.current.get(room)?.send(d.sealed, randomMid());
+    }
+  }
+
+  // When a peer device is revoked, sweep this conversation's still-open delivery
+  // rows for that device to 'stale' — so the aggregate drops it from the CURRENT
+  // device set (Review fund 6): a message the person actually received on their
+  // other devices stops showing a permanent partial-failure. A 'sent' row stays
+  // (once delivered, always delivered).
+  function sweepRevokedDeliveries(contact: Contact) {
+    const list = contact.peerDeviceList;
+    const arr = messagesRef.current[contact.roomId];
+    if (!list || !arr) return;
+    const live = new Set(list.devices.map((d) => bytesToB64(d.signPub)));
+    let changed = false;
+    for (let i = 0; i < arr.length; i++) {
+      const dels = arr[i].deliveries;
+      if (!dels) continue;
+      const updated = dels.map((d) => {
+        if (d.status !== 'stale' && d.status !== 'sent' && !live.has(d.device)) {
+          // The device is gone from the list — its ack will never come. Disarm the
+          // still-running 10s timer NOW, else it fires markStatus(...,'failed') on a
+          // row we just made terminal ('stale') and the guard there suppresses the
+          // downgrade but the banner would already have popped (Review-2 fund).
+          clearAckTimer(d.deliveryId);
+          return { ...d, status: 'stale' as const };
+        }
+        return d;
+      });
+      if (updated.some((d, k) => d !== dels[k])) {
+        arr[i] = { ...arr[i], deliveries: updated };
+        changed = true;
+      }
+    }
+    if (changed) {
+      void saveMessages(dek, contact.roomId, arr);
+      commitMessages();
+      bump();
     }
   }
 
@@ -463,7 +656,7 @@ export function Messenger({ dek, onLock }: Props) {
     }
 
     // Group by the TARGET master-roomId to detect crash-interrupted duplicates.
-    const score = (c: Contact) => (c.ratchet ? 1_000_000 : 0) + (messagesRef.current[c.roomId]?.length ?? 0);
+    const score = (c: Contact) => (hasSession(c) ? 1_000_000 : 0) + (messagesRef.current[c.roomId]?.length ?? 0);
     const byTarget = new Map<string, Contact[]>();
     for (const c of contactsRef.current) {
       if (c.regime !== 'master' && !c.ownMasterPub) continue; // hard case, skip
@@ -527,9 +720,10 @@ export function Messenger({ dek, onLock }: Props) {
   // N starts: show our QR, then wait for P's offer on our inbox.
   async function startJoinAsNewDevice() {
     const id = identityRef.current;
-    if (!id) return;
+    const pre = prekeysRef.current;
+    if (!id || !pre) return;
     setError('');
-    const { session, qrToken } = await startLinkOnN(id);
+    const { session, qrToken } = await startLinkOnN(id, ownSpkPublic(pre));
     linkSessionRef.current = session;
     linkConfirmedRef.current = false;
     linkPendingGrantRef.current = null;
@@ -661,22 +855,43 @@ export function Messenger({ dek, onLock }: Props) {
     const id = identityRef.current;
     if (!id) return;
     for (const c of contactsRef.current) {
-      if (c.hidden || c.staleIdentity || !c.ratchet) continue;
+      if (c.hidden || c.staleIdentity || !hasSession(c)) continue;
       try {
         await sendEnvelopeTo(c, await encryptAndPersist(c, () => sendDeviceList(id, c, list)));
       } catch {
         /* unreachable contact — best effort, they learn it next time */
       }
     }
+    // Also deliver my updated list to my OWN other devices (via the self-contact), so
+    // a device linked earlier learns about a sibling linked later and self-syncs to
+    // it too (Review fund 4). The recipient adopts it into its stored own list.
+    const self = await ensureSelfContact();
+    if (self && self.peerDeviceList && self.peerDeviceList.devices.length >= 2) {
+      try {
+        const { deliveries } = await enqueueInbox(async () => {
+          const r = await fanoutDeliveries(id, self, { kind: 'devlist', list }, randomMid(), id.sign.publicKey);
+          await saveContact(dek, self);
+          return r;
+        });
+        for (const d of deliveries) {
+          const room = await inboxRoom(d.deviceSignPub);
+          connectDeviceInbox(room);
+          relaysRef.current.get(room)?.send(d.sealed, randomMid());
+        }
+      } catch {
+        /* best effort */
+      }
+    }
   }
 
   async function onPConfirmSas() {
     const id = identityRef.current;
+    const pre = prekeysRef.current;
     const session = linkSessionRef.current;
-    if (!id || !session) return;
+    if (!id || !pre || !session) return;
     setLinkBusy(true);
     try {
-      const currentList = await loadOrCreateOwnDeviceList(dek, id);
+      const currentList = await loadOrCreateOwnDeviceList(dek, id, ownSpkPublic(pre));
       if (!currentList) throw new Error('Geräteliste nicht verfügbar.');
       const newList = await completeLinkOnP(dek, id, session, currentList, sendToInbox);
       // Gossip the updated list so contacts learn the new device (and, later,
@@ -731,6 +946,11 @@ export function Messenger({ dek, onLock }: Props) {
       // receiveEnvelope against the master.
       const myMaster = asMasterPub(id.master.publicKey);
       let contact = await resolveContactByConv(contactsRef.current, env.conv, id.dh.publicKey, myMaster);
+      if (!contact && env.type === 'prekey' && bytesEqual(env.x3dh.masterPub, id.master.publicKey)) {
+        // A prekey under MY OWN master is one of my other devices (self-sync). Route
+        // it to the hidden self-contact, never auto-create a visible "contact for me".
+        contact = (await ensureSelfContact()) ?? undefined;
+      }
       if (!contact) {
         if (env.type !== 'prekey') return;
         // AUTO-CREATE only on a MASTER-based conv that matches the sender's own
@@ -794,10 +1014,13 @@ export function Messenger({ dek, onLock }: Props) {
         await saveContact(dek, contact);
       }
 
-      const wasNew = contact.ratchet === null;
-      let content;
+      const wasNew = !hasSession(contact);
+      let content!: MessageContent;
+      let mid = '';
       try {
-        content = await receiveEnvelope(id, contact, env, lookup);
+        const r = await receiveEnvelope(id, contact, env, lookup);
+        content = r.content;
+        mid = r.mid;
       } catch (e) {
         if (e instanceof MasterChangedError) {
           // Persist the pending claim; the message itself is dropped. `verified`
@@ -857,6 +1080,14 @@ export function Messenger({ dek, onLock }: Props) {
         // must not live only in RAM — the v0.17.1 lesson).
         if (await applyDeviceListUpdate(contact, content.list, retiredMastersRef.current)) {
           await saveContact(dek, contact);
+          sweepRevokedDeliveries(contact); // fund 6: drop revoked devices from open bubbles
+          // If this is MY OWN list (delivered from my primary to the self-contact),
+          // adopt it as my stored own list too, so a secondary device's self-sync
+          // targets a later-linked sibling as well (Review fund 4).
+          if (bytesEqual(contact.peerMasterPub, id.master.publicKey)) {
+            await adoptDeviceList(dek, id, content.list);
+            setMultiDevice(content.list.devices.length > 1);
+          }
         }
       } else if (content.kind === 'rotation') {
         // A dual-signed rotation PROVES the peer's master continuity → acceptRotation
@@ -871,8 +1102,36 @@ export function Messenger({ dek, onLock }: Props) {
         } catch (e) {
           console.warn('[recv] Rotation abgelehnt:', (e as Error).message);
         }
+      } else if (content.kind === 'sync' && bytesEqual(contact.peerMasterPub, id.master.publicKey)) {
+        // Self-sync: a copy of a message from ANOTHER of my devices. GATED to the
+        // self-contact (peerMaster == my master) — a 'sync' from any other session is
+        // an injection attempt and is already rejected in receiveEnvelope; this is
+        // defence in depth. It authenticated under my hidden self-contact, but
+        // belongs in the conversation with
+        // content.targetPeerMaster — DECRYPT-ROOM ≠ DISPLAY-ROOM. TERMINAL: only
+        // appended, never re-fanned/re-synced/re-dispatched. Deduped by the ORIGINAL
+        // mid against the peer's own fan-out copy that may also reach this device.
+        const displayRoom = await computeMasterRoomId(myMaster, asMasterPub(content.targetPeerMaster));
+        const inner = content.inner;
+        const already = (messagesRef.current[displayRoom] ?? []).some((m) => m.mid === content.innerMid);
+        if (!already && (inner.kind === 'text' || inner.kind === 'file')) {
+          const synced: ChatMessage =
+            inner.kind === 'file'
+              ? { mine: content.origin === 'sent', ts: content.ts, mid: content.innerMid, file: { name: inner.name, mime: inner.mime, dataB64: bytesToB64(inner.data) } }
+              : { mine: content.origin === 'sent', ts: content.ts, mid: content.innerMid, text: inner.text };
+          await appendMessage(displayRoom, synced);
+          if (content.origin !== 'sent' && !(viewRef.current === 'chat' && activeRoomRef.current === displayRoom)) {
+            unreadRef.current[displayRoom] = (unreadRef.current[displayRoom] ?? 0) + 1;
+          }
+        }
+      } else if (mid && (messagesRef.current[contact.roomId] ?? []).some((m) => m.mid === mid)) {
+        // DEDUP on the E2E mid: one message can reach this device via direct fan-out
+        // AND a self-sync copy from another of my devices AND a re-delivery. The
+        // message history is the dedup source of truth (the mid is authenticated in
+        // the AEAD, so it can't be forged to suppress a real future message).
+        // Already have it — skip (the ackId is still recorded in `finally`).
       } else {
-        await appendMessage(contact.roomId, incomingMessage(content));
+        await appendMessage(contact.roomId, incomingMessage(content, mid));
         if (!(viewRef.current === 'chat' && activeRoomRef.current === contact.roomId)) {
           unreadRef.current[contact.roomId] = (unreadRef.current[contact.roomId] ?? 0) + 1;
         }
@@ -957,6 +1216,7 @@ export function Messenger({ dek, onLock }: Props) {
       const bootLoad = enqueueInbox(async () => {
         for (const c of contactsRef.current) messagesRef.current[c.roomId] = await loadMessages(dek, c.roomId);
         await migrateContactsToMaster();
+        await ensureSelfContact(); // hidden self-contact for self-sync; refresh my device list
         for (const c of contactsRef.current) await connectSend(c);
         const gs = await loadGroups(dek);
         groupsRef.current = gs;
@@ -1147,8 +1407,7 @@ export function Messenger({ dek, onLock }: Props) {
         regime: 'master',
         bundle: m.bundle,
         hidden: true,
-        ratchet: null,
-        pendingHeader: null,
+        sessions: new Map(),
       };
     } else {
       const roomId = await computeRoomId(id.dh.publicKey, m.dhPub);
@@ -1165,8 +1424,7 @@ export function Messenger({ dek, onLock }: Props) {
         regime: 'device',
         bundle: m.bundle,
         hidden: true,
-        ratchet: null,
-        pendingHeader: null,
+        sessions: new Map(),
       };
     }
     contactsRef.current = [...contactsRef.current, contact];
@@ -1482,19 +1740,17 @@ export function Messenger({ dek, onLock }: Props) {
     const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
     if (!contact) return;
     try {
-      const envelope = await encryptAndPersist(contact, () => sendMessage(id, contact, text));
-      let room = sendRoomRef.current.get(contact.roomId);
-      if (!room) {
-        await connectSend(contact);
-        room = sendRoomRef.current.get(contact.roomId);
-      }
-      const relay = room ? relaysRef.current.get(room) : undefined;
-      const mid = crypto.randomUUID();
-      relay?.send(envelope, mid);
-      await appendMessage(activeRoom, { mine: true, text, ts: Date.now(), mid, status: 'pending' });
-      startAckTimer(mid);
+      // ONE E2E mid: stamped into the AEAD frame, reused for the local echo and
+      // shared across every fan-out (+ self-sync) copy so they dedup. fanoutSend
+      // encrypts per authorised device, persists the advanced sessions before the
+      // wire, and returns per-device delivery rows for the aggregate bubble.
+      const mid = randomMid();
+      const ts = Date.now();
+      const deliveries = await fanoutSend(contact, { kind: 'text', text }, mid);
+      // Mirror to my own other devices so they show it in this conversation.
+      void syncToOwnDevices(contact.peerMasterPub, 'sent', mid, ts, { kind: 'text', text });
+      await appendMessage(activeRoom, { mine: true, text, ts, mid, deliveries });
       setMsgInput('');
-      await saveContact(dek, contact);
       void ensureProfileSent(contact);
       bump();
     } catch (e) {
@@ -1537,7 +1793,7 @@ export function Messenger({ dek, onLock }: Props) {
       // A file literally named like our sticker marker would render chrome-free
       // on the other side. Harmless but confusing, so rename it.
       if (name === STICKER_FILENAME) name = 'datei';
-      const mid = crypto.randomUUID();
+      const mid = randomMid();
       const localMsg: ChatMessage = { mine: true, ts: Date.now(), file: { name, mime, dataB64: bytesToB64(data) }, mid };
       if (activeGroup) {
         await groupSend({ kind: 'file', name, mime, data }, localMsg);
@@ -1545,9 +1801,9 @@ export function Messenger({ dek, onLock }: Props) {
       }
       const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
       if (!contact) return;
-      await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendFile(id, contact, name, mime, data)), mid);
-      await appendMessage(contact.roomId, { ...localMsg, status: 'pending' });
-      startAckTimer(mid);
+      const deliveries = await fanoutSend(contact, { kind: 'file', name, mime, data }, mid);
+      void syncToOwnDevices(contact.peerMasterPub, 'sent', mid, localMsg.ts, { kind: 'file', name, mime, data });
+      await appendMessage(contact.roomId, { ...localMsg, deliveries });
       await saveContact(dek, contact);
       bump();
     } catch (err) {
@@ -1588,7 +1844,7 @@ export function Messenger({ dek, onLock }: Props) {
     setError('');
     try {
       const data = b64ToBytes(st.dataB64);
-      const mid = crypto.randomUUID();
+      const mid = randomMid();
       const localMsg: ChatMessage = {
         mine: true,
         ts: Date.now(),
@@ -1601,13 +1857,9 @@ export function Messenger({ dek, onLock }: Props) {
       }
       const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
       if (!contact) return;
-      await sendEnvelopeTo(
-        contact,
-        await encryptAndPersist(contact, () => sendFile(id, contact, STICKER_FILENAME, st.mime, data)),
-        mid,
-      );
-      await appendMessage(contact.roomId, { ...localMsg, status: 'pending' });
-      startAckTimer(mid);
+      const deliveries = await fanoutSend(contact, { kind: 'file', name: STICKER_FILENAME, mime: st.mime, data }, mid);
+      void syncToOwnDevices(contact.peerMasterPub, 'sent', mid, localMsg.ts, { kind: 'file', name: STICKER_FILENAME, mime: st.mime, data });
+      await appendMessage(contact.roomId, { ...localMsg, deliveries });
       bump();
     } catch (err) {
       setError('Sticker fehlgeschlagen: ' + (err as Error).message);
@@ -1682,7 +1934,7 @@ export function Messenger({ dek, onLock }: Props) {
       return;
     }
     const name = `sprachnachricht.${ext}`;
-    const mid = crypto.randomUUID();
+    const mid = randomMid();
     const localMsg: ChatMessage = { mine: true, ts: Date.now(), file: { name, mime, dataB64: bytesToB64(data) }, mid };
     try {
       if (activeGroup) {
@@ -1691,9 +1943,9 @@ export function Messenger({ dek, onLock }: Props) {
       }
       const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
       if (!contact) return;
-      await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendFile(id, contact, name, mime, data)), mid);
-      await appendMessage(contact.roomId, { ...localMsg, status: 'pending' });
-      startAckTimer(mid);
+      const deliveries = await fanoutSend(contact, { kind: 'file', name, mime, data }, mid);
+      void syncToOwnDevices(contact.peerMasterPub, 'sent', mid, localMsg.ts, { kind: 'file', name, mime, data });
+      await appendMessage(contact.roomId, { ...localMsg, deliveries });
       await saveContact(dek, contact);
       bump();
     } catch (e) {
@@ -1704,7 +1956,7 @@ export function Messenger({ dek, onLock }: Props) {
   async function ensureProfileSent(contact: Contact) {
     const id = identityRef.current;
     const p = myProfileRef.current;
-    if (!id || !contact.ratchet || profileSentRef.current.has(contact.roomId)) return;
+    if (!id || !hasSession(contact) || profileSentRef.current.has(contact.roomId)) return;
     if (!p.name && !p.avatarB64) return;
     try {
       const envelope = await encryptAndPersist(contact, () =>
@@ -1725,7 +1977,7 @@ export function Messenger({ dek, onLock }: Props) {
 
   async function broadcastProfile() {
     profileSentRef.current.clear();
-    for (const c of contactsRef.current) if (c.ratchet) await ensureProfileSent(c);
+    for (const c of contactsRef.current) if (hasSession(c)) await ensureProfileSent(c);
   }
 
   async function togglePush() {
@@ -2294,7 +2546,7 @@ export function Messenger({ dek, onLock }: Props) {
                         </div>
                         <div className="conv-line2">
                           <span className="conv-last">
-                            {item.last ? lastPreview(item.last) : item.contact.ratchet ? 'Verbunden' : 'Neu — sag Hallo'}
+                            {item.last ? lastPreview(item.last) : hasSession(item.contact) ? 'Verbunden' : 'Neu — sag Hallo'}
                           </span>
                           {item.unread > 0 && <span className="unread">{item.unread}</span>}
                         </div>
@@ -2437,16 +2689,7 @@ export function Messenger({ dek, onLock }: Props) {
               )}
               <span className="meta">
                 {fmtClock(m.ts)}
-                {m.mine &&
-                  (m.status === 'failed' ? (
-                    <span className="msg-failed" title="Nicht zugestellt">
-                      ⚠ nicht zugestellt
-                    </span>
-                  ) : (
-                    <span className="msg-check" style={{ opacity: m.status === 'pending' ? 0.35 : 1 }}>
-                      <IconDoubleCheck size={13} />
-                    </span>
-                  ))}
+                {m.mine && msgStatusEl(m)}
               </span>
             </div>
           ))}
@@ -2521,6 +2764,11 @@ export function Messenger({ dek, onLock }: Props) {
             </span>
             Verschlüsselt · Ende-zu-Ende
           </div>
+          {multiDevice && (
+            <div className="enc-pill" title="Gruppen synchronisieren noch nicht auf deine anderen Geräte (kommt mit v3).">
+              ⓘ Gruppen synchen noch nicht auf deine anderen Geräte
+            </div>
+          )}
           {msgs.map((m, i) => (
             <div
               key={`${m.ts}-${i}`}
@@ -2553,16 +2801,7 @@ export function Messenger({ dek, onLock }: Props) {
               )}
               <span className="meta">
                 {fmtClock(m.ts)}
-                {m.mine &&
-                  (m.status === 'failed' ? (
-                    <span className="msg-failed" title="Nicht zugestellt">
-                      ⚠ nicht zugestellt
-                    </span>
-                  ) : (
-                    <span className="msg-check" style={{ opacity: m.status === 'pending' ? 0.35 : 1 }}>
-                      <IconDoubleCheck size={13} />
-                    </span>
-                  ))}
+                {m.mine && msgStatusEl(m)}
               </span>
             </div>
           ))}

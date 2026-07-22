@@ -61,8 +61,7 @@ if (typeof S.migrateContactRoomId === 'function' && typeof S.computeMasterRoomId
     peerSignPub: bob.sign.publicKey,
     peerDhPub: bob.dh.publicKey,
     peerFingerprint: 'fp',
-    ratchet: null,
-    pendingHeader: null,
+    sessions: new Map(),
   };
 
   const oldId = contact.roomId;

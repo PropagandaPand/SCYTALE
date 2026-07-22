@@ -36,6 +36,7 @@
  * never over this QR channel.
  */
 import { verifyDeviceCert, signDeviceCert } from './master';
+import { verify } from './identity';
 import {
   signDeviceList,
   verifyDeviceList,
@@ -44,6 +45,7 @@ import {
   decodeDeviceList,
   type DeviceList,
   type DeviceEntry,
+  type SignedPreKeyPublic,
 } from './devicelist';
 import { getSodium } from './sodium';
 import { utf8 } from './codec';
@@ -54,6 +56,9 @@ export interface LinkRequest {
   deviceSignPub: Bytes; // Ed25519 of the new device
   deviceDhPub: Bytes; // X25519 of the new device
   sasEphPub: Bytes; // new device's SAS ephemeral
+  // N's signed prekey (Stage 3d v2): so P can put it in the master-signed device
+  // list and peers can fan out X3DH to this new device without it writing first.
+  signedPreKey: SignedPreKeyPublic;
 }
 
 /**
@@ -84,7 +89,8 @@ export interface LinkGrant {
   deviceList: DeviceList; // updated list (version+1) that INCLUDES N
 }
 
-const REQ_VERSION = 1;
+const REQ_VERSION = 2; // v2 (Stage 3d): the QR gained N's signed prekey
+const REQ_LEN = 1 + 32 + 32 + 32 + 4 + 32 + 64; // version | signPub | dhPub | sasEph | spkId | spkPub | spkSig
 // v2: gained masterPub + epoch, because the SAS must commit to the master
 // before the user confirms. A v1 decoder sees the new length and reports a
 // version mismatch ("update both devices") rather than a bogus parse.
@@ -116,14 +122,18 @@ export function decodeLinkOffer(bytes: Bytes): LinkOffer {
   };
 }
 
-/** Compact QR payload: version(1) | signPub(32) | dhPub(32) | sasEphPub(32). */
+/** Compact QR: version(1) | signPub(32) | dhPub(32) | sasEphPub(32) | spkId(4, BE)
+ *  | spkPub(32) | spkSig(64). */
 export async function encodeLinkRequest(req: LinkRequest): Promise<string> {
   const s = await getSodium();
-  const buf = new Uint8Array(1 + 32 + 32 + 32);
+  const buf = new Uint8Array(REQ_LEN);
   buf[0] = REQ_VERSION;
   buf.set(req.deviceSignPub, 1);
   buf.set(req.deviceDhPub, 33);
   buf.set(req.sasEphPub, 65);
+  new DataView(buf.buffer).setUint32(97, req.signedPreKey.id);
+  buf.set(req.signedPreKey.pub, 101);
+  buf.set(req.signedPreKey.signature, 133);
   return s.to_base64(buf, s.base64_variants.URLSAFE_NO_PADDING);
 }
 
@@ -146,11 +156,13 @@ export async function decodeLinkRequest(token: string): Promise<LinkRequest> {
       `Kopplungs-Code hat Format-Version ${buf[0]}, diese App versteht nur ${REQ_VERSION} — bitte beide Geräte aktualisieren.`,
     );
   }
-  if (buf.length !== 97) throw new Error('Ungültiger Kopplungs-Code.');
+  if (buf.length !== REQ_LEN) throw new Error('Ungültiger Kopplungs-Code.');
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   return {
     deviceSignPub: buf.slice(1, 33),
     deviceDhPub: buf.slice(33, 65),
     sasEphPub: buf.slice(65, 97),
+    signedPreKey: { id: dv.getUint32(97), pub: buf.slice(101, 133), signature: buf.slice(133, 197) },
   };
 }
 
@@ -173,8 +185,20 @@ export async function createLinkGrant(
   if (deviceInList(currentList, req.deviceSignPub)) {
     throw new Error('Dieses Gerät ist bereits gekoppelt.');
   }
+  // Verify N's signed-prekey self-signature BEFORE the master vouches for it. The
+  // linking SAS binds only the two masters + ephemerals, not the SPK, so a QR-tamper
+  // could otherwise splice an attacker's SPK into a master-signed list (peers would
+  // then fail to initiate to N → silent inbound reachability DoS). (Review fund 3.)
+  if (!(await verify(req.signedPreKey.pub, req.signedPreKey.signature, req.deviceSignPub))) {
+    throw new Error('Signed-Prekey-Signatur des neuen Geräts ungültig — Kopplung abgebrochen.');
+  }
   const deviceCert = await signDeviceCert(masterPriv, epoch, req.deviceSignPub, req.deviceDhPub);
-  const entry: DeviceEntry = { signPub: req.deviceSignPub, dhPub: req.deviceDhPub, deviceCert };
+  const entry: DeviceEntry = {
+    signPub: req.deviceSignPub,
+    dhPub: req.deviceDhPub,
+    deviceCert,
+    signedPreKey: req.signedPreKey, // so peers can fan out to the newly linked device
+  };
   const newList = await signDeviceList(masterPriv, masterPub, epoch, currentList.version + 1, [
     ...currentList.devices,
     entry,

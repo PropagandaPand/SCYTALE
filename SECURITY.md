@@ -2,8 +2,8 @@
 
 SCYTALE ist gegen **anlasslose Massenüberwachung** gebaut (Chatkontrolle /
 CSAR). Dieses Dokument ist die genaue Aufschlüsselung aller Mechanismen und
-sagt ehrlich, was geschützt ist — und was nicht. Stand: v0.19.1 (Stufe 3c,
-gehärtet nach adversarialer Gegenprüfung).
+sagt ehrlich, was geschützt ist — und was nicht. Stand: v0.20.1 (Stufe 3d
+Multi-Device: Fan-out + Per-Device-Sessions + Self-Sync).
 
 **Leitprinzipien:** niemals eigene Krypto erfinden (vetted Primitiven +
 etablierte Protokolle: X3DH, Double Ratchet); der Server ist ein **dummer
@@ -222,6 +222,45 @@ Primitiven beim Start.
   deshalb einmal beim Übergang und wird danach zu **Kontakt-Zustand**
   (`retiredAttempt`), sichtbar in der Kontaktansicht. Bestätigt der Nutzer ihn,
   verschwindet nur der *Hinweis* — die Sperrliste selbst bleibt unverändert.
+
+### Stufe 3d — Multi-Device: Fan-out, Per-Device-Sessions, Self-Sync
+
+- **Eine Session PRO Peer-Gerät.** `Contact.sessions` ist eine Map von
+  `base64(deviceSignPub)` auf eine eigene Double-Ratchet-Session. Die Person-Ebene
+  (`roomId`, `verified`, `peerDeviceList`, die Identitätstür) bleibt **singulär**;
+  nur die Ratchet-Schicht vervielfacht sich. **Invariante I gilt PRO Session:** ein
+  Message-Key genau einmal *pro Session*, und eine `RatchetState` wird **nie** über
+  zwei Map-Einträge geteilt/geklont (das verbände zwei Ketten zu einem Two-Time-Pad
+  — als ausführbare Eigenschaft mit Negativkontrolle in `invariant-i-per-session`).
+- **Fan-out.** Eine 1:1-Nachricht wird für **jedes autorisierte Gerät** der
+  master-signierten `peerDeviceList` verschlüsselt (`fanoutDeliveries`), jede Kopie
+  mit **derselben E2E-`mid`** (16 Zufallsbytes, **innerhalb** der AEAD → nicht
+  fälschbar zur Unterdrückung einer echten Nachricht), sodass die Geräte dedupen.
+  Ein Gerät, an das wir (noch) nicht initiieren können, ist **„nicht mehr gültig"**
+  (`stale`) und fällt aus dem Nenner des Zustell-Aggregats — korrektes Verhalten
+  zeigt nie einen Dauerfehler. Jedes Gerät ist eine eigene Session (kein Aliasing);
+  ein Pro-Gerät-Fehler isoliert dieses Gerät.
+- **Signed Prekey in der devlist (v2).** Damit ein Peer an ein **stilles**
+  Zweitgerät initiieren kann, trägt jeder Listen-Eintrag den stabilen Signed Prekey,
+  **im master-signierten `listMsg` gebunden** → ein veralteter SPK reist nur mit
+  einer niedriger-versionierten Liste, die `isNewerDeviceList` abweist (Rollback-
+  Schutz gratis über die Listen-Monotonie, kein zweiter versionierter Kanal). N's
+  SPK fließt über die Kopplungs-QR (v2) und wird von P in die master-signierte Liste
+  gelegt.
+- **Self-Sync.** Was ich sende, spiegelt ein verstecktes `self`-Kontakt
+  (`peerMaster == mein Master`, `peerDeviceList == meine eigene Geräteliste`) als
+  `sent`-Kopie an meine **anderen** Geräte. Der Frame trägt den **Ziel-Peer-Master**:
+  **Decrypt-Raum ≠ Anzeige-Raum** — die Kopie authentifiziert unter dem self-Kontakt
+  (nur meine eigenen, master-gelisteten Geräte kommen durch), wird aber im
+  Gesprächsraum mit dem Peer angezeigt. Sie ist **terminal** (nie re-fanned,
+  re-synced oder als ihr innerer Effekt re-dispatcht) und über die Original-`mid`
+  dedupliziert. Ein Prekey unter **meinem** Master wird zum self-Kontakt geroutet,
+  nie als sichtbarer Kontakt auto-erzeugt. Ein widerrufenes Eigengerät wird aus dem
+  self-Kontakt geprunt (keine Historie mehr dorthin).
+- **Erreichbarkeit ist eine Eigenschaft der PERSON, nicht des Gerätepaars.** Der
+  Aggregat-Status („an N/M Geräten") und der Erreichbarkeits-Punkt bewerten das
+  **aktuelle** Geräteset. Das ist dieselbe Umkehrung wie bei der Tür: die
+  identitätsstiftende Größe ist die Person.
 
 ### Gerätekopplung (Device-Linking)
 
@@ -551,6 +590,36 @@ Header angezeigte **Versionsnummer** hilft beim Abgleich, welcher Build läuft.
   blockiert. Dieselbe Roster-Fläche, auf der master-basierte Bindung ohnehin nicht
   mehr gegen ein Zweitgerät verteidigt. Kommt mit v3/MLS; als ausführbare
   Zielvorgabe festgehalten in `tests/group-revocation.xfail.test.mjs`.
+- **Gruppen × Geräte (3e-Grenze):** 3d-Fan-out + Self-Sync sind **1:1-only**.
+  Eine Gruppennachricht erreicht **kein Zweitgerät** eines Mitglieds, und mein
+  eigenes Zweitgerät sieht nie Gruppennachrichten von meinem anderen Gerät
+  (`ensureMemberContact` ohne `peerDeviceList`, `gossipDeviceList` überspringt
+  versteckte Kontakte, Self-Sync ist 1:1). Ein sichtbarer Hinweis im Gruppen-Chat
+  sagt das, statt es als Nachrichtenverlust lesen zu lassen. Zweite offene
+  Eigenschaft: die **Attachment-Kardinalität** in Gruppen (Σ Geräte × Mitglieder
+  ist ein Verfügbarkeits-Hebel). Beide als ausführbare Zielvorgabe in
+  `tests/group-device-fanout.xfail.test.mjs`; kommt mit 3e.
+- **Self-Sync nur für GESENDETE Nachrichten** (Receive-Sync-Redundanz aufgeschoben):
+  meine anderen Geräte sehen, was ich sende (sent-Kopie), und empfangene
+  Nachrichten des Peers direkt über dessen Fan-out an meine Geräteliste. Erreicht
+  ein Peer meine Geräte NICHT (pre-3d-Client, oder er hat meine Liste noch nicht
+  gelernt), fehlt die empfangene Nachricht auf meinem Zweitgerät, bis der Peer die
+  Liste sieht. **Reihenfolge über Geräte** ist Ankunfts-, nicht Compose-Zeit —
+  eine offline nachgeladene Kopie kann out-of-order einsortiert werden (echte
+  chronologische Konvergenz bräuchte einen autor-gestempelten Zeitstempel im Frame).
+- **Zustell-Banner vs. Bubble (kosmetische 3d-Restkanten)**: der Zustell-Status
+  jeder Nachricht ist die *Bubble* (`aggregateDelivery` über die aktuelle
+  Geräteliste — stale/widerrufene Geräte fallen aus dem Nenner, siehe Test).
+  Das globale Fehler-Banner ist nur ein zusätzlicher Hinweis und feuert seit
+  v0.20.1 ausschließlich bei einem echten `pending→failed`-Übergang, nie für eine
+  terminale (`sent`/`stale`) Zustellung. Zwei benigne Restkanten bleiben, beide
+  ohne Krypto- oder Bubble-Auswirkung: (a) ein **missgebildeter Relay-Nack ohne
+  `mid`** kann das Banner heben, obwohl keine Nachricht zuzuordnen ist — der echte
+  Fehlschlag wird vom per-Zustellung armierten 10s-Timeout ohnehin *mit* Zuordnung
+  gefangen; (b) feuert dieser Timeout (echter Timeout) *bevor* ein >10s später
+  eintreffender Geräte-Widerruf die Zeile auf `stale` kippt, bleibt das Banner
+  sichtbar, während die Bubble am Ende „zugestellt" aggregiert. Beides betrifft nur
+  den Hinweis-Text, nicht den authentifizierten Zustell-Zustand.
 - **Code-Delivery-Vertrauen**: in der Testphase `autoUpdate` (Server kann Code
   still aktualisieren) → vor Release auf `prompt`. Mitigiert per Reproducible
   Build, nicht eliminiert.

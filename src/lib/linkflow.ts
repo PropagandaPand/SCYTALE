@@ -42,6 +42,7 @@ import {
   SEALED_LINK_GRANT,
   isPrimaryDevice,
   type LinkRequest,
+  type SignedPreKeyPublic,
   type LinkGrant,
   type LinkOffer,
   type SasResult,
@@ -79,12 +80,16 @@ export interface LinkSession {
  * N starts: produce the QR token. Uses OUR OWN device keys — this is the one
  * moment a fresh install advertises itself, and it grants nothing.
  */
-export async function startLinkOnN(id: IdentityKeys): Promise<{ session: LinkSession; qrToken: string }> {
+export async function startLinkOnN(
+  id: IdentityKeys,
+  ownSpk: SignedPreKeyPublic,
+): Promise<{ session: LinkSession; qrToken: string }> {
   const myEph = await generateSasEphemeral();
   const request: LinkRequest = {
     deviceSignPub: id.sign.publicKey,
     deviceDhPub: id.dh.publicKey,
     sasEphPub: myEph.publicKey,
+    signedPreKey: ownSpk,
   };
   return {
     session: { role: 'new', myEph, request, peerSignPub: id.sign.publicKey, peerDhPub: id.dh.publicKey },

@@ -46,9 +46,9 @@ const first = await S.openPayload(bob, await S.sendMessage(alice, aliceContact, 
 const firstEnv = await S.decodeEnvelope(first.payload);
 const bobContact = await S.makeContactFromHeader(S.asMasterPub(bob.master.publicKey), firstEnv.x3dh);
 await S.receiveEnvelope(bob, bobContact, firstEnv, bobLookup);
-ok('Vorbedingung: Session etabliert', bobContact.ratchet !== null);
-ok('Vorbedingung: Ratchet-Gerät = alices Primärgerät',
-  bobContact.ratchetDeviceSignPub && S.bytesEqual(bobContact.ratchetDeviceSignPub, alice.sign.publicKey));
+ok('Vorbedingung: Session etabliert', S.hasSession(bobContact));
+ok('Vorbedingung: Session hängt an alices Primärgerät',
+  !!S.sessionFor(bobContact, alice.sign.publicKey)?.ratchet);
 
 // v2 list still CONTAINS the ratchet's device (primary) → ratchet must SURVIVE.
 const listKeepsPrimary = await S.signDeviceList(alice.master.privateKey, alice.master.publicKey, 1, 2, [
@@ -60,7 +60,7 @@ const adopted2 = await S.applyDeviceListUpdate(bobContact, listKeepsPrimary, new
 // ratchet's device must NOT null the ratchet (else the guard is unconditional and
 // the real test below would pass vacuously).
 ok('Liste v2 übernommen', adopted2 === true);
-ok('Ratchet BLEIBT, solange sein Gerät gelistet ist (Negativkontrolle)', bobContact.ratchet !== null);
+ok('Session BLEIBT, solange ihr Gerät gelistet ist (Negativkontrolle)', S.hasSession(bobContact));
 
 // v3 list REVOKES the primary (only the second device remains) → the device behind
 // the live ratchet is gone → ratchet must be torn down.
@@ -69,8 +69,8 @@ const listRevokesPrimary = await S.signDeviceList(alice.master.privateKey, alice
 ]);
 const adopted3 = await S.applyDeviceListUpdate(bobContact, listRevokesPrimary, new Set());
 ok('Liste v3 übernommen', adopted3 === true);
-ok('Ratchet ABGERISSEN, weil sein Gerät widerrufen wurde', bobContact.ratchet === null);
-ok('Ratchet-Gerät vergessen', bobContact.ratchetDeviceSignPub === undefined);
+ok('Session ABGERISSEN, weil ihr Gerät widerrufen wurde', !S.hasSession(bobContact));
+ok('Session des widerrufenen Geräts entfernt', !S.sessionFor(bobContact, alice.sign.publicKey));
 
 console.log(`\n${pass} ok, ${fail} fail`);
 process.exit(fail ? 1 : 0);

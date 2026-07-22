@@ -46,7 +46,7 @@ const first = await S.openPayload(bob, await S.sendMessage(alice, aliceContact, 
 const firstEnv = await S.decodeEnvelope(first.payload);
 const bobContact = await S.makeContactFromHeader(S.asMasterPub(bob.master.publicKey), firstEnv.x3dh);
 await S.receiveEnvelope(bob, bobContact, firstEnv, bobLookup);
-ok('Vorbedingung: Bobs Kontakt für Alice etabliert', bobContact.ratchet !== null);
+ok('Vorbedingung: Bobs Kontakt für Alice etabliert', S.hasSession(bobContact));
 
 // Alice's device list has TWO devices, signed under alice's master. Alice gossips.
 const aliceList = await S.signDeviceList(alice.master.privateKey, alice.master.publicKey, 1, 2, [
@@ -56,7 +56,7 @@ const aliceList = await S.signDeviceList(alice.master.privateKey, alice.master.p
 // (Bob's contact for Alice must be able to verify it → it's alice-master-signed.)
 const gossip = await S.openPayload(bob, await S.sendDeviceList(alice, aliceContact, aliceList));
 const gossipEnv = await S.decodeEnvelope(gossip.payload);
-const content = await S.receiveEnvelope(bob, bobContact, gossipEnv, bobLookup);
+const content = (await S.receiveEnvelope(bob, bobContact, gossipEnv, bobLookup)).content;
 
 ok('empfangen als kind=devlist', content.kind === 'devlist');
 ok('devlist-Frame trägt die Liste (v2, 2 Geräte)',

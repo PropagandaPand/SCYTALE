@@ -51,7 +51,7 @@ async function firstMessageFrom(who, text) {
   const opened = await S.openPayload(bob, sealed);
   const env = await S.decodeEnvelope(opened.payload);
   const bobContact = await S.makeContactFromHeader(bob.dh.publicKey, env.x3dh);
-  const content = await S.receiveEnvelope(bob, bobContact, env, lookup);
+  const content = (await S.receiveEnvelope(bob, bobContact, env, lookup)).content;
   return content.text;
 }
 

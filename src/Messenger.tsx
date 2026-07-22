@@ -50,6 +50,7 @@ import {
   receiveEnvelope,
   resolveContactByConv,
   hasSession,
+  randomMid,
   acceptMasterChange,
   acceptRotation,
   reconnectContact,
@@ -131,16 +132,17 @@ function hexOf(b: Uint8Array): string {
   return s;
 }
 
-function incomingMessage(content: MessageContent): ChatMessage {
+function incomingMessage(content: MessageContent, mid: string): ChatMessage {
   if (content.kind === 'file') {
     return {
       mine: false,
       ts: Date.now(),
+      mid,
       file: { name: content.name, mime: content.mime, dataB64: bytesToB64(content.data) },
     };
   }
   // text (profile is handled separately and never reaches here)
-  return { mine: false, text: content.kind === 'text' ? content.text : '', ts: Date.now() };
+  return { mine: false, text: content.kind === 'text' ? content.text : '', ts: Date.now(), mid };
 }
 
 function downloadFile(f: { name: string; mime: string; dataB64: string }) {
@@ -796,9 +798,12 @@ export function Messenger({ dek, onLock }: Props) {
       }
 
       const wasNew = !hasSession(contact);
-      let content;
+      let content!: MessageContent;
+      let mid = '';
       try {
-        content = await receiveEnvelope(id, contact, env, lookup);
+        const r = await receiveEnvelope(id, contact, env, lookup);
+        content = r.content;
+        mid = r.mid;
       } catch (e) {
         if (e instanceof MasterChangedError) {
           // Persist the pending claim; the message itself is dropped. `verified`
@@ -872,8 +877,14 @@ export function Messenger({ dek, onLock }: Props) {
         } catch (e) {
           console.warn('[recv] Rotation abgelehnt:', (e as Error).message);
         }
+      } else if (mid && (messagesRef.current[contact.roomId] ?? []).some((m) => m.mid === mid)) {
+        // DEDUP on the E2E mid: one message can reach this device via direct fan-out
+        // AND a self-sync copy from another of my devices AND a re-delivery. The
+        // message history is the dedup source of truth (the mid is authenticated in
+        // the AEAD, so it can't be forged to suppress a real future message).
+        // Already have it — skip (the ackId is still recorded in `finally`).
       } else {
-        await appendMessage(contact.roomId, incomingMessage(content));
+        await appendMessage(contact.roomId, incomingMessage(content, mid));
         if (!(viewRef.current === 'chat' && activeRoomRef.current === contact.roomId)) {
           unreadRef.current[contact.roomId] = (unreadRef.current[contact.roomId] ?? 0) + 1;
         }
@@ -1481,14 +1492,16 @@ export function Messenger({ dek, onLock }: Props) {
     const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
     if (!contact) return;
     try {
-      const envelope = await encryptAndPersist(contact, () => sendMessage(id, contact, text));
+      // ONE E2E mid: stamped into the AEAD frame, reused for the local echo and
+      // (Stage 3d) shared across every fan-out + self-sync copy so they dedup.
+      const mid = randomMid();
+      const envelope = await encryptAndPersist(contact, () => sendMessage(id, contact, text, mid));
       let room = sendRoomRef.current.get(contact.roomId);
       if (!room) {
         await connectSend(contact);
         room = sendRoomRef.current.get(contact.roomId);
       }
       const relay = room ? relaysRef.current.get(room) : undefined;
-      const mid = crypto.randomUUID();
       relay?.send(envelope, mid);
       await appendMessage(activeRoom, { mine: true, text, ts: Date.now(), mid, status: 'pending' });
       startAckTimer(mid);
@@ -1536,7 +1549,7 @@ export function Messenger({ dek, onLock }: Props) {
       // A file literally named like our sticker marker would render chrome-free
       // on the other side. Harmless but confusing, so rename it.
       if (name === STICKER_FILENAME) name = 'datei';
-      const mid = crypto.randomUUID();
+      const mid = randomMid();
       const localMsg: ChatMessage = { mine: true, ts: Date.now(), file: { name, mime, dataB64: bytesToB64(data) }, mid };
       if (activeGroup) {
         await groupSend({ kind: 'file', name, mime, data }, localMsg);
@@ -1544,7 +1557,7 @@ export function Messenger({ dek, onLock }: Props) {
       }
       const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
       if (!contact) return;
-      await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendFile(id, contact, name, mime, data)), mid);
+      await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendFile(id, contact, name, mime, data, mid)), mid);
       await appendMessage(contact.roomId, { ...localMsg, status: 'pending' });
       startAckTimer(mid);
       await saveContact(dek, contact);
@@ -1587,7 +1600,7 @@ export function Messenger({ dek, onLock }: Props) {
     setError('');
     try {
       const data = b64ToBytes(st.dataB64);
-      const mid = crypto.randomUUID();
+      const mid = randomMid();
       const localMsg: ChatMessage = {
         mine: true,
         ts: Date.now(),
@@ -1602,7 +1615,7 @@ export function Messenger({ dek, onLock }: Props) {
       if (!contact) return;
       await sendEnvelopeTo(
         contact,
-        await encryptAndPersist(contact, () => sendFile(id, contact, STICKER_FILENAME, st.mime, data)),
+        await encryptAndPersist(contact, () => sendFile(id, contact, STICKER_FILENAME, st.mime, data, mid)),
         mid,
       );
       await appendMessage(contact.roomId, { ...localMsg, status: 'pending' });
@@ -1681,7 +1694,7 @@ export function Messenger({ dek, onLock }: Props) {
       return;
     }
     const name = `sprachnachricht.${ext}`;
-    const mid = crypto.randomUUID();
+    const mid = randomMid();
     const localMsg: ChatMessage = { mine: true, ts: Date.now(), file: { name, mime, dataB64: bytesToB64(data) }, mid };
     try {
       if (activeGroup) {
@@ -1690,7 +1703,7 @@ export function Messenger({ dek, onLock }: Props) {
       }
       const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
       if (!contact) return;
-      await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendFile(id, contact, name, mime, data)), mid);
+      await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendFile(id, contact, name, mime, data, mid)), mid);
       await appendMessage(contact.roomId, { ...localMsg, status: 'pending' });
       startAckTimer(mid);
       await saveContact(dek, contact);

@@ -42,7 +42,7 @@ console.log('\n[Invariante I pro Session: jeder Ratchet hat genau einen Besitzer
 const a1c = await S.makeContact(S.asMasterPub(A1.master.publicKey), bobBundle);
 const e1 = await S.decodeEnvelope((await S.openPayload(bob, await S.sendMessage(A1, a1c, 'von A1'))).payload);
 const bobC = await S.makeContactFromHeader(S.asMasterPub(bob.master.publicKey), e1.x3dh);
-const c1 = await S.receiveEnvelope(bob, bobC, e1, bobLookup);
+const c1 = (await S.receiveEnvelope(bob, bobC, e1, bobLookup)).content;
 
 // Bob learns Alice's master-signed list {A1, A2}, so A2 becomes authorised.
 const list = await S.signDeviceList(A1.master.privateKey, A1.master.publicKey, 1, 2, [
@@ -54,7 +54,7 @@ await S.applyDeviceListUpdate(bobC, list, new Set());
 // A2 → Bob: a SEPARATE device establishes its OWN session on the same contact.
 const a2c = await S.makeContact(S.asMasterPub(A2.master.publicKey), bobBundle);
 const e2 = await S.decodeEnvelope((await S.openPayload(bob, await S.sendMessage(A2, a2c, 'von A2'))).payload);
-const c2 = await S.receiveEnvelope(bob, bobC, e2, bobLookup);
+const c2 = (await S.receiveEnvelope(bob, bobC, e2, bobLookup)).content;
 
 const s1 = S.sessionFor(bobC, A1.sign.publicKey);
 const s2 = S.sessionFor(bobC, A2.sign.publicKey);

@@ -55,7 +55,7 @@ const forged = await S.makeRotation(
   2,
 );
 const forgedEnv = await S.openPayload(bob, await S.sendRotation(alice, aliceContact, forged));
-const forgedContent = await S.receiveEnvelope(bob, bobContact, await S.decodeEnvelope(forgedEnv.payload), bobLookup);
+const forgedContent = (await S.receiveEnvelope(bob, bobContact, await S.decodeEnvelope(forgedEnv.payload), bobLookup)).content;
 ok('gefälschte Kette dekodiert als kind=rotation (Wire funktioniert)', forgedContent.kind === 'rotation');
 let forgedRejected = false;
 try {
@@ -73,7 +73,7 @@ const statement = await S.makeRotation(
   2,
 );
 const env = await S.openPayload(bob, await S.sendRotation(alice, aliceContact, statement));
-const content = await S.receiveEnvelope(bob, bobContact, await S.decodeEnvelope(env.payload), bobLookup);
+const content = (await S.receiveEnvelope(bob, bobContact, await S.decodeEnvelope(env.payload), bobLookup)).content;
 ok('echte Kette als kind=rotation empfangen', content.kind === 'rotation');
 ok('Statement über den Draht unverändert (byte-8-Frame)',
   S.bytesEqual(content.statement.newMasterPub, aliceNewMaster.publicKey) && content.statement.epoch === 2);

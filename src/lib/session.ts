@@ -606,6 +606,38 @@ export type MessageContent =
   | { kind: 'devlist'; list: DeviceList } // E2E gossip of my updated device list
   | { kind: 'rotation'; statement: RotationStatement }; // dual-signed master rotation (proven door)
 
+/** A decrypted inbound message plus its sender-stamped E2E dedup id. */
+export interface ReceivedMessage {
+  mid: string;
+  content: MessageContent;
+}
+
+// ── E2E message id (Stage 3d dedup) ─────────────────────────────────────
+// A random 16-byte id the SENDER stamps into the AEAD-protected plaintext, the
+// SAME across every fan-out copy and every self-sync copy of one message. On
+// receipt it dedups a message that arrives via more than one path (direct fan-out
+// + a self-sync copy from another of my devices + a re-delivery). It MUST be
+// authenticated (inside the ratchet AEAD): an attacker who could forge a colliding
+// mid on an injected message would suppress a real future message (self-censorship)
+// — so it is NOT the relay-chosen ackId and NOT an outer envelope field.
+const MID_LEN = 16;
+export function randomMid(): string {
+  const b = crypto.getRandomValues(new Uint8Array(MID_LEN));
+  let h = '';
+  for (const x of b) h += x.toString(16).padStart(2, '0');
+  return h;
+}
+function midToBytes(mid: string): Bytes {
+  const b = new Uint8Array(MID_LEN);
+  for (let i = 0; i < MID_LEN; i++) b[i] = parseInt(mid.slice(i * 2, i * 2 + 2), 16);
+  return b;
+}
+function bytesToMid(b: Bytes): string {
+  let h = '';
+  for (const x of b) h += x.toString(16).padStart(2, '0');
+  return h;
+}
+
 function prefixed(type: number, body: Uint8Array): Bytes {
   const out = new Uint8Array(1 + body.length);
   out[0] = type;
@@ -713,7 +745,7 @@ async function unframeContent(bytes: Bytes): Promise<MessageContent> {
   return { kind: 'file', name, mime, data: bytes.slice(o) };
 }
 
-async function sendContent(me: IdentityKeys, contact: Contact, content: MessageContent): Promise<Bytes> {
+async function sendContent(me: IdentityKeys, contact: Contact, content: MessageContent, mid: string = randomMid()): Promise<Bytes> {
   // Enforced HERE, not in the UI: after a device-linking identity swap the peer
   // still has our OLD master pinned, so any message over the surviving session
   // would assert an identity we no longer hold — a false authenticity claim, not
@@ -736,7 +768,8 @@ async function sendContent(me: IdentityKeys, contact: Contact, content: MessageC
     session = { ratchet, pendingHeader: header, deviceSignPub: contact.peerSignPub };
     contact.sessions.set(key, session);
   }
-  const message = await ratchetEncrypt(session.ratchet!, await frameContent(content));
+  // Stamp the E2E mid into the AEAD plaintext: mid(16) ‖ frameContent(content).
+  const message = await ratchetEncrypt(session.ratchet!, concatBytes(midToBytes(mid), await frameContent(content)));
   const conv = contact.roomId;
   const envelope = session.pendingHeader
     ? ({ type: 'prekey', conv, x3dh: session.pendingHeader, message } as const)
@@ -747,8 +780,8 @@ async function sendContent(me: IdentityKeys, contact: Contact, content: MessageC
   return sealPayload(contact.peerDhPub, SEALED_ENVELOPE, await encodeEnvelope(envelope));
 }
 
-export async function sendMessage(me: IdentityKeys, contact: Contact, text: string): Promise<Bytes> {
-  return sendContent(me, contact, { kind: 'text', text });
+export async function sendMessage(me: IdentityKeys, contact: Contact, text: string, mid?: string): Promise<Bytes> {
+  return sendContent(me, contact, { kind: 'text', text }, mid);
 }
 
 export async function sendFile(
@@ -757,8 +790,9 @@ export async function sendFile(
   name: string,
   mime: string,
   data: Bytes,
+  mid?: string,
 ): Promise<Bytes> {
-  return sendContent(me, contact, { kind: 'file', name, mime, data });
+  return sendContent(me, contact, { kind: 'file', name, mime, data }, mid);
 }
 
 export async function sendProfile(
@@ -811,7 +845,7 @@ export async function receiveMessage(
   contact: Contact,
   bytes: Bytes,
   lookup: PreKeyLookup,
-): Promise<MessageContent> {
+): Promise<ReceivedMessage> {
   const opened = await openPayload(me, bytes);
   if (!opened || opened.type !== SEALED_ENVELOPE) {
     throw new Error('Kein Nachrichten-Envelope (falscher Nutzlast-Typ).');
@@ -824,7 +858,7 @@ export async function receiveEnvelope(
   contact: Contact,
   envelope: Envelope,
   lookup: PreKeyLookup,
-): Promise<MessageContent> {
+): Promise<ReceivedMessage> {
   // ── AUTHORISE every prekey — master-based, at the TOP, before any mutation ──
   // `conv` is a pure routing field: the sender picks it freely and the relay
   // accepts unauthenticated sends into any inbox, so being matched to `contact`
@@ -938,7 +972,9 @@ export async function receiveEnvelope(
   // the peer has our session, so we stop attaching the X3DH header.
   const deviceSignPub = envelope.type === 'prekey' ? envelope.x3dh.identitySignPub : contact.peerSignPub;
   contact.sessions.set(sessKey, { ratchet, pendingHeader: null, deviceSignPub });
-  return await unframeContent(plaintext);
+  // Split off the sender-stamped E2E mid (16 bytes) from the front of the plaintext.
+  const mid = bytesToMid(plaintext.slice(0, MID_LEN));
+  return { mid, content: await unframeContent(plaintext.slice(MID_LEN)) };
 }
 
 // --- Contact (de)serialisation for the vault (produces plaintext bytes only) ---

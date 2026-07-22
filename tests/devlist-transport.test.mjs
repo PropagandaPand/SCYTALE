@@ -56,7 +56,7 @@ const aliceList = await S.signDeviceList(alice.master.privateKey, alice.master.p
 // (Bob's contact for Alice must be able to verify it → it's alice-master-signed.)
 const gossip = await S.openPayload(bob, await S.sendDeviceList(alice, aliceContact, aliceList));
 const gossipEnv = await S.decodeEnvelope(gossip.payload);
-const content = await S.receiveEnvelope(bob, bobContact, gossipEnv, bobLookup);
+const content = (await S.receiveEnvelope(bob, bobContact, gossipEnv, bobLookup)).content;
 
 ok('empfangen als kind=devlist', content.kind === 'devlist');
 ok('devlist-Frame trägt die Liste (v2, 2 Geräte)',

@@ -45,7 +45,7 @@ const bobLookup = {
   signedPreKey: (id) => (bobSpk.id === id ? bobSpk.keyPair : undefined),
   consumeOneTimePreKey: () => undefined,
 };
-const content = await S.receiveEnvelope(bob, bobContact, env, bobLookup);
+const content = (await S.receiveEnvelope(bob, bobContact, env, bobLookup)).content;
 ok('stilles Gerät initiiert + Handshake vollzogen', content.kind === 'text' && content.text === 'hallo stilles Gerät');
 
 // B) Wire round-trip preserves the SPK (v2).

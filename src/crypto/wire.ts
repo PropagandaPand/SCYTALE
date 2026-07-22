@@ -70,13 +70,19 @@ export async function decodeInitialHeader(o: InitialHeaderWire): Promise<Initial
 
 export type Envelope =
   | { type: 'prekey'; conv: string; x3dh: InitialMessageHeader; message: RatchetMessage }
-  | { type: 'msg'; conv: string; message: RatchetMessage };
+  // `dev` = the SENDER's device sign key (Stage 3d): a routing hint so a receiver
+  // with several sessions for this person picks the right one. Prekeys carry the
+  // device in x3dh.identitySignPub already; a 'msg' needs it explicitly. UNSIGNED
+  // → resolution ONLY, never authorisation: a wrong dev selects the wrong session
+  // and the AEAD simply fails, and an unknown dev mints no session (buildFresh is
+  // prekey-only). Optional for pre-3d records / self-addressed sends.
+  | { type: 'msg'; conv: string; message: RatchetMessage; dev?: Bytes };
 
 export async function encodeEnvelope(e: Envelope): Promise<Bytes> {
   const o =
     e.type === 'prekey'
       ? { t: 'prekey', c: e.conv, x: await encodeInitialHeader(e.x3dh), m: await encMsg(e.message) }
-      : { t: 'msg', c: e.conv, m: await encMsg(e.message) };
+      : { t: 'msg', c: e.conv, m: await encMsg(e.message), ...(e.dev ? { d: await b64encode(e.dev) } : {}) };
   return utf8.encode(JSON.stringify(o));
 }
 
@@ -137,7 +143,10 @@ export async function decodeEnvelope(bytes: Bytes): Promise<Envelope> {
 
   const conv = reqStr(o.c, 'conv');
   const message = await decMsgChecked(o.m);
-  if (o.t !== 'prekey') return { type: 'msg', conv, message };
+  if (o.t !== 'prekey') {
+    const dev = o.d !== undefined ? reqBytes(await reqB64(o.d, 'dev'), KEY_LEN, 'dev') : undefined;
+    return { type: 'msg', conv, message, dev };
+  }
   return { type: 'prekey', conv, x3dh: await decodeInitialHeaderChecked(o.x), message };
 }
 

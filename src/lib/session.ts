@@ -24,6 +24,7 @@ import {
   deviceInList,
   verifyDeviceList,
   isNewerDeviceList,
+  bundleFromDeviceEntry,
   encodeDeviceList,
   decodeDeviceList,
   encodeBundle,
@@ -745,39 +746,101 @@ async function unframeContent(bytes: Bytes): Promise<MessageContent> {
   return { kind: 'file', name, mime, data: bytes.slice(o) };
 }
 
-async function sendContent(me: IdentityKeys, contact: Contact, content: MessageContent, mid: string = randomMid()): Promise<Bytes> {
-  // Enforced HERE, not in the UI: after a device-linking identity swap the peer
-  // still has our OLD master pinned, so any message over the surviving session
-  // would assert an identity we no longer hold — a false authenticity claim, not
-  // just a stale label. Receiving remains allowed.
-  if (contact.staleIdentity) {
-    throw new StaleIdentityError();
-  }
-  // Send over the PRIMARY/pinned device's session. Stage 3d step 1: at most one
-  // session (keyed by peerSignPub), so behaviour is identical to the old single
-  // ratchet. Step 6 fans out over every authorised device's own session.
-  const key = deviceKey(contact.peerSignPub);
+interface DeviceTarget {
+  signPub: Bytes;
+  dhPub: Bytes;
+  bundle?: PreKeyBundle; // needed only to INITIATE (no session yet)
+}
+
+/** Encrypt `content` for ONE peer device, establishing its session if needed, and
+ *  seal it to that device. Invariant I holds per session (each device its own
+ *  ratchet). Throws if no session exists AND no bundle is available to initiate. */
+async function encryptForDevice(
+  me: IdentityKeys,
+  contact: Contact,
+  target: DeviceTarget,
+  content: MessageContent,
+  mid: string,
+): Promise<Bytes> {
+  const key = deviceKey(target.signPub);
   let session = contact.sessions.get(key);
   if (!session?.ratchet) {
-    if (!contact.bundle) {
-      throw new Error('Für den ersten Schritt braucht ihr den Code dieses Kontakts.');
-    }
-    const { header, session: x3dh } = await initiateX3DH(me, contact.bundle);
-    const ratchet = await initRatchetInitiator(x3dh.sharedSecret, contact.bundle.signedPreKey.pub, x3dh.associatedData);
-    // We initiate to the pinned device, so that device backs this session.
-    session = { ratchet, pendingHeader: header, deviceSignPub: contact.peerSignPub };
+    if (!target.bundle) throw new Error('Kein Code/Prekey zum Initiieren an dieses Gerät.');
+    const { header, session: x3dh } = await initiateX3DH(me, target.bundle);
+    const ratchet = await initRatchetInitiator(x3dh.sharedSecret, target.bundle.signedPreKey.pub, x3dh.associatedData);
+    session = { ratchet, pendingHeader: header, deviceSignPub: target.signPub };
     contact.sessions.set(key, session);
   }
   // Stamp the E2E mid into the AEAD plaintext: mid(16) ‖ frameContent(content).
   const message = await ratchetEncrypt(session.ratchet!, concatBytes(midToBytes(mid), await frameContent(content)));
   const conv = contact.roomId;
+  // `dev` (our device) lets the recipient route a 'msg' to the right per-sender-
+  // device session when WE have several devices; a prekey carries it in the x3dh.
   const envelope = session.pendingHeader
     ? ({ type: 'prekey', conv, x3dh: session.pendingHeader, message } as const)
-    : ({ type: 'msg', conv, message } as const);
+    : ({ type: 'msg', conv, message, dev: me.sign.publicKey } as const);
   // Sealed Sender: wrap the whole envelope in an anonymous box to the recipient,
   // so the relay never sees the sender's X3DH identity keys or the conv id.
-  // Tagged, because an inbox can also receive non-envelope payloads (link grants).
-  return sealPayload(contact.peerDhPub, SEALED_ENVELOPE, await encodeEnvelope(envelope));
+  return sealPayload(target.dhPub, SEALED_ENVELOPE, await encodeEnvelope(envelope));
+}
+
+async function sendContent(me: IdentityKeys, contact: Contact, content: MessageContent, mid: string = randomMid()): Promise<Bytes> {
+  // Enforced HERE, not in the UI: after a device-linking identity swap the peer
+  // still has our OLD master pinned, so any message over the surviving session
+  // would assert an identity we no longer hold — a false authenticity claim.
+  if (contact.staleIdentity) throw new StaleIdentityError();
+  // Single primary/pinned device. fanoutDeliveries covers every authorised device.
+  return encryptForDevice(
+    me,
+    contact,
+    { signPub: contact.peerSignPub, dhPub: contact.peerDhPub, bundle: contact.bundle },
+    content,
+    mid,
+  );
+}
+
+/** One sealed copy of a message for one peer device, plus which device it's for. */
+export interface FanoutDelivery {
+  deviceSignPub: Bytes; // target inbox = inboxRoom(deviceSignPub)
+  sealed: Bytes;
+}
+
+/** Encrypt `content` for EVERY authorised device of the peer — Stage 3d fan-out.
+ *  The SAME `mid` is shared across all copies so the peer's devices dedup. A device
+ *  we can't initiate to (no session AND no signed prekey in the list) is skipped
+ *  and returned in `unreachable`, so the caller can mark that delivery "no longer
+ *  valid" rather than failed. Each device is a separate session — Invariant I per
+ *  session — and a per-device throw isolates that device (does not drop the rest). */
+export async function fanoutDeliveries(
+  me: IdentityKeys,
+  contact: Contact,
+  content: MessageContent,
+  mid: string,
+): Promise<{ deliveries: FanoutDelivery[]; unreachable: Bytes[] }> {
+  if (contact.staleIdentity) throw new StaleIdentityError();
+  const targets: DeviceTarget[] = contact.peerDeviceList
+    ? contact.peerDeviceList.devices.map((d) => ({
+        signPub: d.signPub,
+        dhPub: d.dhPub,
+        // Prefer our stored bundle for the primary (it may still hold a one-time
+        // prekey → better forward secrecy); a silent device uses its list SPK.
+        bundle:
+          bytesEqual(d.signPub, contact.peerSignPub) && contact.bundle
+            ? contact.bundle
+            : (bundleFromDeviceEntry(contact.peerMasterPub, contact.peerEpoch, d) ?? undefined),
+      }))
+    : [{ signPub: contact.peerSignPub, dhPub: contact.peerDhPub, bundle: contact.bundle }];
+
+  const deliveries: FanoutDelivery[] = [];
+  const unreachable: Bytes[] = [];
+  for (const t of targets) {
+    try {
+      deliveries.push({ deviceSignPub: t.signPub, sealed: await encryptForDevice(me, contact, t, content, mid) });
+    } catch {
+      unreachable.push(t.signPub); // no session + no bundle → can't reach this device yet
+    }
+  }
+  return { deliveries, unreachable };
 }
 
 export async function sendMessage(me: IdentityKeys, contact: Contact, text: string, mid?: string): Promise<Bytes> {
@@ -922,7 +985,10 @@ export async function receiveEnvelope(
   // a 'msg' has no device field yet (Stage 3d step 1 → the primary/pinned device;
   // step 6 adds envelope.dev). Everything below operates on THIS device's session,
   // so Invariant I holds per session — no other device's chain is touched.
-  const sessKey = envelope.type === 'prekey' ? deviceKey(envelope.x3dh.identitySignPub) : deviceKey(contact.peerSignPub);
+  const sessKey =
+    envelope.type === 'prekey'
+      ? deviceKey(envelope.x3dh.identitySignPub)
+      : deviceKey(envelope.dev ?? contact.peerSignPub);
   const existing = contact.sessions.get(sessKey);
   const simInitAdopt = !!existing?.ratchet && !!existing.pendingHeader && envelope.type === 'prekey';
   if (simInitAdopt && cmp(me.dh.publicKey, contact.peerDhPub) < 0) {
@@ -970,7 +1036,7 @@ export async function receiveEnvelope(
   // it under THIS device's session key — a fresh ratchet replaces our in-flight one
   // for that device (sim-init loss / first contact), and any inbound message means
   // the peer has our session, so we stop attaching the X3DH header.
-  const deviceSignPub = envelope.type === 'prekey' ? envelope.x3dh.identitySignPub : contact.peerSignPub;
+  const deviceSignPub = envelope.type === 'prekey' ? envelope.x3dh.identitySignPub : (envelope.dev ?? contact.peerSignPub);
   contact.sessions.set(sessKey, { ratchet, pendingHeader: null, deviceSignPub });
   // Split off the sender-stamped E2E mid (16 bytes) from the front of the plaintext.
   const mid = bytesToMid(plaintext.slice(0, MID_LEN));

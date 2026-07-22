@@ -50,6 +50,23 @@ export function aggregateDelivery(deliveries: DeviceDelivery[]): {
   return { label: 'pending', sent, total };
 }
 
+/**
+ * Dedup predicate for the message log. A message's identity is (mid, DIRECTION):
+ * a copy I SENT (mine=true, self-synced from another of my devices) and a copy I
+ * RECEIVED (mine=false, a peer's fan-out or a future receive-sync) are DISTINCT
+ * streams even when they carry the same mid.
+ *
+ * Keeping both in ONE mid-only namespace let a malicious authorised peer — who
+ * learns my fan-out mid by decrypting its own copy — REFLECT that mid onto my
+ * second device and suppress my own sent message (Review fund: Self-Sync-mid-
+ * Reflexion). The `mine` flag is assigned LOCALLY from provenance (a peer message
+ * always arrives via incomingMessage with mine=false), so a peer cannot forge it
+ * to force a cross-direction collision.
+ */
+export function hasMessage(messages: ChatMessage[], mid: string, mine: boolean): boolean {
+  return messages.some((m) => m.mid === mid && m.mine === mine);
+}
+
 const aad = (roomId: string) => utf8.encode(`scytale:messages:v1:${roomId}`);
 const recordKey = (roomId: string) => `msgs:${roomId}`;
 

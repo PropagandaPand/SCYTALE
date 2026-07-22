@@ -93,7 +93,7 @@ import {
   type Sticker,
 } from './lib/stickers';
 import { pushSupported, enablePush, disablePush, currentSubscription } from './lib/push';
-import { loadMessages, saveMessages, clearMessages, aggregateDelivery, type ChatMessage, type DeviceDelivery } from './lib/messages';
+import { loadMessages, saveMessages, clearMessages, aggregateDelivery, hasMessage, type ChatMessage, type DeviceDelivery } from './lib/messages';
 import { RelayClient, type RelayStatus } from './lib/relay';
 import { makeQr } from './lib/qr';
 import { bytesToB64, b64ToBytes } from './lib/bytes';
@@ -1113,7 +1113,11 @@ export function Messenger({ dek, onLock }: Props) {
         // mid against the peer's own fan-out copy that may also reach this device.
         const displayRoom = await computeMasterRoomId(myMaster, asMasterPub(content.targetPeerMaster));
         const inner = content.inner;
-        const already = (messagesRef.current[displayRoom] ?? []).some((m) => m.mid === content.innerMid);
+        // Dedup within the SAME direction only (mid, mine). A self-synced SENT copy
+        // (mine=true) must not be suppressed by a peer message that REFLECTS its mid,
+        // and vice versa — the peer knows this mid (it decrypted its own fan-out copy),
+        // so a mid-only namespace would let it silently drop my own message here.
+        const already = hasMessage(messagesRef.current[displayRoom] ?? [], content.innerMid, content.origin === 'sent');
         if (!already && (inner.kind === 'text' || inner.kind === 'file')) {
           const synced: ChatMessage =
             inner.kind === 'file'
@@ -1124,11 +1128,14 @@ export function Messenger({ dek, onLock }: Props) {
             unreadRef.current[displayRoom] = (unreadRef.current[displayRoom] ?? 0) + 1;
           }
         }
-      } else if (mid && (messagesRef.current[contact.roomId] ?? []).some((m) => m.mid === mid)) {
-        // DEDUP on the E2E mid: one message can reach this device via direct fan-out
-        // AND a self-sync copy from another of my devices AND a re-delivery. The
-        // message history is the dedup source of truth (the mid is authenticated in
-        // the AEAD, so it can't be forged to suppress a real future message).
+      } else if (mid && hasMessage(messagesRef.current[contact.roomId] ?? [], mid, false)) {
+        // DEDUP on the E2E mid, WITHIN the received direction (mine=false): one peer
+        // message can reach this device via direct fan-out AND (with receive-sync) a
+        // copy from another of my devices AND a re-delivery — all mine=false, same mid.
+        // Scoping to mine=false is the fix for the mid-reflection suppression: a peer
+        // that reflects the mid of my OWN sent message can no longer collide with it
+        // (my sent copy is mine=true). The mid is authenticated in the AEAD, so it
+        // can't be forged to suppress a real future message of the SAME direction.
         // Already have it — skip (the ackId is still recorded in `finally`).
       } else {
         await appendMessage(contact.roomId, incomingMessage(content, mid));
@@ -1169,7 +1176,14 @@ export function Messenger({ dek, onLock }: Props) {
         return;
       }
       contactsRef.current = [...contactsRef.current, contact];
-      messagesRef.current[contact.roomId] = [];
+      // Do NOT clobber an existing log: under master-based rooms my other device may
+      // already have SELF-SYNCED sent messages into exactly this roomId before I
+      // added the peer here (the display room = computeMasterRoomId(myMaster, peer)).
+      // Unconditional `= []` would silently discard that history (Review fund, LOW).
+      // Fall back to the PERSISTED log (loadMessages → [] if none), so a self-sync
+      // from a previous session survives adding the contact too, not just this one.
+      messagesRef.current[contact.roomId] =
+        messagesRef.current[contact.roomId] ?? (await loadMessages(dek, contact.roomId));
       commitMessages();
       await saveContact(dek, contact);
       await connectSend(contact);

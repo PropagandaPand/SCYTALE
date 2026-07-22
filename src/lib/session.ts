@@ -470,6 +470,13 @@ export async function acceptMasterChange(
   contact.peerFingerprint = await identityFingerprint(p.masterPub, p.masterPub);
   contact.bundle = undefined; // the stored bundle belonged to the old identity
   contact.sessions.clear(); // drop ALL per-device sessions — fresh handshake under the new identity
+  // The pinned device list was signed by the ABANDONED master; keeping it would
+  // make deviceAuthorized() reject EVERY device of the freshly-accepted identity
+  // as revoked (it is absent from the old list), and isNewerDeviceList could keep
+  // a new M_new list out forever (it ignores the master swap). Drop it → implicit
+  // single-device (the new primary) until an M_new-signed devlist gossip arrives.
+  // Same reasoning as acceptRotation, which clears it too.
+  contact.peerDeviceList = undefined;
   contact.verified = false; // TOFU break — re-verification is mandatory
   contact.pendingMaster = undefined;
   contact.roomId = await computeMasterRoomId(contact.ownMasterPub, asMasterPub(p.masterPub));

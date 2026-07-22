@@ -1029,9 +1029,12 @@ export function Messenger({ dek, onLock }: Props) {
         } catch (e) {
           console.warn('[recv] Rotation abgelehnt:', (e as Error).message);
         }
-      } else if (content.kind === 'sync') {
-        // Self-sync: a copy of a message from ANOTHER of my devices. It authenticated
-        // under my hidden self-contact, but belongs in the conversation with
+      } else if (content.kind === 'sync' && bytesEqual(contact.peerMasterPub, id.master.publicKey)) {
+        // Self-sync: a copy of a message from ANOTHER of my devices. GATED to the
+        // self-contact (peerMaster == my master) — a 'sync' from any other session is
+        // an injection attempt and is already rejected in receiveEnvelope; this is
+        // defence in depth. It authenticated under my hidden self-contact, but
+        // belongs in the conversation with
         // content.targetPeerMaster — DECRYPT-ROOM ≠ DISPLAY-ROOM. TERMINAL: only
         // appended, never re-fanned/re-synced/re-dispatched. Deduped by the ORIGINAL
         // mid against the peer's own fan-out copy that may also reach this device.

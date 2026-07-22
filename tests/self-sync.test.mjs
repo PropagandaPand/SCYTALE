@@ -61,5 +61,31 @@ const displayRoom = await S.computeMasterRoomId(S.asMasterPub(B.id.master.public
 const selfRoom = await S.computeMasterRoomId(S.asMasterPub(B.id.master.publicKey), S.asMasterPub(B.id.master.publicKey));
 ok('Anzeige-Raum = Peer-Raum, NICHT der self-Raom (Negativkontrolle)', displayRoom !== selfRoom);
 
+console.log('\n[SICHERHEIT: ein sync-Frame von einem FREMDEN Kontakt wird abgewiesen (keine Injektion)]');
+// Mallory (A's identity, whose master ≠ the victim's) establishes a session with a
+// victim and tries to inject a fabricated message by framing a 'sync'. receiveEnvelope
+// must reject it — only my OWN devices (self-contact, peerMaster == my master) may sync.
+const victimMasterKp = sodium.crypto_sign_keypair();
+const vSign = sodium.crypto_sign_keypair();
+const vDh = sodium.crypto_box_keypair();
+const victim = {
+  master: { publicKey: new Uint8Array(victimMasterKp.publicKey), privateKey: new Uint8Array(victimMasterKp.privateKey) },
+  sign: { publicKey: new Uint8Array(vSign.publicKey), privateKey: new Uint8Array(vSign.privateKey) },
+  dh: { publicKey: new Uint8Array(vDh.publicKey), privateKey: new Uint8Array(vDh.privateKey) },
+  epoch: 1,
+  deviceCert: await S.signDeviceCert(victimMasterKp.privateKey, 1, vSign.publicKey, vDh.publicKey),
+};
+const vSpk = await S.generateSignedPreKey(victim, 1);
+const vBundle = S.currentBundle(victim, { signedPreKey: vSpk, oneTimePreKeys: [] });
+const vLookup = { signedPreKey: (i) => (vSpk.id === i ? vSpk.keyPair : undefined), consumeOneTimePreKey: () => undefined };
+const mContactForV = await S.makeContact(S.asMasterPub(A.id.master.publicKey), vBundle);
+const inject = { kind: 'sync', targetPeerMaster: new Uint8Array(A.id.master.publicKey), origin: 'sent', innerMid: S.randomMid(), ts: 1, inner: { kind: 'text', text: 'GEFÄLSCHT' } };
+const injSealed = (await S.fanoutDeliveries(A.id, mContactForV, inject, S.randomMid())).deliveries[0].sealed;
+const mEnv = await S.decodeEnvelope((await S.openPayload(victim, injSealed)).payload);
+const vContactForM = await S.makeContactFromHeader(S.asMasterPub(victim.master.publicKey), mEnv.x3dh);
+let rejected = false;
+try { await S.receiveEnvelope(victim, vContactForM, mEnv, vLookup); } catch { rejected = true; }
+ok('sync von fremdem Master abgewiesen — Injektion verhindert', rejected === true);
+
 console.log(`\n${pass} ok, ${fail} fail`);
 process.exit(fail ? 1 : 0);

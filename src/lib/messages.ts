@@ -41,7 +41,10 @@ export function aggregateDelivery(deliveries: DeviceDelivery[]): {
   const live = deliveries.filter((d) => d.status !== 'stale');
   const total = live.length;
   const sent = live.filter((d) => d.status === 'sent').length;
-  if (total === 0 || sent === total) return { label: 'sent', sent, total };
+  // total === 0 means EVERY target device was unreachable (all 'stale') — nothing
+  // hit the wire, so the message was NOT delivered. It must render ⚠, never ✓✓.
+  if (total === 0) return { label: 'failed', sent: 0, total: 0 };
+  if (sent === total) return { label: 'sent', sent, total };
   if (sent > 0) return { label: 'partial', sent, total };
   if (live.every((d) => d.status === 'failed')) return { label: 'failed', sent, total };
   return { label: 'pending', sent, total };

@@ -1022,7 +1022,14 @@ export async function receiveEnvelope(
       : deviceKey(envelope.dev ?? contact.peerSignPub);
   const existing = contact.sessions.get(sessKey);
   const simInitAdopt = !!existing?.ratchet && !!existing.pendingHeader && envelope.type === 'prekey';
-  if (simInitAdopt && cmp(me.dh.publicKey, contact.peerDhPub) < 0) {
+  // The tie-break must be a SYMMETRIC total order over the two DEVICES actually
+  // racing — my device vs the peer's SENDING device. contact.peerDhPub is the
+  // person-level PRIMARY device (unchanged since single-device 3c); for a secondary
+  // peer device it differs, so both endpoints would decide from different keys and
+  // could both-win (deadlock) or both-adopt (mismatched secrets). The sending
+  // device's own DH is on the wire — x3dh.identityDhPub — and simInitAdopt already
+  // implies a prekey, so it is present. (Review fund 2.)
+  if (simInitAdopt && cmp(me.dh.publicKey, envelope.x3dh.identityDhPub) < 0) {
     throw new Error('Gleichzeitiger Verbindungsaufbau — Peer-Prekey ignoriert (unsere Session gewinnt).');
   }
 
@@ -1071,7 +1078,16 @@ export async function receiveEnvelope(
   contact.sessions.set(sessKey, { ratchet, pendingHeader: null, deviceSignPub });
   // Split off the sender-stamped E2E mid (16 bytes) from the front of the plaintext.
   const mid = bytesToMid(plaintext.slice(0, MID_LEN));
-  return { mid, content: await unframeContent(plaintext.slice(MID_LEN)) };
+  const content = await unframeContent(plaintext.slice(MID_LEN));
+  // A 'sync' frame is ONLY legitimate from one of MY OWN devices — the hidden self-
+  // contact, whose peerMaster is my own master. Rejecting it here (at the source)
+  // stops a malicious peer from framing a byte-9 'sync' over their authenticated
+  // session to inject a fabricated message into an ARBITRARY conversation
+  // (targetPeerMaster is attacker-chosen). The self-contact carries peerMaster == me.
+  if (content.kind === 'sync' && !bytesEqual(contact.peerMasterPub, me.master.publicKey)) {
+    throw new Error('sync-Frame von einem Nicht-Selbst-Kontakt — verworfen.');
+  }
+  return { mid, content };
 }
 
 // --- Contact (de)serialisation for the vault (produces plaintext bytes only) ---

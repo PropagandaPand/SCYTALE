@@ -414,9 +414,15 @@ export function Messenger({ dek, onLock }: Props) {
     );
   }
   function markStatus(id: string | null, status: 'sent' | 'failed', errorMsg?: string) {
-    if (status === 'failed' && errorMsg) setError(errorMsg);
-    if (!id) return;
+    if (!id) {
+      if (status === 'failed' && errorMsg) setError(errorMsg);
+      return;
+    }
     clearAckTimer(id);
+    // The global error banner (setError) fires ONLY when a delivery ACTUALLY
+    // transitions to failed — never for a terminal (sent/stale) row. Otherwise a
+    // late ack-timeout on a delivery we already swept to 'stale' (a revoked device)
+    // would pop "not delivered" while the bubble shows delivered (Review-2 fund).
     for (const roomId of Object.keys(messagesRef.current)) {
       const arr = messagesRef.current[roomId];
       // Stage 3d fan-out: `id` is a per-DEVICE deliveryId. Update just that delivery
@@ -427,8 +433,9 @@ export function Messenger({ dek, onLock }: Props) {
       if (fi >= 0) {
         const dels = arr[fi].deliveries!;
         const d = dels.find((x) => x.deliveryId === id)!;
-        if (d.status === 'sent' || d.status === 'stale') return; // terminal per delivery
+        if (d.status === 'sent' || d.status === 'stale') return; // terminal per delivery — no change, no banner
         arr[fi] = { ...arr[fi], deliveries: dels.map((x) => (x.deliveryId === id ? { ...x, status } : x)) };
+        if (status === 'failed' && errorMsg) setError(errorMsg);
         void saveMessages(dek, roomId, arr);
         commitMessages();
         bump();
@@ -443,6 +450,7 @@ export function Messenger({ dek, onLock }: Props) {
         // nack/timeout must never downgrade a confirmed delivery.
         if (cur === 'sent') return;
         arr[idx] = { ...arr[idx], status };
+        if (status === 'failed' && errorMsg) setError(errorMsg);
         void saveMessages(dek, roomId, arr);
         commitMessages();
         bump();
@@ -561,9 +569,17 @@ export function Messenger({ dek, onLock }: Props) {
     for (let i = 0; i < arr.length; i++) {
       const dels = arr[i].deliveries;
       if (!dels) continue;
-      const updated = dels.map((d) =>
-        d.status !== 'stale' && d.status !== 'sent' && !live.has(d.device) ? { ...d, status: 'stale' as const } : d,
-      );
+      const updated = dels.map((d) => {
+        if (d.status !== 'stale' && d.status !== 'sent' && !live.has(d.device)) {
+          // The device is gone from the list — its ack will never come. Disarm the
+          // still-running 10s timer NOW, else it fires markStatus(...,'failed') on a
+          // row we just made terminal ('stale') and the guard there suppresses the
+          // downgrade but the banner would already have popped (Review-2 fund).
+          clearAckTimer(d.deliveryId);
+          return { ...d, status: 'stale' as const };
+        }
+        return d;
+      });
       if (updated.some((d, k) => d !== dels[k])) {
         arr[i] = { ...arr[i], deliveries: updated };
         changed = true;

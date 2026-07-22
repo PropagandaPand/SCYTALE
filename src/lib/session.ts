@@ -605,7 +605,15 @@ export type MessageContent =
   | { kind: 'gremove'; groupId: string } // "you were removed from this group"
   | { kind: 'gleave'; groupId: string } // "I left this group"
   | { kind: 'devlist'; list: DeviceList } // E2E gossip of my updated device list
-  | { kind: 'rotation'; statement: RotationStatement }; // dual-signed master rotation (proven door)
+  | { kind: 'rotation'; statement: RotationStatement } // dual-signed master rotation (proven door)
+  // Self-sync (Stage 3d): a copy of a message I sent, mirrored to my OWN other
+  // devices so they show it in the right conversation. Carries the TARGET peer's
+  // master (the display room is computeMasterRoomId(myMaster, targetPeerMaster),
+  // NOT the self-room it authenticates under), the origin, the original message's
+  // mid (for dedup against the peer's own fan-out copy), the compose timestamp,
+  // and the inner content. A sync frame is TERMINAL: never re-fanned, never
+  // re-synced, its inner effect never re-dispatched — only appended to history.
+  | { kind: 'sync'; targetPeerMaster: Bytes; origin: 'sent' | 'recv'; innerMid: string; ts: number; inner: MessageContent };
 
 /** A decrypted inbound message plus its sender-stamped E2E dedup id. */
 export interface ReceivedMessage {
@@ -699,6 +707,16 @@ async function frameContent(c: MessageContent): Promise<Bytes> {
   if (c.kind === 'gleave') return prefixed(6, utf8.encode(c.groupId));
   if (c.kind === 'devlist') return prefixed(7, await encodeDeviceList(c.list));
   if (c.kind === 'rotation') return prefixed(8, encodeRotation(c.statement));
+  if (c.kind === 'sync') {
+    const json = JSON.stringify({
+      m: bytesToB64(c.targetPeerMaster),
+      o: c.origin,
+      id: c.innerMid,
+      t: c.ts,
+      i: bytesToB64(await frameContent(c.inner)),
+    });
+    return prefixed(9, utf8.encode(json));
+  }
   // ginvite
   return prefixed(4, utf8.encode(JSON.stringify(c.group)));
 }
@@ -728,6 +746,17 @@ async function unframeContent(bytes: Bytes): Promise<MessageContent> {
   if (bytes[0] === 6) return { kind: 'gleave', groupId: utf8.decode(bytes.slice(1)) };
   if (bytes[0] === 7) return { kind: 'devlist', list: await decodeDeviceList(bytes.slice(1)) };
   if (bytes[0] === 8) return { kind: 'rotation', statement: decodeRotation(bytes.slice(1)) };
+  if (bytes[0] === 9) {
+    const j = JSON.parse(utf8.decode(bytes.slice(1)));
+    return {
+      kind: 'sync',
+      targetPeerMaster: b64ToBytes(j.m),
+      origin: j.o === 'recv' ? 'recv' : 'sent',
+      innerMid: String(j.id),
+      ts: Number(j.t),
+      inner: await unframeContent(b64ToBytes(j.i)),
+    };
+  }
 
   // Only type 1 is a real file. Anything else is a corrupt/unknown frame — throw
   // so it's dropped, never rendered as a junk "file" in the chat (e.g. a mangled
@@ -816,9 +845,10 @@ export async function fanoutDeliveries(
   contact: Contact,
   content: MessageContent,
   mid: string,
+  exclude?: Bytes,
 ): Promise<{ deliveries: FanoutDelivery[]; unreachable: Bytes[] }> {
   if (contact.staleIdentity) throw new StaleIdentityError();
-  const targets: DeviceTarget[] = contact.peerDeviceList
+  const targets: DeviceTarget[] = (contact.peerDeviceList
     ? contact.peerDeviceList.devices.map((d) => ({
         signPub: d.signPub,
         dhPub: d.dhPub,
@@ -829,7 +859,8 @@ export async function fanoutDeliveries(
             ? contact.bundle
             : (bundleFromDeviceEntry(contact.peerMasterPub, contact.peerEpoch, d) ?? undefined),
       }))
-    : [{ signPub: contact.peerSignPub, dhPub: contact.peerDhPub, bundle: contact.bundle }];
+    : [{ signPub: contact.peerSignPub, dhPub: contact.peerDhPub, bundle: contact.bundle }]
+  ).filter((t) => !exclude || !bytesEqual(t.signPub, exclude)); // self-sync: never send to my own device
 
   const deliveries: FanoutDelivery[] = [];
   const unreachable: Bytes[] = [];

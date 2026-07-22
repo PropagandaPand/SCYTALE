@@ -488,6 +488,61 @@ export function Messenger({ dek, onLock }: Props) {
     return rows;
   }
 
+  // The hidden "self" contact: peerMaster == MY master, peerDeviceList == my own
+  // device list, so I can fan out to my OTHER devices (self-sync). Its sessions are
+  // to my devices; it never shows in the UI. Refreshed to my current device list so
+  // a revoked own device is pruned (applyDeviceListUpdate also drops its session).
+  async function ensureSelfContact(): Promise<Contact | null> {
+    const id = identityRef.current;
+    const pre = prekeysRef.current;
+    if (!id || !pre) return null;
+    const myMaster = asMasterPub(id.master.publicKey);
+    const roomId = await computeMasterRoomId(myMaster, myMaster);
+    let c = contactsRef.current.find((x) => x.roomId === roomId);
+    if (!c) {
+      c = {
+        roomId,
+        peerMasterPub: id.master.publicKey,
+        peerEpoch: id.epoch,
+        peerSignPub: id.sign.publicKey,
+        peerDhPub: id.dh.publicKey,
+        peerFingerprint: '',
+        ownMasterPub: myMaster,
+        regime: 'master',
+        verified: true,
+        hidden: true,
+        sessions: new Map(),
+      };
+      contactsRef.current = [...contactsRef.current, c];
+    }
+    const ownList = await loadOrCreateOwnDeviceList(dek, id, ownSpkPublic(pre));
+    if (ownList) await applyDeviceListUpdate(c, ownList, retiredMastersRef.current);
+    await saveContact(dek, c);
+    return c;
+  }
+
+  // Mirror a message I sent to my OWN other devices (Stage 3d self-sync). The copy
+  // carries the TARGET peer's master so the receiving device files it under the
+  // right conversation room, plus the original mid so it dedups against the peer's
+  // own fan-out copy. Excludes my current device. Fire-and-forget; no status UI.
+  async function syncToOwnDevices(targetPeerMaster: Bytes, origin: 'sent' | 'recv', innerMid: string, ts: number, inner: MessageContent) {
+    const id = identityRef.current;
+    if (!id) return;
+    const self = await ensureSelfContact();
+    if (!self || !self.peerDeviceList || self.peerDeviceList.devices.length < 2) return; // no other device
+    const content: MessageContent = { kind: 'sync', targetPeerMaster, origin, innerMid, ts, inner };
+    const { deliveries } = await enqueueInbox(async () => {
+      const r = await fanoutDeliveries(id, self, content, randomMid(), id.sign.publicKey);
+      await saveContact(dek, self);
+      return r;
+    });
+    for (const d of deliveries) {
+      const room = await inboxRoom(d.deviceSignPub);
+      connectDeviceInbox(room);
+      relaysRef.current.get(room)?.send(d.sealed, randomMid());
+    }
+  }
+
   // ── roomId migration (device-DH → master) ──────────────────────────
   // Move one contact's storage AND its in-memory maps from oldRoomId to its
   // already-set contact.roomId. The single crash-safe routine every mutation
@@ -822,6 +877,11 @@ export function Messenger({ dek, onLock }: Props) {
       // receiveEnvelope against the master.
       const myMaster = asMasterPub(id.master.publicKey);
       let contact = await resolveContactByConv(contactsRef.current, env.conv, id.dh.publicKey, myMaster);
+      if (!contact && env.type === 'prekey' && bytesEqual(env.x3dh.masterPub, id.master.publicKey)) {
+        // A prekey under MY OWN master is one of my other devices (self-sync). Route
+        // it to the hidden self-contact, never auto-create a visible "contact for me".
+        contact = (await ensureSelfContact()) ?? undefined;
+      }
       if (!contact) {
         if (env.type !== 'prekey') return;
         // AUTO-CREATE only on a MASTER-based conv that matches the sender's own
@@ -965,6 +1025,25 @@ export function Messenger({ dek, onLock }: Props) {
         } catch (e) {
           console.warn('[recv] Rotation abgelehnt:', (e as Error).message);
         }
+      } else if (content.kind === 'sync') {
+        // Self-sync: a copy of a message from ANOTHER of my devices. It authenticated
+        // under my hidden self-contact, but belongs in the conversation with
+        // content.targetPeerMaster — DECRYPT-ROOM ≠ DISPLAY-ROOM. TERMINAL: only
+        // appended, never re-fanned/re-synced/re-dispatched. Deduped by the ORIGINAL
+        // mid against the peer's own fan-out copy that may also reach this device.
+        const displayRoom = await computeMasterRoomId(myMaster, asMasterPub(content.targetPeerMaster));
+        const inner = content.inner;
+        const already = (messagesRef.current[displayRoom] ?? []).some((m) => m.mid === content.innerMid);
+        if (!already && (inner.kind === 'text' || inner.kind === 'file')) {
+          const synced: ChatMessage =
+            inner.kind === 'file'
+              ? { mine: content.origin === 'sent', ts: content.ts, mid: content.innerMid, file: { name: inner.name, mime: inner.mime, dataB64: bytesToB64(inner.data) } }
+              : { mine: content.origin === 'sent', ts: content.ts, mid: content.innerMid, text: inner.text };
+          await appendMessage(displayRoom, synced);
+          if (content.origin !== 'sent' && !(viewRef.current === 'chat' && activeRoomRef.current === displayRoom)) {
+            unreadRef.current[displayRoom] = (unreadRef.current[displayRoom] ?? 0) + 1;
+          }
+        }
       } else if (mid && (messagesRef.current[contact.roomId] ?? []).some((m) => m.mid === mid)) {
         // DEDUP on the E2E mid: one message can reach this device via direct fan-out
         // AND a self-sync copy from another of my devices AND a re-delivery. The
@@ -1057,6 +1136,7 @@ export function Messenger({ dek, onLock }: Props) {
       const bootLoad = enqueueInbox(async () => {
         for (const c of contactsRef.current) messagesRef.current[c.roomId] = await loadMessages(dek, c.roomId);
         await migrateContactsToMaster();
+        await ensureSelfContact(); // hidden self-contact for self-sync; refresh my device list
         for (const c of contactsRef.current) await connectSend(c);
         const gs = await loadGroups(dek);
         groupsRef.current = gs;
@@ -1585,8 +1665,11 @@ export function Messenger({ dek, onLock }: Props) {
       // encrypts per authorised device, persists the advanced sessions before the
       // wire, and returns per-device delivery rows for the aggregate bubble.
       const mid = randomMid();
+      const ts = Date.now();
       const deliveries = await fanoutSend(contact, { kind: 'text', text }, mid);
-      await appendMessage(activeRoom, { mine: true, text, ts: Date.now(), mid, deliveries });
+      // Mirror to my own other devices so they show it in this conversation.
+      void syncToOwnDevices(contact.peerMasterPub, 'sent', mid, ts, { kind: 'text', text });
+      await appendMessage(activeRoom, { mine: true, text, ts, mid, deliveries });
       setMsgInput('');
       void ensureProfileSent(contact);
       bump();
@@ -1639,6 +1722,7 @@ export function Messenger({ dek, onLock }: Props) {
       const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
       if (!contact) return;
       const deliveries = await fanoutSend(contact, { kind: 'file', name, mime, data }, mid);
+      void syncToOwnDevices(contact.peerMasterPub, 'sent', mid, localMsg.ts, { kind: 'file', name, mime, data });
       await appendMessage(contact.roomId, { ...localMsg, deliveries });
       await saveContact(dek, contact);
       bump();
@@ -1694,6 +1778,7 @@ export function Messenger({ dek, onLock }: Props) {
       const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
       if (!contact) return;
       const deliveries = await fanoutSend(contact, { kind: 'file', name: STICKER_FILENAME, mime: st.mime, data }, mid);
+      void syncToOwnDevices(contact.peerMasterPub, 'sent', mid, localMsg.ts, { kind: 'file', name: STICKER_FILENAME, mime: st.mime, data });
       await appendMessage(contact.roomId, { ...localMsg, deliveries });
       bump();
     } catch (err) {
@@ -1779,6 +1864,7 @@ export function Messenger({ dek, onLock }: Props) {
       const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
       if (!contact) return;
       const deliveries = await fanoutSend(contact, { kind: 'file', name, mime, data }, mid);
+      void syncToOwnDevices(contact.peerMasterPub, 'sent', mid, localMsg.ts, { kind: 'file', name, mime, data });
       await appendMessage(contact.roomId, { ...localMsg, deliveries });
       await saveContact(dek, contact);
       bump();

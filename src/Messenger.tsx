@@ -1074,9 +1074,21 @@ export function Messenger({ dek, onLock }: Props) {
    * A lost message is recoverable. A reused (key, nonce) pair is not.
    */
   async function encryptAndPersist(contact: Contact, produce: () => Promise<Bytes>): Promise<Bytes> {
-    const envelope = await produce();
-    await saveContact(dek, contact);
-    return envelope;
+    // Serialize the ratchet-mutating send through the SAME chain as onInbox.
+    // ratchetEncrypt advances CKs/Ns IN PLACE on contact.ratchet; a CONCURRENT
+    // onInbox ratchetDecrypt clones the whole state and commits it back via
+    // Object.assign(state, draft) (ratchet.ts:226-228) — which would ROLL BACK
+    // that CKs advance if the send landed between the clone and the commit. The
+    // next send then re-derives the same message key → (key, nonce) reuse =
+    // two-time-pad (leaks plaintext XOR + the GHASH auth key → forgery). The
+    // keystone enqueueInbox covered receive-vs-receive only; send-vs-receive on the
+    // same contact was still open. No awaited send runs inside an onInbox task
+    // (ensureProfileSent is fire-and-forget), so this cannot self-deadlock.
+    return enqueueInbox(async () => {
+      const envelope = await produce();
+      await saveContact(dek, contact);
+      return envelope;
+    });
   }
 
   // ── Groups ────────────────────────────────────────────────────────

@@ -347,6 +347,15 @@ gegen denselben Code, beide kommen an.
 > bevor der erste committet hat, und die Doppel-Zustellung wird zum gewöhnlichen,
 > abgewiesenen Replay. Dieselbe Kette ordnet jede Nachricht **hinter** die
 > Boot-Migration, die als ihr Kopf läuft.
+>
+> Auch **Senden** läuft durch dieselbe Kette (v0.19.2). `ratchetEncrypt` rückt
+> `CKs`/`Ns` in-place vor; ein NEBENLÄUFIGER `ratchetDecrypt` klont den ganzen
+> Zustand und committet ihn per `Object.assign` zurück — landete ein Send zwischen
+> Klon und Commit, würde dieser Rücklauf den `CKs`-Vorlauf **zurückrollen**, und
+> die nächste Nachricht nutzte (Key, Nonce) erneut = Two-Time-Pad. Die
+> Empfangs-Serialisierung deckte anfangs nur receive-vs-receive; erst mit dem
+> Send-Pfad in derselben Kette ist die Einmal-Verwendung auch send-vs-receive auf
+> demselben Kontakt garantiert.
 
 - **Commit-Disziplin beim Entschlüsseln (kritisch, v0.17.1):** `ratchetDecrypt`
   arbeitet auf einer **Kopie** und übernimmt sie erst, wenn die AEAD-Prüfung

@@ -143,6 +143,15 @@ const staleC = {
 };
 const relinked = await S.mergeRosterEntry([staleC], mkEntry(pE.publicKey, dEnew, { pe: 2 }), myMaster, retired);
 ok('re-link: staleIdentity aufgehoben', relinked.staleIdentity === undefined || relinked.staleIdentity === false);
+// REALER Fall (Review-Fund): nach installGrant hängt ein staler Kontakt am ALTEN
+// eigenen Master, seine roomId ist also NICHT die lokal abgeleitete. Ihn hier still
+// zu ent-stalen würde in einen toten Raum senden lassen (Relay ackt → „gesendet",
+// Peer verwirft) UND den „Neu verbinden"-Knopf verschwinden lassen → stiller
+// Nachrichtenverlust. Der Merge muss die Tür stehen lassen.
+const staleOldRoom = { ...staleC, roomId: 'raum-unter-dem-alten-master', staleIdentity: true, sessions: new Map() };
+ok('re-link: staler Kontakt mit FREMDER roomId wird NICHT ent-stalet (Tür bleibt)',
+  (await S.mergeRosterEntry([staleOldRoom], mkEntry(pE.publicKey, dEnew, { pe: 2 }), myMaster, retired)) === null);
+ok('Negativkontrolle: … und er bleibt dabei wirklich stale', staleOldRoom.staleIdentity === true);
 ok('re-link: Geräte-Keys aufgefrischt (neues psp/pdp/epoch)',
   eqh(relinked.peerSignPub, dEnew.sign.publicKey) && eqh(relinked.peerDhPub, dEnew.dh.publicKey) && relinked.peerEpoch === 2);
 ok('re-link: tote Alt-Master-Sessions geleert', relinked.sessions.size === 0);

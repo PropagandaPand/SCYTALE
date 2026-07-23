@@ -483,11 +483,16 @@ export async function mergeRosterEntry(
   }
 
   if (existing.staleIdentity) {
-    // Re-link special case: a stale contact is send-blocked and otherwise
-    // permanently unreachable. The producer EXCLUDES stale contacts, so every entry
-    // is non-stale on P → the peer knows the shared master. Lift the block, refresh
-    // the device keys, drop the dead old-master sessions. verified STAYS (device-
-    // local); reachability still waits for the peer to learn my device (re-gossip).
+    // A stale contact still addresses the room under our PRE-LINK master. Lifting
+    // the block without re-keying that room would be silent data loss: sends would
+    // go to a room the peer resolves to the abandoned identity and discards, the
+    // relay would still ack (✓ "sent"), and the explicit "reconnect" button —
+    // gated on staleIdentity — would disappear. Re-keying storage is the caller's
+    // job (reKeyContactInMemory), not a pure function's, so refuse here and leave
+    // the door intact.
+    if (existing.roomId !== derivedRoom) return null;
+    // Room already matches (nothing to re-key): lift the block, refresh the device
+    // keys, drop the dead old-master sessions. verified STAYS (device-local).
     existing.staleIdentity = undefined;
     existing.peerSignPub = entry.psp;
     existing.peerDhPub = entry.pdp;

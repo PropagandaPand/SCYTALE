@@ -126,7 +126,8 @@ const MAX_REC_SECONDS = 180;
 // Erst-Sync sizing: keeps a snapshot comfortably under MAX_ATTACH without splitting.
 const ROSTER_MAX = 512; // metadata-only entries, ~250 B each
 const AVATAR_IMPORT_CAP = 96 * 1024; // decoded-ish ceiling for a carried avatar
-const GOSSIP_COOLDOWN_MS = 30_000; // don't re-offer my device list to the same peer more often
+const GOSSIP_COOLDOWN_MS = 30_000; // first re-offer delay; doubles per attempt
+const GOSSIP_MAX_BACKOFF_MS = 60 * 60_000; // ceiling, so a never-acking peer stays cheap
 
 function pickAudioMime(): string {
   const cands = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
@@ -276,7 +277,7 @@ export function Messenger({ dek, onLock }: Props) {
   // My own current device list — the (epoch, version) peers must acknowledge.
   const ownListRef = useRef<DeviceList | null>(null);
   // Per-contact throttle for re-offering my device list (roomId → last attempt).
-  const listGossipAttemptRef = useRef<Map<string, { epoch: number; version: number; at: number }>>(new Map());
+  const listGossipAttemptRef = useRef<Map<string, { epoch: number; version: number; at: number; tries: number }>>(new Map());
   const groupsRef = useRef<Group[]>([]);
   // Buffered group messages carry the AUTHENTICATED sender key so the membership
   // check can run on flush (once we have the roster from the invite).
@@ -686,11 +687,24 @@ export function Messenger({ dek, onLock }: Props) {
    * task behind the one that is waiting for it — the inbox would deadlock and stop
    * processing messages entirely. Call it as `void sendListAckTo(...)`.
    */
-  async function sendListAckTo(contact: Contact, epoch: number, version: number) {
+  async function sendListAckTo(contact: Contact, epoch: number, version: number, toDevice?: Bytes) {
     const id = identityRef.current;
     if (!id) return;
     try {
-      await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendListAck(id, contact, epoch, version)));
+      if (toDevice) {
+        // Address the DEVICE that offered the list. sendContent would go to the
+        // peer's pinned PRIMARY, but the watermark is kept per device — a list
+        // offered by their secondary would never see an ack and that device would
+        // re-offer forever, filling the mailbox.
+        const { deliveries } = await enqueueInbox(async () => {
+          const r = await fanoutDeliveries(id, contact, { kind: 'listack', epoch, version }, randomMid(), undefined, toDevice);
+          await saveContact(dek, contact);
+          return r;
+        });
+        await dispatchDeliveries(deliveries);
+      } else {
+        await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendListAck(id, contact, epoch, version)));
+      }
     } catch {
       /* best effort — they re-offer and we ack again */
     }
@@ -713,15 +727,34 @@ export function Messenger({ dek, onLock }: Props) {
     const acked = contact.peerAckedListEV;
     if (acked && !isNewerDeviceList({ epoch: list.epoch, version: list.version }, acked)) return; // they're current
     const last = listGossipAttemptRef.current.get(contact.roomId);
-    if (last && last.epoch === list.epoch && last.version === list.version && Date.now() - last.at < GOSSIP_COOLDOWN_MS) {
-      return; // asked recently for this very list — let the ack arrive
-    }
-    listGossipAttemptRef.current.set(contact.roomId, { epoch: list.epoch, version: list.version, at: Date.now() });
+    const sameList = last && last.epoch === list.epoch && last.version === list.version;
+    // EXPONENTIAL BACKOFF, capped. A peer on an older build never acks (it does not
+    // know the frame) and one that is offline cannot; without backoff every such
+    // contact would receive one frame per minute forever and eventually overflow
+    // their relay mailbox, which then nacks everyone's messages. Retries stay
+    // bounded but never stop entirely, so a peer that updates still converges.
+    const tries = sameList ? last!.tries : 0;
+    const wait = Math.min(GOSSIP_COOLDOWN_MS * 2 ** tries, GOSSIP_MAX_BACKOFF_MS);
+    if (sameList && Date.now() - last!.at < wait) return;
+    listGossipAttemptRef.current.set(contact.roomId, {
+      epoch: list.epoch,
+      version: list.version,
+      at: Date.now(),
+      tries: sameList ? tries + 1 : 0, // a NEW list restarts the schedule
+    });
     try {
       await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendDeviceList(id, contact, list)));
     } catch {
       /* unreachable right now — the next trigger retries */
     }
+  }
+
+  /** Stop the periodic bootstrap pull (idempotent). */
+  async function clearBootstrapPending() {
+    const req = bootstrapRequestRef.current;
+    if (!req?.pending) return;
+    bootstrapRequestRef.current = { ...req, pending: false };
+    await saveBootstrapRequest(dek, bootstrapRequestRef.current);
   }
 
   /**
@@ -732,7 +765,13 @@ export function Messenger({ dek, onLock }: Props) {
   async function applyBootstrapIfNew(bid: string, parts: BootstrapPart[]) {
     const id = identityRef.current;
     if (!id) return;
-    if (bootstrapAppliedRef.current.has(bid)) return; // already imported
+    if (bootstrapAppliedRef.current.has(bid)) {
+      // Already imported — but still clear the pending pull. If a previous run
+      // wrote the marker and then failed before clearing it, we would ask every
+      // 60s forever and P would answer with the full roster every time.
+      await clearBootstrapPending();
+      return;
+    }
     const myMaster = asMasterPub(id.master.publicKey);
     for (const p of parts) {
       if (p.t === 'profile') {
@@ -750,7 +789,12 @@ export function Messenger({ dek, onLock }: Props) {
         for (const entry of p.contacts) {
           const merged = await mergeRosterEntry(contactsRef.current, entry, myMaster, retiredMastersRef.current);
           if (!merged) continue; // self / denylisted / room collision
-          if (!contactsRef.current.includes(merged)) contactsRef.current = [...contactsRef.current, merged];
+          // By roomId, not object identity: addBundle can insert the same peer
+          // during an await here and would otherwise get a second, send-blocked
+          // record that overwrites the real one under the same storage key.
+          const known = contactsRef.current.some((c) => c.roomId === merged.roomId);
+          if (!known) contactsRef.current = [...contactsRef.current, merged];
+          else if (!contactsRef.current.includes(merged)) continue;
           await saveContact(dek, merged);
         }
       }
@@ -758,11 +802,7 @@ export function Messenger({ dek, onLock }: Props) {
     // Marker LAST: a crash before this just replays the (idempotent) merge.
     bootstrapAppliedRef.current.add(bid);
     await saveBootstrapApplied(dek, bootstrapAppliedRef.current);
-    const req = bootstrapRequestRef.current;
-    if (req?.pending) {
-      bootstrapRequestRef.current = { ...req, pending: false }; // stop asking
-      await saveBootstrapRequest(dek, bootstrapRequestRef.current);
-    }
+    await clearBootstrapPending();
     commitMessages();
     bump();
   }
@@ -1152,7 +1192,10 @@ export function Messenger({ dek, onLock }: Props) {
           return;
         }
         if (opened.type === SEALED_LINK_GRANT) {
-          await onLinkGrant(opened.payload);
+          // NOT awaited: installGrant sends a farewell through encryptAndPersist,
+          // which enqueues on THIS chain — awaiting it here would deadlock the
+          // whole inbox (and with it the Erst-Sync that follows the grant).
+          void onLinkGrant(opened.payload);
           return;
         }
         if (opened.type !== SEALED_ENVELOPE) return; // unknown tag — drop
@@ -1316,7 +1359,8 @@ export function Messenger({ dek, onLock }: Props) {
         // The ack names the version we actually hold now.
         if (!bytesEqual(contact.peerMasterPub, id.master.publicKey)) {
           const held = contact.peerDeviceList ?? content.list;
-          void sendListAckTo(contact, held.epoch, held.version); // fire-and-forget: see the helper
+          const from = env.type === 'prekey' ? env.x3dh.identitySignPub : env.dev;
+          void sendListAckTo(contact, held.epoch, held.version, from); // fire-and-forget: see the helper
         }
       } else if (content.kind === 'listack') {
         // A peer tells me which (epoch, version) of MY list they hold. Deliberately

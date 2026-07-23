@@ -640,6 +640,14 @@ Header angezeigte **Versionsnummer** hilft beim Abgleich, welcher Build läuft.
 
 ## Bekannte Grenzen 
 
+- **Analytics (third party):** the app loads a cookieless **umami** tracker for
+  opt-in usage stats. Its script is *pinned and served same-origin*, so it can
+  never execute injected code in the key-holding context (script-src stays
+  `'self'`), and it sees no message content — but its anonymous page-view beacon
+  goes to `gateway.umami.is` (allowed in `connect-src`), which therefore learns
+  visitor **IP + timing**, including on the lock screen before unlock. This is a
+  deliberate, bounded relaxation of the otherwise strict "no external network
+  destinations" stance; it is data-out only, not code-in.
 - **Rest-Metadaten trotz Sealed Sender**: *wer* sendet und die `conv`-Paar-ID
   sind jetzt verborgen. Übrig bleibt, was das Empfänger-Adressieren zwangsläufig
   offenlegt: **welche Inbox** (Empfänger-pseudonym), **Timing** und **Größe** —

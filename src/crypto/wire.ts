@@ -68,21 +68,36 @@ export async function decodeInitialHeader(o: InitialHeaderWire): Promise<Initial
   };
 }
 
+/**
+ * Sender's protocol version — advertised on every outgoing envelope so a peer
+ * learns (per device, only after the message AUTHENTICATES) what this device can
+ * receive. It gates forward-compatible features that a stale client must NOT be
+ * sent, because an unknown content frame throws in unframeContent and the inbox
+ * acks-and-loses it. Absent on a legacy client's envelope → treated as 0. Bump
+ * this ONLY in the same release that ships the RECEIVE side of the new feature,
+ * so `pv >= N` is a truthful "I can receive feature N".
+ *
+ *   1 = this envelope-versioning is present (no new content frames yet)
+ */
+export const PROTOCOL_VERSION = 1;
+
 export type Envelope =
-  | { type: 'prekey'; conv: string; x3dh: InitialMessageHeader; message: RatchetMessage }
+  | { type: 'prekey'; conv: string; x3dh: InitialMessageHeader; message: RatchetMessage; pv?: number }
   // `dev` = the SENDER's device sign key (Stage 3d): a routing hint so a receiver
   // with several sessions for this person picks the right one. Prekeys carry the
   // device in x3dh.identitySignPub already; a 'msg' needs it explicitly. UNSIGNED
   // → resolution ONLY, never authorisation: a wrong dev selects the wrong session
   // and the AEAD simply fails, and an unknown dev mints no session (buildFresh is
   // prekey-only). Optional for pre-3d records / self-addressed sends.
-  | { type: 'msg'; conv: string; message: RatchetMessage; dev?: Bytes };
+  | { type: 'msg'; conv: string; message: RatchetMessage; dev?: Bytes; pv?: number };
 
 export async function encodeEnvelope(e: Envelope): Promise<Bytes> {
+  // pv rides on every envelope as an optional key; a legacy decoder ignores it.
+  const pvKey = e.pv !== undefined ? { pv: e.pv } : {};
   const o =
     e.type === 'prekey'
-      ? { t: 'prekey', c: e.conv, x: await encodeInitialHeader(e.x3dh), m: await encMsg(e.message) }
-      : { t: 'msg', c: e.conv, m: await encMsg(e.message), ...(e.dev ? { d: await b64encode(e.dev) } : {}) };
+      ? { t: 'prekey', c: e.conv, x: await encodeInitialHeader(e.x3dh), m: await encMsg(e.message), ...pvKey }
+      : { t: 'msg', c: e.conv, m: await encMsg(e.message), ...(e.dev ? { d: await b64encode(e.dev) } : {}), ...pvKey };
   return utf8.encode(JSON.stringify(o));
 }
 
@@ -143,11 +158,14 @@ export async function decodeEnvelope(bytes: Bytes): Promise<Envelope> {
 
   const conv = reqStr(o.c, 'conv');
   const message = await decMsgChecked(o.m);
+  // Optional; absent → legacy sender (learned as protocol 0). Malformed → reject,
+  // like every other field (a hostile pv is no worse than any other garbage).
+  const pv = o.pv !== undefined ? reqUint(o.pv, 'pv') : undefined;
   if (o.t !== 'prekey') {
     const dev = o.d !== undefined ? reqBytes(await reqB64(o.d, 'dev'), KEY_LEN, 'dev') : undefined;
-    return { type: 'msg', conv, message, dev };
+    return { type: 'msg', conv, message, dev, pv };
   }
-  return { type: 'prekey', conv, x3dh: await decodeInitialHeaderChecked(o.x), message };
+  return { type: 'prekey', conv, x3dh: await decodeInitialHeaderChecked(o.x), message, pv };
 }
 
 async function decMsgChecked(m: unknown): Promise<RatchetMessage> {

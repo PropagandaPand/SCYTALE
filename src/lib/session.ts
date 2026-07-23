@@ -14,6 +14,7 @@ import {
   deserializeState,
   encodeEnvelope,
   decodeEnvelope,
+  PROTOCOL_VERSION,
   sealPayload,
   openPayload,
   SEALED_ENVELOPE,
@@ -163,6 +164,13 @@ export interface Session {
   ratchet: RatchetState | null; // null until this device's session is established
   pendingHeader: InitialMessageHeader | null; // initiator attaches until first reply
   deviceSignPub: Bytes; // the peer device behind this session (prune/route key)
+  /**
+   * The peer device's advertised protocol version, learned ONLY from a message
+   * that authenticated over this session (so it's as trustworthy as the message).
+   * Undefined until we've received from this device; a legacy client stays
+   * undefined. Gates forward-compatible sends that a stale device must not get.
+   */
+  pv?: number;
 }
 
 // ── Per-device session helpers (Stage 3d) ───────────────────────────────
@@ -179,6 +187,13 @@ export function hasSession(contact: Contact): boolean {
 /** The session for a specific peer device, if present. */
 export function sessionFor(contact: Contact, deviceSignPub: Bytes): Session | undefined {
   return contact.sessions.get(deviceKey(deviceSignPub));
+}
+/** The protocol version learned for a peer device (0 = legacy/never-heard-from).
+ *  Only ever set from an authenticated message, so a sender may safely gate a
+ *  forward-compatible feature on `deviceProtocolVersion(...) >= N` — a stale or
+ *  unknown device stays 0 and keeps the backward-compatible path. */
+export function deviceProtocolVersion(contact: Contact, deviceSignPub: Bytes): number {
+  return sessionFor(contact, deviceSignPub)?.pv ?? 0;
 }
 
 /** Sending to a contact that still pins our pre-linking master is refused: the
@@ -1081,8 +1096,8 @@ async function encryptForDevice(
   // `dev` (our device) lets the recipient route a 'msg' to the right per-sender-
   // device session when WE have several devices; a prekey carries it in the x3dh.
   const envelope = session.pendingHeader
-    ? ({ type: 'prekey', conv, x3dh: session.pendingHeader, message } as const)
-    : ({ type: 'msg', conv, message, dev: me.sign.publicKey } as const);
+    ? ({ type: 'prekey', conv, x3dh: session.pendingHeader, message, pv: PROTOCOL_VERSION } as const)
+    : ({ type: 'msg', conv, message, dev: me.sign.publicKey, pv: PROTOCOL_VERSION } as const);
   // Sealed Sender: wrap the whole envelope in an anonymous box to the recipient,
   // so the relay never sees the sender's X3DH identity keys or the conv id.
   return sealPayload(target.dhPub, SEALED_ENVELOPE, await encodeEnvelope(envelope));
@@ -1367,7 +1382,10 @@ export async function receiveEnvelope(
   // for that device (sim-init loss / first contact), and any inbound message means
   // the peer has our session, so we stop attaching the X3DH header.
   const deviceSignPub = envelope.type === 'prekey' ? envelope.x3dh.identitySignPub : (envelope.dev ?? contact.peerSignPub);
-  contact.sessions.set(sessKey, { ratchet, pendingHeader: null, deviceSignPub });
+  // Learn the sender device's protocol version from THIS authenticated message —
+  // the pv rode inside the (now-verified) envelope, so it's as trustworthy as the
+  // message itself. Latest wins (it reflects the version currently running there).
+  contact.sessions.set(sessKey, { ratchet, pendingHeader: null, deviceSignPub, pv: envelope.pv });
   // Split off the sender-stamped E2E mid (16 bytes) from the front of the plaintext.
   const mid = bytesToMid(plaintext.slice(0, MID_LEN));
   const content = await unframeContent(plaintext.slice(MID_LEN));
@@ -1416,7 +1434,9 @@ interface ContactWire {
   regime: 'device' | 'master' | null; // null = pre-3c device-DH regime
   bundle: string | null; // bundle token (null if we only hold their identity)
   // Per-device sessions (Stage 3d), keyed by base64(deviceSignPub).
-  sessions?: { [devB64: string]: { ratchet: string | null; pendingHeader: unknown | null; deviceSignPub: string } };
+  sessions?: {
+    [devB64: string]: { ratchet: string | null; pendingHeader: unknown | null; deviceSignPub: string; pv?: number | null };
+  };
   // LEGACY (pre-3d) — a record written before 3d has these flat fields and NO
   // `sessions`; deserialize synthesizes a single-entry map from them (one-way).
   ratchet?: string | null;
@@ -1478,13 +1498,18 @@ export async function serializeContact(c: Contact): Promise<Bytes> {
 
 async function serializeSessions(
   sessions: Map<string, Session>,
-): Promise<{ [devB64: string]: { ratchet: string | null; pendingHeader: unknown | null; deviceSignPub: string } }> {
-  const out: { [k: string]: { ratchet: string | null; pendingHeader: unknown | null; deviceSignPub: string } } = {};
+): Promise<{
+  [devB64: string]: { ratchet: string | null; pendingHeader: unknown | null; deviceSignPub: string; pv?: number | null };
+}> {
+  const out: {
+    [k: string]: { ratchet: string | null; pendingHeader: unknown | null; deviceSignPub: string; pv?: number | null };
+  } = {};
   for (const [k, s] of sessions) {
     out[k] = {
       ratchet: s.ratchet ? await b64(await serializeState(s.ratchet)) : null,
       pendingHeader: s.pendingHeader ? await encodeInitialHeader(s.pendingHeader) : null,
       deviceSignPub: await b64(s.deviceSignPub),
+      pv: s.pv ?? null,
     };
   }
   return out;
@@ -1503,6 +1528,7 @@ async function deserializeSessions(wire: ContactWire): Promise<Map<string, Sessi
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         pendingHeader: s.pendingHeader ? await decodeInitialHeader(s.pendingHeader as any) : null,
         deviceSignPub: await unb64(s.deviceSignPub),
+        pv: s.pv ?? undefined,
       });
     }
     return map;

@@ -127,7 +127,7 @@ const MAX_REC_SECONDS = 180;
 // Erst-Sync sizing: keeps a snapshot comfortably under MAX_ATTACH without splitting.
 const ROSTER_MAX = 512; // metadata-only entries, ~250 B each
 const AVATAR_IMPORT_CAP = 96 * 1024; // decoded-ish ceiling for a carried avatar
-const HISTORY_CHUNK_BYTES = 200 * 1024; // per history frame, well under MAX_ATTACH
+const HISTORY_CHUNK_BYTES = 64 * 1024; // per history frame; measured in UTF-8 BYTES
 const GOSSIP_COOLDOWN_MS = 30_000; // first re-offer delay; doubles per attempt
 const GOSSIP_MAX_BACKOFF_MS = 60 * 60_000; // ceiling, so a never-acking peer stays cheap
 
@@ -280,6 +280,9 @@ export function Messenger({ dek, onLock }: Props) {
   const ownListRef = useRef<DeviceList | null>(null);
   // Per-contact throttle for re-offering my device list (roomId → last attempt).
   const listGossipAttemptRef = useRef<Map<string, { epoch: number; version: number; at: number; tries: number }>>(new Map());
+  // Guards against a second history run for the same device while one is still
+  // streaming — a repeated pull would otherwise multiply the frames.
+  const historySendingRef = useRef<Set<string>>(new Set());
   const groupsRef = useRef<Group[]>([]);
   // Buffered group messages carry the AUTHENTICATED sender key so the membership
   // check can run on flush (once we have the roster from the invite).
@@ -654,28 +657,55 @@ export function Messenger({ dek, onLock }: Props) {
   async function sendHistoryTo(targetSignPub: Bytes, baseBid: string) {
     const id = identityRef.current;
     if (!id || !isPrimaryDevice(id)) return;
-    let n = 0;
-    for (const c of contactsRef.current) {
-      if (c.hidden || c.staleIdentity || bytesEqual(c.peerMasterPub, id.master.publicKey)) continue;
-      const msgs: HistoryMessage[] = (messagesRef.current[c.roomId] ?? [])
-        .filter((m) => m.mid && typeof m.text === 'string' && m.text.length > 0)
-        .map((m) => ({ mine: !!m.mine, ts: m.ts, mid: m.mid as string, text: m.text as string, sender: m.sender }));
-      if (!msgs.length) continue;
-      let batch: HistoryMessage[] = [];
-      let bytes = 0;
-      const flush = async () => {
-        if (!batch.length) return;
-        await sendBootstrapFrame(targetSignPub, `${baseBid}-h${n++}`, [{ t: 'history', pm: c.peerMasterPub, msgs: batch }]);
-        batch = [];
-        bytes = 0;
-      };
-      for (const m of msgs) {
-        const size = m.text.length + (m.sender?.length ?? 0) + 80;
-        if (bytes + size > HISTORY_CHUNK_BYTES) await flush();
-        batch.push(m);
-        bytes += size;
+    const guard = bytesToB64(targetSignPub);
+    if (historySendingRef.current.has(guard)) return; // a run is already streaming
+    historySendingRef.current.add(guard);
+    let skipped = 0;
+    try {
+      for (const c of contactsRef.current) {
+        if (c.hidden || c.staleIdentity || bytesEqual(c.peerMasterPub, id.master.publicKey)) continue;
+        const all = messagesRef.current[c.roomId] ?? [];
+        const msgs: HistoryMessage[] = [];
+        for (const m of all) {
+          if (m.mid && typeof m.text === 'string' && m.text.length > 0) {
+            msgs.push({ mine: !!m.mine, ts: m.ts, mid: m.mid, text: m.text, sender: m.sender });
+          } else {
+            skipped++; // attachment, or a pre-mid record we cannot dedup safely
+          }
+        }
+        if (!msgs.length) continue;
+        // Budget in UTF-8 BYTES: String.length counts UTF-16 units, so CJK text
+        // would silently produce ~3x the intended frame size.
+        const enc = new TextEncoder();
+        const chunks: HistoryMessage[][] = [];
+        let batch: HistoryMessage[] = [];
+        let bytes = 0;
+        for (const m of msgs) {
+          const size = enc.encode(m.text).length + (m.sender ? enc.encode(m.sender).length : 0) + 80;
+          if (batch.length && bytes + size > HISTORY_CHUNK_BYTES) {
+            chunks.push(batch);
+            batch = [];
+            bytes = 0;
+          }
+          batch.push(m);
+          bytes += size;
+        }
+        if (batch.length) chunks.push(batch);
+        // Chunk ids are DETERMINISTIC and per contact: a retry re-sends the same id
+        // with the same content, so applied chunks are skipped and only the gaps
+        // land. A global counter would shift the boundaries between attempts and
+        // hide new content behind an already-applied id.
+        const room = bytesToB64(c.peerMasterPub);
+        for (let i = 0; i < chunks.length; i++) {
+          await sendBootstrapFrame(targetSignPub, `${baseBid}-h-${room}-${i}`, [
+            { t: 'history', pm: c.peerMasterPub, idx: i, total: chunks.length, msgs: chunks[i] },
+          ]);
+        }
       }
-      await flush();
+      // Only this frame stops the receiver from re-pulling.
+      await sendBootstrapFrame(targetSignPub, `${baseBid}-done`, [{ t: 'done', skipped }]);
+    } finally {
+      historySendingRef.current.delete(guard);
     }
   }
 
@@ -815,11 +845,11 @@ export function Messenger({ dek, onLock }: Props) {
   async function applyBootstrapIfNew(bid: string, parts: BootstrapPart[]) {
     const id = identityRef.current;
     if (!id) return;
+    const isDone = parts.some((p) => p.t === 'done');
     if (bootstrapAppliedRef.current.has(bid)) {
-      // Already imported — but still clear the pending pull. If a previous run
-      // wrote the marker and then failed before clearing it, we would ask every
-      // 60s forever and P would answer with the full roster every time.
-      await clearBootstrapPending();
+      // Already imported. Only the completion frame may stop the pull — otherwise a
+      // re-delivered first chunk would end a sync that is still missing chunks.
+      if (isDone) await clearBootstrapPending();
       return;
     }
     const myMaster = asMasterPub(id.master.publicKey);
@@ -841,7 +871,13 @@ export function Messenger({ dek, onLock }: Props) {
         // re-sorted by timestamp; dedup by (mid, direction) so a message this device
         // already holds from the live path is not duplicated.
         const room = await computeMasterRoomId(myMaster, asMasterPub(p.pm));
-        const arr = messagesRef.current[room] ?? (await loadMessages(dek, room));
+        let arr = messagesRef.current[room];
+        if (arr === undefined) {
+          const persisted = await loadMessages(dek, room);
+          // Re-read AFTER the await: a send during the load hydrates the room, and
+          // overwriting it here would drop that message from memory AND storage.
+          arr = messagesRef.current[room] ?? persisted;
+        }
         let added = 0;
         for (const h of p.msgs) {
           if (hasMessage(arr, h.mid, h.mine)) continue;
@@ -853,6 +889,8 @@ export function Messenger({ dek, onLock }: Props) {
           arr.sort((a, b) => a.ts - b.ts);
           await saveMessages(dek, room, arr);
         }
+      } else if (p.t === 'done') {
+        if (p.skipped > 0) console.info(`[erst-sync] ${p.skipped} Nachrichten nicht übertragen (Anhänge / ohne mid).`);
       } else if (p.t === 'roster') {
         for (const entry of p.contacts) {
           const merged = await mergeRosterEntry(contactsRef.current, entry, myMaster, retiredMastersRef.current);
@@ -870,7 +908,7 @@ export function Messenger({ dek, onLock }: Props) {
     // Marker LAST: a crash before this just replays the (idempotent) merge.
     bootstrapAppliedRef.current.add(bid);
     await saveBootstrapApplied(dek, bootstrapAppliedRef.current);
-    await clearBootstrapPending();
+    if (isDone) await clearBootstrapPending(); // every chunk arrived
     commitMessages();
     bump();
   }

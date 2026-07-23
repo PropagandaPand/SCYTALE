@@ -713,7 +713,10 @@ export interface GroupInvite {
 export type BootstrapPart =
   | { t: 'profile'; name?: string; avatar?: string } // avatar = avatarB64 (JPEG)
   | { t: 'roster'; contacts: RosterEntry[] }
-  | { t: 'history'; pm: Bytes; msgs: HistoryMessage[] };
+  | { t: 'history'; pm: Bytes; idx: number; total: number; msgs: HistoryMessage[] }
+  // Closes an initial sync: only THIS part stops the receiver from re-pulling,
+  // so an interrupted transfer is retried until every chunk actually arrived.
+  | { t: 'done'; skipped: number };
 
 /**
  * One past message as carried in a history chunk. The DISPLAY ROOM is never on the
@@ -897,8 +900,12 @@ export async function frameContent(c: MessageContent): Promise<Bytes> {
           ? {
               t: 'history',
               m: bytesToB64(p.pm),
+              n: p.idx,
+              o: p.total,
               h: p.msgs.map((x) => ({ i: x.mine, t: x.ts, d: x.mid, x: x.text, s: x.sender ?? null })),
             }
+          : p.t === 'done'
+            ? { t: 'done', k: p.skipped }
           : {
             t: 'roster',
             c: p.contacts.map((e) => ({
@@ -967,14 +974,20 @@ export async function unframeContent(bytes: Bytes): Promise<MessageContent> {
       if (p.t === 'profile') parts.push({ t: 'profile', name: p.n || undefined, avatar: p.a || undefined });
       else if (p.t === 'history') {
         const rawH: WireHistoryMsg[] = Array.isArray(p.h) ? p.h : [];
-        const msgs: HistoryMessage[] = rawH.map((x) => ({
-          mine: x.i === true,
-          ts: Number(x.t),
-          mid: String(x.d),
-          text: String(x.x ?? ''),
-          sender: x.s ?? undefined,
-        }));
-        parts.push({ t: 'history', pm: b64ToBytes(p.m), msgs });
+        // Harden: a non-finite ts would make the sort implementation-defined, and a
+        // missing mid would collapse every such message onto ONE dedup slot.
+        const msgs: HistoryMessage[] = rawH
+          .filter((x) => typeof x.d === 'string' && x.d.length > 0 && Number.isFinite(Number(x.t)))
+          .map((x) => ({
+            mine: x.i === true,
+            ts: Number(x.t),
+            mid: String(x.d),
+            text: String(x.x ?? ''),
+            sender: x.s ?? undefined,
+          }));
+        parts.push({ t: 'history', pm: b64ToBytes(p.m), idx: Number(p.n) || 0, total: Number(p.o) || 0, msgs });
+      } else if (p.t === 'done') {
+        parts.push({ t: 'done', skipped: Number(p.k) || 0 });
       } else if (p.t === 'roster') {
         const rawContacts = (Array.isArray(p.c) ? p.c : []) as Array<{
           m: string;

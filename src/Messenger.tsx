@@ -54,6 +54,7 @@ import {
   hasSession,
   randomMid,
   fanoutDeliveries,
+  fanoutChunks,
   acceptMasterChange,
   acceptRotation,
   reconnectContact,
@@ -139,8 +140,14 @@ import {
 } from './icons';
 
 const MAX_ATTACH = 600 * 1024; // inline cap — keeps the WS frame under Cloudflare's ~1 MiB limit
-// Chunked-attachment RECEIVE caps (sanity bounds; the real flood limit is the relay
-// mailbox byte-cap, which rate-limits what a peer can push before we drain it).
+// Chunked attachments. Auto-push path: a file above the inline cap and up to
+// AUTOPUSH_CAP is sent as chunk frames straight to the peer's mailbox (works offline);
+// larger files will use offer+pull (7d). CHUNK_BYTES stays well under the relay's
+// per-message cap even after sealing/base64.
+const CHUNK_BYTES = 48 * 1024;
+const AUTOPUSH_CAP = 2 * 1024 * 1024;
+// RECEIVE caps (sanity bounds; the real flood limit is the relay mailbox byte-cap,
+// which rate-limits what a peer can push before we drain it).
 const RECV_MAX_BYTES = 30 * 1024 * 1024; // largest attachment we'll reassemble
 const RECV_MAX_CHUNKS = 800; // ceiling on a transfer's chunk count (bounds bookkeeping)
 const RECV_MAX_CHUNK_BYTES = 256 * 1024; // reject an over-large single chunk payload
@@ -783,6 +790,53 @@ export function Messenger({ dek, onLock }: Props) {
     // permanent failure. It becomes reachable once its list SPK is gossiped.
     for (const u of unreachable) rows.push({ device: bytesToB64(u), deliveryId: '', status: 'stale' });
     return rows;
+  }
+
+  // Auto-push a large attachment as chunk frames straight to the peer's mailbox (1:1
+  // only). Encrypts the whole stream, persists the advanced ratchet BEFORE any frame
+  // hits the wire (Invariant II), then dispatches per capable device. Returns false
+  // if NO device could receive it (peer too old) so the caller can report it.
+  async function sendChunkedAttachment(
+    contact: Contact,
+    data: Uint8Array<ArrayBuffer>,
+    name: string,
+    mime: string,
+  ): Promise<boolean> {
+    const id = identityRef.current;
+    if (!id) return false;
+    const tid = newAttachmentId();
+    const total = Math.max(1, Math.ceil(data.length / CHUNK_BYTES));
+    // Store locally under the SAME id the peer will use, so the sender sees it too.
+    await putAttachment(dek, tid, data, name, mime);
+    const out = await enqueueInbox(async () => {
+      const r = await fanoutChunks(id, contact, { tid, total, size: data.length, name, mime }, data, CHUNK_BYTES);
+      await saveContact(dek, contact); // persist ratchet advances BEFORE the wire (Invariant II)
+      return r;
+    });
+    if (out.perDevice.length === 0) {
+      await deleteAttachment(tid); // nothing sent — don't leak the local copy
+      return false;
+    }
+    // RelayClient buffers, so a burst is fine within the relay's mailbox byte-cap
+    // (AUTOPUSH_CAP << the relay's per-inbox limit).
+    for (const dev of out.perDevice) {
+      const room = await inboxRoom(dev.deviceSignPub);
+      connectDeviceInbox(room);
+      const relay = relaysRef.current.get(room);
+      for (const sealed of dev.sealed) relay?.send(sealed, randomMid());
+    }
+    // Chunks carry no per-device delivery rows (W5) — one 'sent' once dispatched.
+    // (Per-chunk ack tracking + progress is a later refinement.)
+    await appendMessage(contact.roomId, {
+      mine: true,
+      ts: Date.now(),
+      mid: randomMid(),
+      file: { name, mime, attId: tid, size: data.length },
+      status: 'sent',
+    });
+    await saveContact(dek, contact);
+    bump();
+    return true;
   }
 
   // The hidden "self" contact: peerMaster == MY master, peerDeviceList == my own
@@ -2542,22 +2596,28 @@ export function Messenger({ dek, onLock }: Props) {
       } else {
         data = new Uint8Array(await file.arrayBuffer());
       }
-      if (data.length > MAX_ATTACH) {
-        const kb = Math.round(data.length / 1024);
-        const cap = Math.round(MAX_ATTACH / 1024);
-        // Videos deserve their own wording: "too big" alone leaves the user
-        // guessing whether a shorter clip would help or the format is wrong.
-        // There is no re-encoding step, so the honest answer is the duration.
-        setError(
-          mime.startsWith('video/')
-            ? `Video zu groß (${Math.round(kb / 1024)} MB). Es gibt keine Umkodierung — es passen nur sehr kurze Clips bis ~${cap} KB, in der Praxis wenige Sekunden. Kürze oder verkleinere es vorher.`
-            : `Zu groß (${kb} KB) — inline gehen ~${cap} KB.`,
-        );
-        return;
-      }
       // A file literally named like our sticker marker would render chrome-free
       // on the other side. Harmless but confusing, so rename it.
       if (name === STICKER_FILENAME) name = 'datei';
+      if (data.length > MAX_ATTACH) {
+        const target = activeGroup ? null : contactsRef.current.find((c) => c.roomId === activeRoom);
+        // Auto-push chunked: a 1:1 contact, above the inline cap and within AUTOPUSH_CAP.
+        if (target && data.length <= AUTOPUSH_CAP) {
+          const sent = await sendChunkedAttachment(target, data, name, mime);
+          if (!sent) setError('Empfänger kann große Anhänge noch nicht empfangen — bitte App aktualisieren lassen.');
+          return;
+        }
+        const kb = Math.round(data.length / 1024);
+        const cap = Math.round(AUTOPUSH_CAP / (1024 * 1024));
+        setError(
+          activeGroup
+            ? `In Gruppen gehen aktuell nur Anhänge bis ~${Math.round(MAX_ATTACH / 1024)} KB.`
+            : mime.startsWith('video/')
+              ? `Video zu groß (${Math.round(kb / 1024)} MB). Aktuell gehen Anhänge bis ~${cap} MB; größere kommen mit dem Abruf-Modus.`
+              : `Zu groß (${kb} KB) — aktuell gehen Anhänge bis ~${cap} MB.`,
+        );
+        return;
+      }
       const mid = randomMid();
       const localMsg: ChatMessage = { mine: true, ts: Date.now(), file: await fileRefFor(name, mime, data), mid };
       if (activeGroup) {

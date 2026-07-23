@@ -1169,25 +1169,9 @@ export async function fanoutDeliveries(
   only?: Bytes,
 ): Promise<{ deliveries: FanoutDelivery[]; unreachable: Bytes[] }> {
   if (contact.staleIdentity) throw new StaleIdentityError();
-  const targets: DeviceTarget[] = (contact.peerDeviceList
-    ? contact.peerDeviceList.devices.map((d) => ({
-        signPub: d.signPub,
-        dhPub: d.dhPub,
-        // Prefer our stored bundle for the primary (it may still hold a one-time
-        // prekey → better forward secrecy); a silent device uses its list SPK.
-        bundle:
-          bytesEqual(d.signPub, contact.peerSignPub) && contact.bundle
-            ? contact.bundle
-            : (bundleFromDeviceEntry(contact.peerMasterPub, contact.peerEpoch, d) ?? undefined),
-      }))
-    : [{ signPub: contact.peerSignPub, dhPub: contact.peerDhPub, bundle: contact.bundle }]
-  )
-    .filter((t) => !exclude || !bytesEqual(t.signPub, exclude)) // self-sync: never send to my own device
-    .filter((t) => !only || bytesEqual(t.signPub, only)); // bootstrap reply: target exactly ONE device
-
   const deliveries: FanoutDelivery[] = [];
   const unreachable: Bytes[] = [];
-  for (const t of targets) {
+  for (const t of authorisedTargets(contact, exclude, only)) {
     try {
       deliveries.push({ deviceSignPub: t.signPub, sealed: await encryptForDevice(me, contact, t, content, mid) });
     } catch {
@@ -1195,6 +1179,88 @@ export async function fanoutDeliveries(
     }
   }
   return { deliveries, unreachable };
+}
+
+/** Every authorised peer device to send to (with the bundle needed to initiate). A
+ *  bare contact (no accepted device list) is its single pinned device. */
+function authorisedTargets(contact: Contact, exclude?: Bytes, only?: Bytes): DeviceTarget[] {
+  return (
+    contact.peerDeviceList
+      ? contact.peerDeviceList.devices.map((d) => ({
+          signPub: d.signPub,
+          dhPub: d.dhPub,
+          // Prefer our stored bundle for the primary (it may still hold a one-time
+          // prekey → better forward secrecy); a silent device uses its list SPK.
+          bundle:
+            bytesEqual(d.signPub, contact.peerSignPub) && contact.bundle
+              ? contact.bundle
+              : (bundleFromDeviceEntry(contact.peerMasterPub, contact.peerEpoch, d) ?? undefined),
+        }))
+      : [{ signPub: contact.peerSignPub, dhPub: contact.peerDhPub, bundle: contact.bundle }]
+  )
+    .filter((t) => !exclude || !bytesEqual(t.signPub, exclude)) // self-sync: never send to my own device
+    .filter((t) => !only || bytesEqual(t.signPub, only)); // bootstrap reply: target exactly ONE device
+}
+
+/** One device's ordered, sealed chunk stream for a large attachment. */
+export interface FanoutChunkDelivery {
+  deviceSignPub: Bytes;
+  sealed: Bytes[]; // one sealed 'chunk' frame per index, in order
+}
+
+/**
+ * Encrypt a large attachment as an ordered stream of `chunk` frames, fanned out to
+ * every authorised device that advertises it can RECEIVE chunks (`pv >= minPv`). Each
+ * chunk is its own ratchet message (its own per-message mid); a device's ratchet
+ * advances once per chunk.
+ *
+ * INVARIANT II is the CALLER's contract: persist the contact (the advanced ratchet
+ * state) BEFORE putting any sealed frame on the wire — otherwise a crash mid-send
+ * could replay a chain key already on the wire = two-time pad.
+ *
+ * A device below the pv gate goes in `incapable` (we never send it a byte-14 frame it
+ * would throw on and lose); one we can't initiate to goes in `unreachable`. Holds
+ * every sealed frame in memory — sized for the auto-push cap; large files stream via
+ * offer+pull instead.
+ */
+export async function fanoutChunks(
+  me: IdentityKeys,
+  contact: Contact,
+  desc: { tid: string; total: number; size: number; name: string; mime: string },
+  data: Bytes,
+  chunkBytes: number,
+  minPv = 2,
+): Promise<{ perDevice: FanoutChunkDelivery[]; incapable: Bytes[]; unreachable: Bytes[] }> {
+  if (contact.staleIdentity) throw new StaleIdentityError();
+  const perDevice: FanoutChunkDelivery[] = [];
+  const incapable: Bytes[] = [];
+  const unreachable: Bytes[] = [];
+  for (const t of authorisedTargets(contact)) {
+    if (deviceProtocolVersion(contact, t.signPub) < minPv) {
+      incapable.push(t.signPub); // stale/unknown receiver — must not be sent chunk frames
+      continue;
+    }
+    try {
+      const sealed: Bytes[] = [];
+      for (let idx = 0; idx < desc.total; idx++) {
+        const chunk: MessageContent = {
+          kind: 'chunk',
+          tid: desc.tid,
+          idx,
+          total: desc.total,
+          size: desc.size,
+          name: desc.name,
+          mime: desc.mime,
+          data: data.slice(idx * chunkBytes, (idx + 1) * chunkBytes),
+        };
+        sealed.push(await encryptForDevice(me, contact, t, chunk, randomMid()));
+      }
+      perDevice.push({ deviceSignPub: t.signPub, sealed });
+    } catch {
+      unreachable.push(t.signPub); // can't initiate to this device yet
+    }
+  }
+  return { perDevice, incapable, unreachable };
 }
 
 export async function sendMessage(me: IdentityKeys, contact: Contact, text: string, mid?: string): Promise<Bytes> {

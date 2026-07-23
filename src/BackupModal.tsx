@@ -34,8 +34,7 @@ export function BackupModal({
     try {
       // Second auth: an unlocked vault is not enough — prove the passphrase now.
       await unlockBoundVault(vaultPass); // throws on wrong passphrase / lockout
-      const bytes = await exportBackup(dek, exportPass);
-      const blob = new Blob([bytes], { type: 'application/octet-stream' });
+      const blob = await exportBackup(dek, exportPass); // already a Blob (streamed sections)
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;

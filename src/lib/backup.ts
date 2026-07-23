@@ -34,11 +34,26 @@ import { loadGroups, saveGroup, toInvite, fromInvite } from './groups';
 import { loadProfile, saveProfile, type MyProfile } from './profile';
 import { loadStickers, saveStickers, type Sticker } from './stickers';
 import { loadMessages, saveMessages, type ChatMessage } from './messages';
+import { getAttachmentBlob, getAttachmentMeta, putAttachment, allAttachmentIds } from './attachments';
 import { loadRetiredMasters, saveRetiredMasters } from './denylist';
 
-// --- Encryption container (the downloadable file) --------------------------
+// --- Encryption container -------------------------------------------------
+//
+// v1 (legacy, still importable): one JSON object {v:1, argon2, salt, iv, ct} with
+//   the whole vault base64-encrypted as a single blob. Fine when attachments were
+//   inline and ≤600 KB; unusable once attachments are large (one giant encrypt +
+//   base64 = OOM).
+//
+// v2 (current): a length-prefixed BINARY container assembled as a Blob, so nothing
+//   is ever held as one giant array or base64 string and each section is encrypted
+//   on its own:
+//     [u32 headerLen][header JSON][meta ciphertext][att0 ciphertext][att1]…
+//   header = {v:2, argon2, salt, meta:{iv,len}, atts:[{id, iv, len}]}. The metadata
+//   blob carries the identity/contacts/messages plus a name/mime map for the
+//   attachments; each attachment's bytes are a separate section. A v1 file starts
+//   with '{' (0x7b); a v2 file starts with a 4-byte length whose first byte is 0.
 
-interface Container {
+interface V1Container {
   v: 1;
   argon2: Argon2Params;
   salt: string;
@@ -46,37 +61,30 @@ interface Container {
   ct: string;
 }
 
-async function encrypt(passphrase: string, plaintext: Bytes): Promise<Bytes> {
-  const salt = crypto.getRandomValues(new Uint8Array(16));
+async function deriveExportKey(passphrase: string, salt: Bytes, params: Argon2Params): Promise<CryptoKey> {
   // Full Argon2id on the export passphrase; deriveKekBytes clamps to MIN_ARGON2.
-  const keyBytes = await deriveKekBytes(passphrase, salt, DEFAULT_ARGON2);
-  const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['encrypt']);
+  const keyBytes = await deriveKekBytes(passphrase, salt, params);
+  const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
   keyBytes.fill(0);
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plaintext));
-  const container: Container = {
-    v: 1,
-    argon2: DEFAULT_ARGON2,
-    salt: await b64encode(salt),
-    iv: await b64encode(iv),
-    ct: await b64encode(ct),
-  };
-  return utf8.encode(JSON.stringify(container));
+  return key;
 }
 
-async function decrypt(passphrase: string, file: Bytes): Promise<Bytes> {
-  const c = JSON.parse(utf8.decode(file)) as Container;
-  if (c.v !== 1) throw new Error('Unbekanntes Backup-Format.');
-  const keyBytes = await deriveKekBytes(passphrase, await b64decode(c.salt), c.argon2);
-  const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['decrypt']);
-  keyBytes.fill(0);
-  try {
-    return new Uint8Array(
-      await crypto.subtle.decrypt({ name: 'AES-GCM', iv: await b64decode(c.iv) }, key, await b64decode(c.ct)),
-    );
-  } catch {
-    throw new Error('Falsche Export-Passphrase oder beschädigtes Backup.');
-  }
+async function encSection(key: CryptoKey, plain: Bytes): Promise<{ iv: Bytes; ct: Bytes }> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plain));
+  return { iv, ct };
+}
+
+async function decSection(key: CryptoKey, iv: Bytes, ct: Bytes): Promise<Bytes> {
+  return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct));
+}
+
+interface V2Header {
+  v: 2;
+  argon2: Argon2Params;
+  salt: string;
+  meta: { iv: string; len: number };
+  atts: { id: string; iv: string; len: number }[];
 }
 
 // --- Full-state gather / restore -------------------------------------------
@@ -99,9 +107,12 @@ interface BackupBlob {
   // again). Optional: backups written before this field carry none. See
   // Devil's-Advocate DA-3.
   retiredMasters?: string[];
+  // Name/mime for each attachment whose bytes travel as their own section in a v2
+  // file (the bytes are NOT in this blob). Absent in v1 backups.
+  attMeta?: Record<string, { name: string; mime: string }>;
 }
 
-async function gather(dek: CryptoKey): Promise<Bytes> {
+async function gather(dek: CryptoKey, attMeta: Record<string, { name: string; mime: string }>): Promise<Bytes> {
   const id = await loadOrCreateIdentity(dek);
   const pre = await loadOrCreatePreKeys(dek, id);
   const contacts = await loadContacts(dek);
@@ -120,12 +131,13 @@ async function gather(dek: CryptoKey): Promise<Bytes> {
     messages,
     stickers: await loadStickers(dek),
     retiredMasters: [...(await loadRetiredMasters(dek))],
+    attMeta,
   };
   return utf8.encode(JSON.stringify(blob));
 }
 
-async function restore(dek: CryptoKey, plaintext: Bytes): Promise<void> {
-  const blob = JSON.parse(utf8.decode(plaintext)) as BackupBlob;
+/** Restore everything EXCEPT attachment bytes (those are separate v2 sections). */
+async function restoreMeta(dek: CryptoKey, blob: BackupBlob): Promise<void> {
   if (blob.v !== 1) throw new Error('Unbekanntes Backup-Format.');
   await saveIdentity(dek, await deserializeIdentity(await b64decode(blob.identity)));
   await savePreKeys(dek, await deserializePreKeys(await b64decode(blob.prekeys)));
@@ -160,12 +172,95 @@ async function restore(dek: CryptoKey, plaintext: Bytes): Promise<void> {
 
 // --- Public API ------------------------------------------------------------
 
-/** Produce an encrypted backup file of the whole vault state. */
-export async function exportBackup(dek: CryptoKey, exportPassphrase: string): Promise<Bytes> {
-  return encrypt(exportPassphrase, await gather(dek));
+/**
+ * Produce an encrypted backup FILE (v2) of the whole vault state, as a Blob. The
+ * metadata and every attachment are encrypted as separate sections, so a large
+ * video never sits in memory as one array nor goes through one giant encrypt.
+ */
+export async function exportBackup(dek: CryptoKey, exportPassphrase: string): Promise<Blob> {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const key = await deriveExportKey(exportPassphrase, salt, DEFAULT_ARGON2);
+
+  // Name/mime for every stored attachment (its bytes become a separate section).
+  const attMeta: Record<string, { name: string; mime: string }> = {};
+  const ids: string[] = [];
+  for (const id of await allAttachmentIds()) {
+    const m = await getAttachmentMeta(dek, id);
+    if (m) {
+      attMeta[id] = { name: m.name, mime: m.mime };
+      ids.push(id);
+    }
+  }
+
+  const metaSec = await encSection(key, await gather(dek, attMeta));
+
+  const atts: V2Header['atts'] = [];
+  const attCts: Bytes[] = [];
+  for (const id of ids) {
+    const blob = await getAttachmentBlob(dek, id);
+    if (!blob) continue; // incomplete/GC'd between listing and reading — skip
+    const sec = await encSection(key, new Uint8Array(await blob.arrayBuffer()));
+    atts.push({ id, iv: await b64encode(sec.iv), len: sec.ct.length });
+    attCts.push(sec.ct);
+  }
+
+  const header: V2Header = {
+    v: 2,
+    argon2: DEFAULT_ARGON2,
+    salt: await b64encode(salt),
+    meta: { iv: await b64encode(metaSec.iv), len: metaSec.ct.length },
+    atts,
+  };
+  const headerBytes = utf8.encode(JSON.stringify(header));
+  const prefix = new Uint8Array(4);
+  new DataView(prefix.buffer).setUint32(0, headerBytes.length);
+  // A Blob of parts: the browser can back this with disk, so the whole backup is
+  // never one contiguous array in RAM.
+  return new Blob([prefix, headerBytes, metaSec.ct, ...attCts], { type: 'application/octet-stream' });
 }
 
-/** Restore an encrypted backup into the local vault (overwrites identity/state). */
+/** Restore an encrypted backup into the local vault (overwrites identity/state).
+ *  Accepts both the v2 binary container and the legacy v1 JSON file. */
 export async function importBackup(dek: CryptoKey, exportPassphrase: string, file: Bytes): Promise<void> {
-  await restore(dek, await decrypt(exportPassphrase, file));
+  // v1 files are a JSON object → start with '{'. v2 starts with a 4-byte length.
+  if (file[0] === 0x7b) {
+    const c = JSON.parse(utf8.decode(file)) as V1Container;
+    if (c.v !== 1) throw new Error('Unbekanntes Backup-Format.');
+    const key = await deriveExportKey(exportPassphrase, await b64decode(c.salt), c.argon2);
+    let plain: Bytes;
+    try {
+      plain = await decSection(key, await b64decode(c.iv), await b64decode(c.ct));
+    } catch {
+      throw new Error('Falsche Export-Passphrase oder beschädigtes Backup.');
+    }
+    await restoreMeta(dek, JSON.parse(utf8.decode(plain)) as BackupBlob);
+    return;
+  }
+
+  // v2 binary container.
+  const dv = new DataView(file.buffer, file.byteOffset, file.byteLength);
+  const headerLen = dv.getUint32(0);
+  let off = 4;
+  const header = JSON.parse(utf8.decode(new Uint8Array(file.slice(off, off + headerLen)))) as V2Header;
+  if (header.v !== 2) throw new Error('Unbekanntes Backup-Format.');
+  off += headerLen;
+  const key = await deriveExportKey(exportPassphrase, await b64decode(header.salt), header.argon2);
+
+  const metaCt = new Uint8Array(file.slice(off, off + header.meta.len));
+  off += header.meta.len;
+  let blob: BackupBlob;
+  try {
+    blob = JSON.parse(utf8.decode(await decSection(key, await b64decode(header.meta.iv), metaCt))) as BackupBlob;
+  } catch {
+    throw new Error('Falsche Export-Passphrase oder beschädigtes Backup.');
+  }
+  await restoreMeta(dek, blob);
+
+  for (const a of header.atts) {
+    const ct = new Uint8Array(file.slice(off, off + a.len));
+    off += a.len;
+    const bytes = await decSection(key, await b64decode(a.iv), ct);
+    const nm = blob.attMeta?.[a.id];
+    await putAttachment(dek, a.id, bytes, nm?.name ?? 'anhang', nm?.mime ?? 'application/octet-stream');
+  }
 }

@@ -43,6 +43,8 @@ export interface RecvMarker {
   mime: string;
   size: number; // expected plaintext bytes (validated against the cap before storing)
   ts: number; // when the transfer started — a stale one (sender vanished) is swept
+  receivedIdx: number[]; // distinct chunk indices stored so far (completion = length === total)
+  receivedBytes: number; // bytes stored so far — bounded by `size` so a peer can't over-store
 }
 
 const metaKey = (id: string) => `att:${id}:meta`;

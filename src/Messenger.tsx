@@ -113,7 +113,6 @@ import {
   deleteAttachment,
   allAttachmentIds,
   sealAndPutChunk,
-  storedChunkCount,
   finalizeAttachment,
   putRecvMarker,
   getRecvMarker,
@@ -576,6 +575,9 @@ export function Messenger({ dek, onLock }: Props) {
   // self-synced/fanned. 1:1 only — a hidden (group-member) contact is not supported.
   async function receiveChunk(contact: Contact, c: Extract<MessageContent, { kind: 'chunk' }>): Promise<void> {
     if (contact.hidden) return; // groups excluded (W7) — drop (and ack)
+    // The tid is attacker-controlled and lands in storage keys — accept only the
+    // newAttachmentId charset so it can't break key parsing or collide via ':'.
+    if (!/^[A-Za-z0-9]{1,40}$/.test(c.tid)) return;
     // Validate BEFORE touching storage. A malformed/oversized descriptor is dropped.
     if (!Number.isSafeInteger(c.total) || c.total < 1 || c.total > RECV_MAX_CHUNKS) return;
     if (!Number.isSafeInteger(c.idx) || c.idx < 0 || c.idx >= c.total) return;
@@ -591,23 +593,32 @@ export function Messenger({ dek, onLock }: Props) {
     let marker = await getRecvMarker(dek, c.tid);
     if (!marker) {
       if ((await allRecvMarkerIds()).length >= MAX_CONCURRENT_RECV) return; // too many in flight
-      marker = { total: c.total, name: c.name, mime: c.mime, size: c.size, ts: Date.now() };
+      marker = { total: c.total, name: c.name, mime: c.mime, size: c.size, ts: Date.now(), receivedIdx: [], receivedBytes: 0 };
       await putRecvMarker(dek, c.tid, marker);
     } else if (c.total !== marker.total) {
       return; // inconsistent with the first chunk — drop
     }
 
-    await sealAndPutChunk(dek, c.tid, c.idx, c.data); // may throw QuotaExceededError → no ack
+    // Store each index once, and never store more than the CLAIMED size — otherwise
+    // total × max-chunk (800 × 256 KB) could store far more than `size` claimed (M2).
+    if (!marker.receivedIdx.includes(c.idx)) {
+      if (marker.receivedBytes + c.data.length > marker.size) return; // over-claim → drop
+      await sealAndPutChunk(dek, c.tid, c.idx, c.data); // may throw QuotaExceededError → no ack
+      marker.receivedIdx.push(c.idx);
+      marker.receivedBytes += c.data.length;
+      await putRecvMarker(dek, c.tid, marker); // progress persisted (crash-safe/idempotent)
+    }
 
-    if ((await storedChunkCount(c.tid)) >= marker.total) {
+    if (marker.receivedIdx.length >= marker.total) {
       await finalizeAttachment(dek, c.tid, {
         name: marker.name,
         mime: marker.mime,
         size: marker.size,
         chunks: marker.total,
       });
-      await clearRecvMarker(c.tid);
-      // Re-check dedup after the awaits — a concurrent path or resume must not double-append.
+      // Persist the MESSAGE before clearing the marker (B1): a crash in this window then
+      // leaves either the marker (GC protects the chunks) or the persisted, referenced
+      // message — never a complete-but-unprotected attachment the orphan sweep deletes.
       if (!hasMessage(messagesRef.current[contact.roomId] ?? [], c.tid, false)) {
         await appendMessage(contact.roomId, {
           mine: false,
@@ -619,6 +630,7 @@ export function Messenger({ dek, onLock }: Props) {
           unreadRef.current[contact.roomId] = (unreadRef.current[contact.roomId] ?? 0) + 1;
         }
       }
+      await clearRecvMarker(c.tid);
     }
   }
 

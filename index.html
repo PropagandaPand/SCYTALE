@@ -11,6 +11,10 @@
     <link rel="icon" type="image/png" href="/pwa-192.png" />
     <link rel="apple-touch-icon" href="/pwa-512.png" />
     <title>SCYTALE</title>
+    <!-- Analytics: umami, self-hosted (same-origin /stats.js, so script-src stays
+         'self'). Only an anonymous, cookieless count beacon leaves, to
+         gateway.umami.is — allowed in connect-src, nothing else. -->
+    <script defer src="/stats.js" data-website-id="5418e9a3-f714-40a3-9bca-dcf12baeca9f"></script>
   </head>
   <body>
     <div id="app"></div>

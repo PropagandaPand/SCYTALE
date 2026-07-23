@@ -119,6 +119,7 @@ import { BackupModal } from './BackupModal';
 import { AudioPlayer } from './AudioPlayer';
 import {
   IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach, IconMic, IconTrash, IconDots, IconGroup,
+  IconBell, IconDevices, IconArchive, IconChevron,
   IconSticker,
 } from './icons';
 
@@ -3698,111 +3699,83 @@ export function Messenger({ dek, onLock }: Props) {
           </button>
           <div className="h">Profil</div>
         </div>
-        <div className="verify-body">
+        <div className="profile-body">
           <input ref={avatarInputRef} type="file" accept="image/*" hidden onChange={onPickAvatar} />
           {cropFile && (
             <CropModal file={cropFile} onCancel={() => setCropFile(null)} onDone={(b) => void onCropDone(b)} />
           )}
-          <button className="profile-avatar" onClick={() => avatarInputRef.current?.click()}>
-            {myAvatarB64 ? <img src={avatarSrc(myAvatarB64)} alt="Dein Avatar" /> : <span className="ph">＋</span>}
-            <span className="edit-badge">
-              <IconCamera size={14} />
-            </span>
-          </button>
-          <p className="share-hint">Antippen, um dein Bild zu ändern.</p>
-          <div style={{ textAlign: 'left', marginTop: 6 }}>
-            <div className="field-lbl">Anzeigename</div>
-            <input
-              className="name-input"
-              value={profileName}
-              placeholder="Wie du angezeigt wirst"
-              onChange={(e) => setProfileName(e.target.value)}
-            />
-          </div>
-          <button className="btn btn-primary" style={{ marginTop: 18 }} onClick={() => void saveProfileMeta()}>
-            Speichern &amp; teilen
-          </button>
 
-          {pushSupported() && (
-            <button
-              className={`notif-row${notifOn ? ' on' : ''}`}
-              onClick={() => void togglePush()}
-              disabled={notifBusy}
-            >
-              <div className="notif-txt">
-                <span className="notif-title">Benachrichtigungen</span>
-                <span className="notif-sub">
-                  {notifOn ? 'aktiv — du wirst bei neuen Nachrichten geweckt' : 'bei neuen Nachrichten wecken lassen'}
-                </span>
-              </div>
-              <span className={`switch${notifOn ? ' on' : ''}`}>
-                <span className="knob" />
+          {/* Identity: avatar + name + save, one quiet line on what happens to it. */}
+          <div className="profile-id">
+            <button className="profile-avatar" onClick={() => avatarInputRef.current?.click()}>
+              {myAvatarB64 ? <img src={avatarSrc(myAvatarB64)} alt="Dein Avatar" /> : <span className="ph">＋</span>}
+              <span className="edit-badge">
+                <IconCamera size={14} />
               </span>
             </button>
-          )}
+            <input
+              className="profile-name-input"
+              value={profileName}
+              placeholder="Dein Name"
+              onChange={(e) => setProfileName(e.target.value)}
+            />
+            <button className="btn btn-primary profile-save" onClick={() => void saveProfileMeta()}>
+              Speichern &amp; teilen
+            </button>
+            <p className="profile-id-hint">
+              <IconLock size={11} /> Bild &amp; Name gehen Ende-zu-Ende verschlüsselt an deine Kontakte.
+            </p>
+          </div>
 
           {error && <div className="err-note">{error}</div>}
 
-          <div className="info-note" style={{ textAlign: 'left' }}>
-            <span className="g">
-              <IconInfo />
-            </span>
-            <p>
-              Bild und Name werden <b>Ende-zu-Ende verschlüsselt</b> an deine Kontakte geschickt — nicht über
-              den öffentlichen Code.
-            </p>
-          </div>
-          {notifOn && (
-            <div className="info-note" style={{ textAlign: 'left' }}>
-              <span className="g">
-                <IconLock size={13} />
-              </span>
-              <p>
-                Push-Nachrichten sind <b>inhaltslos</b> — sie enthalten nur ein Wecksignal, keinen Absender und
-                keinen Text. Erst beim Öffnen der App wird entschlüsselt.
-              </p>
-            </div>
-          )}
+          {/* Everything else as a scannable settings list, not four paragraphs. */}
+          <div className="settings-list">
+            {pushSupported() && (
+              <button className="setting-row" onClick={() => void togglePush()} disabled={notifBusy}>
+                <span className="setting-ic"><IconBell /></span>
+                <span className="setting-tx">
+                  <span className="setting-title">Benachrichtigungen</span>
+                  <span className="setting-sub">Inhaltloses Wecksignal — nie Absender oder Text</span>
+                </span>
+                <span className={`switch${notifOn ? ' on' : ''}`}>
+                  <span className="knob" />
+                </span>
+              </button>
+            )}
 
-          <div className="sect-lbl" style={{ marginTop: 22 }}>Geräte</div>
-          <div className="backup-actions">
             <button
-              className="btn btn-ghost"
+              className="setting-row"
               onClick={() => {
                 resetLink();
                 setLinkView('menu');
               }}
             >
-              Gerät koppeln
+              <span className="setting-ic"><IconDevices /></span>
+              <span className="setting-tx">
+                <span className="setting-title">Gerät koppeln</span>
+                <span className="setting-sub">Zweites Gerät per QR + Emoji-Abgleich</span>
+              </span>
+              <span className="setting-go"><IconChevron /></span>
             </button>
-          </div>
-          <div className="info-note" style={{ textAlign: 'left' }}>
-            <span className="g">
-              <IconInfo />
-            </span>
-            <p>
-              Verbinde ein zweites Gerät mit deiner Identität — per QR-Code, mit einem <b>Emoji-Abgleich</b> gegen
-              Man-in-the-Middle. Der Hauptschlüssel verlässt dabei nie dein Hauptgerät.
-            </p>
-          </div>
 
-          <div className="sect-lbl" style={{ marginTop: 22 }}>Backup &amp; Wiederherstellung</div>
-          <div className="backup-actions">
-            <button className="btn btn-ghost" onClick={() => setBackupMode('export')}>
-              Backup exportieren
+            <button className="setting-row" onClick={() => setBackupMode('export')}>
+              <span className="setting-ic"><IconArchive /></span>
+              <span className="setting-tx">
+                <span className="setting-title">Backup exportieren</span>
+                <span className="setting-sub">Verschlüsselte Datei, eigene Passphrase</span>
+              </span>
+              <span className="setting-go"><IconChevron /></span>
             </button>
-            <button className="btn btn-ghost" onClick={() => setBackupMode('import')}>
-              Wiederherstellen
+
+            <button className="setting-row" onClick={() => setBackupMode('import')}>
+              <span className="setting-ic"><IconArchive /></span>
+              <span className="setting-tx">
+                <span className="setting-title">Wiederherstellen</span>
+                <span className="setting-sub">Konto aus einer Backup-Datei laden</span>
+              </span>
+              <span className="setting-go"><IconChevron /></span>
             </button>
-          </div>
-          <div className="info-note" style={{ textAlign: 'left' }}>
-            <span className="g">
-              <IconInfo />
-            </span>
-            <p>
-              Verschlüsseltes Backup deiner Identität als Datei — für Gerätewechsel/Recovery. Braucht eine
-              <b> eigene Passphrase</b> und fragt vorher die Tresor-Passphrase erneut ab.
-            </p>
           </div>
 
           {backupMode && <BackupModal mode={backupMode} dek={dek} onClose={() => setBackupMode(null)} />}

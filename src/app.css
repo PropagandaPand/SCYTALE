@@ -2216,3 +2216,107 @@ select {
   justify-content: center;
   margin-bottom: 12px;
 }
+
+/* ── Profile page (rebuilt: identity block + one scannable settings list) ── */
+.profile-body {
+  padding: 20px 16px calc(20px + env(safe-area-inset-bottom));
+}
+.profile-id {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+.profile-name-input {
+  width: 100%;
+  max-width: 320px;
+  margin: 14px 0 0;
+  padding: 11px 14px;
+  text-align: center;
+  font-size: 17px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  transition: border-color 0.15s ease;
+}
+.profile-name-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.profile-save {
+  margin-top: 12px;
+  min-width: 200px;
+}
+.profile-id-hint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  margin: 12px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+.profile-id-hint svg {
+  flex-shrink: 0;
+  opacity: 0.8;
+}
+
+.settings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 24px;
+}
+.setting-row {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  width: 100%;
+  padding: 13px 14px;
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition: transform 0.15s var(--ease-out), border-color 0.15s ease;
+}
+.setting-row:active {
+  transform: scale(0.985);
+}
+.setting-row:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.setting-ic {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+}
+.setting-tx {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.setting-title {
+  font-size: 15px;
+  color: var(--text);
+}
+.setting-sub {
+  font-size: 12.5px;
+  line-height: 1.35;
+  color: var(--muted);
+}
+.setting-go {
+  flex-shrink: 0;
+  color: var(--muted);
+  opacity: 0.7;
+}

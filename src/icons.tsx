@@ -193,3 +193,46 @@ export function IconSticker({ size = 20 }: { size?: number }) {
     </svg>
   );
 }
+
+export function IconBell({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M4 6.5a4 4 0 0 1 8 0c0 3 1 4 1.5 4.5H2.5C3 10.5 4 9.5 4 6.5Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
+      />
+      <path d="M6.5 13a1.5 1.5 0 0 0 3 0" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export function IconDevices({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
+      <rect x="1.5" y="3" width="9" height="7" rx="1" fill="none" stroke="currentColor" strokeWidth="1.3" />
+      <rect x="10.5" y="6" width="4" height="7" rx="1" fill="none" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M4 12.5h3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export function IconArchive({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
+      <rect x="2" y="3" width="12" height="3" rx="0.8" fill="none" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M3 6v6a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V6" fill="none" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M6.5 8.5h3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export function IconChevron({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}

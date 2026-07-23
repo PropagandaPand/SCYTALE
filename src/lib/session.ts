@@ -61,6 +61,23 @@ export interface Contact {
   peerName?: string; // display name the peer shared via their profile
   peerAvatarB64?: string; // avatar the peer shared via their profile
   verified?: boolean; // local flag: safety number compared out-of-band
+  /**
+   * Erst-Sync: my OTHER device reported this contact as verified. Carried ONLY as
+   * a SUGGESTION — it never sets `verified`. The UI opens the normal safety-number
+   * view; the confirming tap must happen on THIS device (a compromised primary must
+   * not be able to plant false trust here). Cleared once acted on.
+   */
+  verifiedSuggestion?: boolean;
+  /** The user dismissed the verified suggestion — never re-offer it (survives even a
+   *  bootstrap-applied-marker eviction, so a re-delivered snapshot can't re-nag). */
+  verifiedSuggestionDismissed?: boolean;
+  /**
+   * The highest (epoch, version) of MY device list this peer has acknowledged
+   * (listack). Drives reliable re-gossip: I keep offering my current list until the
+   * peer's ack catches up, so a peer that was offline at link time still learns my
+   * new device and can fan out to it. Monotonic, forward-only.
+   */
+  peerAckedListEV?: { epoch: number; version: number };
   hidden?: boolean; // group-member-only contact — kept out of the 1:1 list
   /**
    * This contact predates a device-linking identity swap: they still have our
@@ -411,6 +428,91 @@ export async function makeContact(myMasterPub: MasterPub, bundle: PreKeyBundle):
   };
 }
 
+/**
+ * Merge ONE bootstrap roster entry into my contact set (Erst-Sync). PURE &
+ * transport-/storage-agnostic → Node-testable. Returns the contact to persist, or
+ * null to SKIP. Hard rules baked in:
+ *  - roomId + fingerprint are ALWAYS derived LOCALLY from (myMaster, entry.pm),
+ *    never taken from the wire (the entry carries neither) → no attacker-steered
+ *    room / mis-routing / overwrite.
+ *  - NO ratchet/bundle/deviceList is imported → the contact is SEND-BLOCKED
+ *    (bundle=undefined, empty sessions). It becomes reachable only once the real
+ *    peer learns my new device (WP4 re-gossip) and writes. So a substituted/MITM'd
+ *    linked device gains NO immediate send capability to my whole contact graph.
+ *  - `vf` is carried ONLY as a suggestion (verifiedSuggestion), NEVER as verified.
+ *  - FILL GAPS ONLY on an existing contact — never overwrite pinned identity, keys,
+ *    or verified (TOFU on this device wins).
+ */
+export async function mergeRosterEntry(
+  contacts: Contact[],
+  entry: RosterEntry,
+  myMaster: MasterPub,
+  retired: Set<string>,
+): Promise<Contact | null> {
+  // SKIP: the entry is my own self-contact, or an abandoned (denylisted) master.
+  if (bytesEqual(entry.pm, myMaster)) return null;
+  if (retired.has(await masterKeyB64(entry.pm))) return null;
+
+  const derivedRoom = await computeMasterRoomId(myMaster, asMasterPub(entry.pm));
+
+  // Collision guard: a DIFFERENT contact already occupies this locally-derived room
+  // → refuse (never mis-route or overwrite). A same-pm contact shares the room (ok).
+  const roomHolder = contacts.find((c) => c.roomId === derivedRoom);
+  if (roomHolder && !bytesEqual(roomHolder.peerMasterPub, entry.pm)) return null;
+
+  const existing = contacts.find((c) => bytesEqual(c.peerMasterPub, entry.pm));
+
+  if (!existing) {
+    // NEW silent contact: metadata only, send-blocked, unverified.
+    return {
+      roomId: derivedRoom,
+      peerMasterPub: entry.pm,
+      peerEpoch: entry.pe,
+      peerSignPub: entry.psp,
+      peerDhPub: entry.pdp,
+      peerFingerprint: await identityFingerprint(entry.pm, entry.pm),
+      nickname: entry.nick ?? undefined,
+      peerName: entry.pn ?? undefined,
+      verified: false,
+      verifiedSuggestion: entry.vf === true || undefined,
+      ownMasterPub: myMaster,
+      regime: 'master',
+      bundle: undefined,
+      sessions: new Map(),
+    };
+  }
+
+  if (existing.staleIdentity) {
+    // Re-link special case: a stale contact is send-blocked and otherwise
+    // permanently unreachable. The producer EXCLUDES stale contacts, so every entry
+    // is non-stale on P → the peer knows the shared master. Lift the block, refresh
+    // the device keys, drop the dead old-master sessions. verified STAYS (device-
+    // local); reachability still waits for the peer to learn my device (re-gossip).
+    existing.staleIdentity = undefined;
+    existing.peerSignPub = entry.psp;
+    existing.peerDhPub = entry.pdp;
+    existing.peerEpoch = entry.pe;
+    existing.peerFingerprint = await identityFingerprint(entry.pm, entry.pm);
+    existing.sessions = new Map();
+    if (existing.nickname === undefined && entry.nick) existing.nickname = entry.nick;
+    if (existing.peerName === undefined && entry.pn) existing.peerName = entry.pn;
+    return existing;
+  }
+
+  // EXISTING, non-stale: FILL GAPS ONLY. Never touch pinned identity/keys/verified.
+  if (existing.nickname === undefined && entry.nick) existing.nickname = entry.nick;
+  if (existing.peerName === undefined && entry.pn) existing.peerName = entry.pn;
+  if (
+    entry.vf === true &&
+    existing.verified !== true &&
+    !existing.verifiedSuggestionDismissed &&
+    !existing.verifiedSuggestion
+  ) {
+    existing.verifiedSuggestion = true;
+  }
+  return existing;
+}
+
 /** Responder side: a stranger who holds OUR code just messaged us. Verify their
  *  device cert against their master, then TOFU-pin the master. */
 export async function makeContactFromHeader(
@@ -602,6 +704,28 @@ export interface GroupInvite {
   members: { signPub: string; dhPub: string; bundle: string | null; name: string | null }[];
 }
 
+/** One stage of a bootstrap snapshot sent to a freshly linked OWN device (Erst-Sync). */
+export type BootstrapPart =
+  | { t: 'profile'; name?: string; avatar?: string } // avatar = avatarB64 (JPEG)
+  | { t: 'roster'; contacts: RosterEntry[] };
+
+/**
+ * A contact as carried in a bootstrap roster: METADATA ONLY. Deliberately no
+ * ratchet/bundle/deviceList/roomId/ownMaster — the receiving device pins `pm` via
+ * TOFU-from-P, derives roomId + fingerprint LOCALLY, and builds its OWN sessions
+ * (no clone → no shared ratchet → no two-time-pad). `vf` is the sender's verified
+ * flag, carried ONLY as a suggestion (never blindly adopted).
+ */
+export interface RosterEntry {
+  pm: Bytes; // peerMasterPub
+  pe: number; // peerEpoch
+  psp: Bytes; // peerSignPub
+  pdp: Bytes; // peerDhPub
+  nick: string | null;
+  pn: string | null; // peerName (learned from the peer's own profile)
+  vf: boolean; // verified on the sending device
+}
+
 /** Message payload framed into the ratchet plaintext. */
 export type MessageContent =
   | { kind: 'text'; text: string }
@@ -620,7 +744,16 @@ export type MessageContent =
   // mid (for dedup against the peer's own fan-out copy), the compose timestamp,
   // and the inner content. A sync frame is TERMINAL: never re-fanned, never
   // re-synced, its inner effect never re-dispatched — only appended to history.
-  | { kind: 'sync'; targetPeerMaster: Bytes; origin: 'sent' | 'recv'; innerMid: string; ts: number; inner: MessageContent };
+  | { kind: 'sync'; targetPeerMaster: Bytes; origin: 'sent' | 'recv'; innerMid: string; ts: number; inner: MessageContent }
+  // Erst-Sync (link initial state): `bootstrap` carries the account snapshot (profile
+  // + roster now; history later) to a freshly linked OWN device; `bootreq` PULLS it
+  // (N asks P after installGrant, so it can't be delivered-and-lost before N has an
+  // identity); `listack` acks a peer's device list to drive reliable re-gossip.
+  // bootstrap + bootreq are self-gated (peerMaster == my master) and TERMINAL;
+  // listack is NOT self-gated (an ack over MY list is legitimate from any peer).
+  | { kind: 'bootstrap'; bid: string; parts: BootstrapPart[] }
+  | { kind: 'listack'; epoch: number; version: number }
+  | { kind: 'bootreq'; requestId: string };
 
 /** A decrypted inbound message plus its sender-stamped E2E dedup id. */
 export interface ReceivedMessage {
@@ -664,7 +797,7 @@ function prefixed(type: number, body: Uint8Array): Bytes {
 // Frame: byte0 = 0 (text) | 1 (file) | 2 (profile).
 //   file:    [nameLen(2)][name][mimeLen(2)][mime][data]
 //   profile: [nameLen(2)][name][avatarLen(4)][avatar]
-async function frameContent(c: MessageContent): Promise<Bytes> {
+export async function frameContent(c: MessageContent): Promise<Bytes> {
   if (c.kind === 'text') {
     const t = utf8.encode(c.text);
     const out = new Uint8Array(1 + t.length);
@@ -724,11 +857,32 @@ async function frameContent(c: MessageContent): Promise<Bytes> {
     });
     return prefixed(9, utf8.encode(json));
   }
+  if (c.kind === 'bootstrap') {
+    const parts = c.parts.map((p) =>
+      p.t === 'profile'
+        ? { t: 'profile', n: p.name ?? '', a: p.avatar ?? '' }
+        : {
+            t: 'roster',
+            c: p.contacts.map((e) => ({
+              m: bytesToB64(e.pm),
+              e: e.pe,
+              s: bytesToB64(e.psp),
+              d: bytesToB64(e.pdp),
+              nk: e.nick,
+              pn: e.pn,
+              vf: e.vf,
+            })),
+          },
+    );
+    return prefixed(10, utf8.encode(JSON.stringify({ v: 1, bid: c.bid, parts })));
+  }
+  if (c.kind === 'listack') return prefixed(11, utf8.encode(JSON.stringify({ e: c.epoch, v: c.version })));
+  if (c.kind === 'bootreq') return prefixed(12, utf8.encode(JSON.stringify({ q: c.requestId })));
   // ginvite
   return prefixed(4, utf8.encode(JSON.stringify(c.group)));
 }
 
-async function unframeContent(bytes: Bytes): Promise<MessageContent> {
+export async function unframeContent(bytes: Bytes): Promise<MessageContent> {
   if (bytes[0] === 0) return { kind: 'text', text: utf8.decode(bytes.slice(1)) };
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 
@@ -763,6 +917,47 @@ async function unframeContent(bytes: Bytes): Promise<MessageContent> {
       ts: Number(j.t),
       inner: await unframeContent(b64ToBytes(j.i)),
     };
+  }
+
+  if (bytes[0] === 10) {
+    // JSON.parse on a PRESENT byte-10 frame throws on corruption → the frame is
+    // dropped, never silently imported as empty. An unknown part.t is SKIPPED
+    // (forward-compat: a future history part must not break profile+roster).
+    const j = JSON.parse(utf8.decode(bytes.slice(1)));
+    const parts: BootstrapPart[] = [];
+    for (const p of Array.isArray(j.parts) ? j.parts : []) {
+      if (p.t === 'profile') parts.push({ t: 'profile', name: p.n || undefined, avatar: p.a || undefined });
+      else if (p.t === 'roster') {
+        const rawContacts = (Array.isArray(p.c) ? p.c : []) as Array<{
+          m: string;
+          e: number;
+          s: string;
+          d: string;
+          nk: string | null;
+          pn: string | null;
+          vf: boolean;
+        }>;
+        const contacts: RosterEntry[] = rawContacts.map((e) => ({
+          pm: b64ToBytes(e.m),
+          pe: Number(e.e),
+          psp: b64ToBytes(e.s),
+          pdp: b64ToBytes(e.d),
+          nick: e.nk ?? null,
+          pn: e.pn ?? null,
+          vf: e.vf === true,
+        }));
+        parts.push({ t: 'roster', contacts });
+      }
+    }
+    return { kind: 'bootstrap', bid: String(j.bid), parts };
+  }
+  if (bytes[0] === 11) {
+    const j = JSON.parse(utf8.decode(bytes.slice(1)));
+    return { kind: 'listack', epoch: Number(j.e), version: Number(j.v) };
+  }
+  if (bytes[0] === 12) {
+    const j = JSON.parse(utf8.decode(bytes.slice(1)));
+    return { kind: 'bootreq', requestId: String(j.q) };
   }
 
   // Only type 1 is a real file. Anything else is a corrupt/unknown frame — throw
@@ -853,6 +1048,7 @@ export async function fanoutDeliveries(
   content: MessageContent,
   mid: string,
   exclude?: Bytes,
+  only?: Bytes,
 ): Promise<{ deliveries: FanoutDelivery[]; unreachable: Bytes[] }> {
   if (contact.staleIdentity) throw new StaleIdentityError();
   const targets: DeviceTarget[] = (contact.peerDeviceList
@@ -867,7 +1063,9 @@ export async function fanoutDeliveries(
             : (bundleFromDeviceEntry(contact.peerMasterPub, contact.peerEpoch, d) ?? undefined),
       }))
     : [{ signPub: contact.peerSignPub, dhPub: contact.peerDhPub, bundle: contact.bundle }]
-  ).filter((t) => !exclude || !bytesEqual(t.signPub, exclude)); // self-sync: never send to my own device
+  )
+    .filter((t) => !exclude || !bytesEqual(t.signPub, exclude)) // self-sync: never send to my own device
+    .filter((t) => !only || bytesEqual(t.signPub, only)); // bootstrap reply: target exactly ONE device
 
   const deliveries: FanoutDelivery[] = [];
   const unreachable: Bytes[] = [];
@@ -1091,8 +1289,16 @@ export async function receiveEnvelope(
   // stops a malicious peer from framing a byte-9 'sync' over their authenticated
   // session to inject a fabricated message into an ARBITRARY conversation
   // (targetPeerMaster is attacker-chosen). The self-contact carries peerMaster == me.
-  if (content.kind === 'sync' && !bytesEqual(contact.peerMasterPub, me.master.publicKey)) {
-    throw new Error('sync-Frame von einem Nicht-Selbst-Kontakt — verworfen.');
+  // Erst-Sync frames carry the whole account state (bootstrap) or pull it (bootreq),
+  // so they get the SAME self-gate: only my OWN device (peerMaster == my master) may
+  // send them. A malicious peer must not smuggle a byte-10/12 frame over its
+  // authenticated session. `listack` (byte 11) is intentionally NOT gated — an ack
+  // over MY device list is legitimate from any peer and carries no injectable state.
+  if (
+    (content.kind === 'sync' || content.kind === 'bootstrap' || content.kind === 'bootreq') &&
+    !bytesEqual(contact.peerMasterPub, me.master.publicKey)
+  ) {
+    throw new Error('Selbst-Frame von einem Nicht-Selbst-Kontakt — verworfen.');
   }
   return { mid, content };
 }
@@ -1110,6 +1316,9 @@ interface ContactWire {
   peerName: string | null;
   peerAvatarB64: string | null;
   verified: boolean;
+  verifiedSuggestion: boolean;
+  verifiedSuggestionDismissed: boolean;
+  peerAckedListEV: { epoch: number; version: number } | null;
   hidden: boolean;
   staleIdentity: boolean;
   pendingMaster: { masterPub: string; epoch: number; signPub: string; dhPub: string } | null;
@@ -1156,6 +1365,9 @@ export async function serializeContact(c: Contact): Promise<Bytes> {
     peerName: c.peerName ?? null,
     peerAvatarB64: c.peerAvatarB64 ?? null,
     verified: c.verified ?? false,
+    verifiedSuggestion: c.verifiedSuggestion ?? false,
+    verifiedSuggestionDismissed: c.verifiedSuggestionDismissed ?? false,
+    peerAckedListEV: c.peerAckedListEV ?? null,
     hidden: c.hidden ?? false,
     staleIdentity: c.staleIdentity ?? false,
     pendingMaster: c.pendingMaster
@@ -1233,6 +1445,9 @@ export async function deserializeContact(bytes: Bytes): Promise<Contact> {
     peerName: wire.peerName ?? undefined,
     peerAvatarB64: wire.peerAvatarB64 ?? undefined,
     verified: wire.verified ?? false,
+    verifiedSuggestion: wire.verifiedSuggestion || undefined,
+    verifiedSuggestionDismissed: wire.verifiedSuggestionDismissed || undefined,
+    peerAckedListEV: wire.peerAckedListEV ?? undefined,
     hidden: wire.hidden || undefined,
     staleIdentity: wire.staleIdentity || undefined,
     pendingMaster: wire.pendingMaster

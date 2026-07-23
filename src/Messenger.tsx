@@ -158,6 +158,18 @@ function hexOf(b: Uint8Array): string {
   return s;
 }
 
+/** A transient "disk full" from IndexedDB (quota exceeded). It is distinct from a
+ *  permanent drop (decrypt failure, duplicate) because a stored-and-forward message
+ *  that we FAIL to persist must NOT be acked — acking tells the relay to delete it,
+ *  turning a temporary out-of-space into permanent loss. Harmless today, a real
+ *  outcome once large attachments exist. */
+function isStorageFull(e: unknown): boolean {
+  if (typeof DOMException !== 'undefined' && e instanceof DOMException) {
+    return e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED' || e.code === 22;
+  }
+  return e instanceof Error && /quota|storage.*full/i.test(e.message);
+}
+
 function incomingMessage(content: MessageContent, mid: string): ChatMessage {
   if (content.kind === 'file') {
     return {
@@ -1288,6 +1300,7 @@ export function Messenger({ dek, onLock }: Props) {
       return;
     }
 
+    let storageFull = false;
     try {
       let env;
       try {
@@ -1588,11 +1601,20 @@ export function Messenger({ dek, onLock }: Props) {
       void ensureProfileSent(contact);
       void ensureListGossiped(contact); // keep peers current on MY devices
       bump();
-    } catch {
-      // Decrypt failure (e.g. a duplicate re-delivery) — drop it, don't spam UI.
+    } catch (e) {
+      if (isStorageFull(e)) {
+        // Do NOT ack: the relay keeps the message and re-delivers it once there is
+        // room again. Acking a message we could not store would delete it for good.
+        setError('Speicher voll — Nachricht nicht gespeichert. Gib Speicher frei; sie wird erneut zugestellt.');
+        storageFull = true;
+      }
+      // else: a permanent drop (decrypt failure, duplicate, unknown frame) — swallow
+      // and ack below so the relay stops re-delivering it.
     } finally {
-      seenIdsRef.current.add(ackId);
-      inboxClientRef.current?.ack(ackId);
+      if (!storageFull) {
+        seenIdsRef.current.add(ackId);
+        inboxClientRef.current?.ack(ackId);
+      }
     }
   }
 

@@ -988,6 +988,7 @@ select {
   width: 132px;
   height: 132px;
   object-fit: contain;
+  cursor: pointer; /* tap to open the big view (and keep it, if it isn't yours yet) */
 }
 .bubble.is-sticker .meta {
   display: block;
@@ -1025,15 +1026,17 @@ select {
 .sticker-cell {
   position: relative;
 }
+/* No frame or plate behind a sticker: it should float exactly like it does in a
+   chat bubble. A border + solid background read as a black box around it. */
 .sticker-btn {
   width: 100%;
   aspect-ratio: 1;
   padding: 6px;
-  border: 1px solid var(--border);
+  border: none;
   border-radius: var(--r-md);
-  background: var(--bg);
+  background: transparent;
   cursor: pointer;
-  transition: transform 0.15s var(--ease-out), border-color 0.15s ease;
+  transition: transform 0.15s var(--ease-out);
 }
 .sticker-btn:active {
   transform: scale(0.94);
@@ -2025,6 +2028,40 @@ select {
   max-height: 100%;
   object-fit: contain;
   border-radius: var(--r-md);
+}
+
+/* Enlarged view of a sticker from a chat, with the "keep it" action underneath.
+   Its own overlay (not the lightbox) because that one closes on any click, which
+   would swallow the button press. */
+.sticker-view {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.92);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 22px;
+  padding: 24px;
+  animation: scyfade 0.18s ease;
+}
+.sticker-view img {
+  width: min(260px, 62vw);
+  height: min(260px, 62vw);
+  object-fit: contain;
+  animation: sticker-pop 200ms var(--ease-out) both;
+}
+@keyframes sticker-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+}
+.sticker-view-note {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
 }
 .lightbox-close {
   position: absolute;

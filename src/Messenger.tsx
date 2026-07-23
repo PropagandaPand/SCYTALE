@@ -295,6 +295,8 @@ export function Messenger({ dek, onLock }: Props) {
   const [stickerFile, setStickerFile] = useState<File | null>(null); // image becoming a sticker
   const [stickers, setStickers] = useState<Sticker[]>([]);
   const [stickerPanel, setStickerPanel] = useState(false);
+  // A sticker tapped in a chat, shown big with the option to keep it.
+  const [stickerZoom, setStickerZoom] = useState<{ mime: string; dataB64: string } | null>(null);
   const [backupMode, setBackupMode] = useState<'export' | 'import' | null>(null);
   // ── Device linking ────────────────────────────────────────────────
   // 'menu'  : choose join-as-new vs add-a-device
@@ -1851,6 +1853,27 @@ export function Messenger({ dek, onLock }: Props) {
     await saveStickers(dek, next);
   }
 
+  /**
+   * Keep a sticker someone sent me: copy it into my own set. Dedup is by payload,
+   * not by id — the sender's id means nothing here, and the same image arriving
+   * twice must not fill the (capped) set with duplicates.
+   */
+  async function addStickerToLibrary(s: { mime: string; dataB64: string }) {
+    if (stickers.some((x) => x.dataB64 === s.dataB64)) return; // already mine
+    if (stickers.length >= MAX_STICKERS) {
+      setStickerZoom(null);
+      setError(`Sticker-Grenze erreicht (${MAX_STICKERS}) — lösche erst einen.`);
+      return;
+    }
+    const next: Sticker[] = [
+      { id: crypto.randomUUID(), dataB64: s.dataB64, mime: s.mime, ts: Date.now() },
+      ...stickers,
+    ];
+    setStickers(next);
+    await saveStickers(dek, next);
+    setStickerZoom(null);
+  }
+
   async function deleteSticker(id: string) {
     const next = stickers.filter((s) => s.id !== id);
     setStickers(next);
@@ -2200,6 +2223,30 @@ export function Messenger({ dek, onLock }: Props) {
     <div className="lightbox" onClick={() => setZoomImg(null)} role="dialog" aria-label="Bild">
       <img src={zoomImg} alt="" />
       <button className="lightbox-close" onClick={() => setZoomImg(null)} aria-label="Schließen">
+        ×
+      </button>
+    </div>
+  ) : null;
+
+  // Tapping a sticker in a chat opens it large, with the option to keep it. The
+  // action button must stop propagation — the backdrop closes on click.
+  const stickerViewEl = stickerZoom ? (
+    <div className="sticker-view" onClick={() => setStickerZoom(null)} role="dialog" aria-label="Sticker">
+      <img src={`data:${stickerZoom.mime};base64,${stickerZoom.dataB64}`} alt="Sticker" />
+      {stickers.some((s) => s.dataB64 === stickerZoom.dataB64) ? (
+        <p className="sticker-view-note">Ist schon in deinen Stickern.</p>
+      ) : (
+        <button
+          className="btn btn-primary"
+          onClick={(e) => {
+            e.stopPropagation();
+            void addStickerToLibrary(stickerZoom);
+          }}
+        >
+          Zu meinen Stickern hinzufügen
+        </button>
+      )}
+      <button className="lightbox-close" onClick={() => setStickerZoom(null)} aria-label="Schließen">
         ×
       </button>
     </div>
@@ -2685,7 +2732,12 @@ export function Messenger({ dek, onLock }: Props) {
             >
               {m.file ? (
                 isSticker(m.file) ? (
-                  <img className="bubble-sticker" src={`data:${m.file.mime};base64,${m.file.dataB64}`} alt="Sticker" />
+                  <img
+                    className="bubble-sticker"
+                    src={`data:${m.file.mime};base64,${m.file.dataB64}`}
+                    alt="Sticker"
+                    onClick={() => setStickerZoom({ mime: m.file!.mime, dataB64: m.file!.dataB64 })}
+                  />
                 ) : m.file.mime.startsWith('video/') ? (
                   <video
                     className="bubble-video"
@@ -2726,6 +2778,7 @@ export function Messenger({ dek, onLock }: Props) {
         {stickerPanelEl}
         {composerEl}
         {lightbox}
+        {stickerViewEl}
       </div>
     );
   }
@@ -2802,7 +2855,12 @@ export function Messenger({ dek, onLock }: Props) {
               {!m.mine && m.sender && <div className="bubble-sender">{m.sender}</div>}
               {m.file ? (
                 isSticker(m.file) ? (
-                  <img className="bubble-sticker" src={`data:${m.file.mime};base64,${m.file.dataB64}`} alt="Sticker" />
+                  <img
+                    className="bubble-sticker"
+                    src={`data:${m.file.mime};base64,${m.file.dataB64}`}
+                    alt="Sticker"
+                    onClick={() => setStickerZoom({ mime: m.file!.mime, dataB64: m.file!.dataB64 })}
+                  />
                 ) : m.file.mime.startsWith('video/') ? (
                   <video
                     className="bubble-video"
@@ -3113,6 +3171,7 @@ export function Messenger({ dek, onLock }: Props) {
           </div>
         </div>
         {lightbox}
+        {stickerViewEl}
       </div>
     );
   }

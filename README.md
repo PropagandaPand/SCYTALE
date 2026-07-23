@@ -1,81 +1,149 @@
 # SCYTALE
 
-Ein Ende-zu-Ende verschlüsselter Messenger als **PWA** — gebaut gegen anlasslose
-Massenüberwachung (Stichwort *Chatkontrolle* / CSAR-Verordnung).
+An end-to-end-encrypted messenger, delivered as an installable **PWA**, built
+against **suspicionless mass surveillance** (the EU "Chat Control" / CSAR
+proposal).
 
-Benannt nach der [Skytale](https://de.wikipedia.org/wiki/Skytale), der
-spartanischen Transpositions-Chiffre.
+Named after the [scytale](https://en.wikipedia.org/wiki/Scytale), the Spartan
+transposition cipher.
 
-## Prinzip
+> **Status:** the cryptographic core (identity, X3DH, Double Ratchet, sealed
+> sender, at-rest vault, multi-device identity + device linking) is implemented
+> and tested. Making a freshly linked second device a full 1:1 copy of your
+> account (profile, contacts, history) is **in progress** — see
+> [Status](#status) and the open issues.
 
-Der Server ist ein **dummer Ciphertext-Briefkasten**. Er sieht *niemals*
-Klartext. Alle Ver- und Entschlüsselung passiert ausschließlich auf dem Gerät.
+## Principle
 
-### Zwei unabhängige Verschlüsselungsschichten
+The server is a **dumb ciphertext mailbox**. It never sees plaintext. All
+encryption and decryption happen exclusively on the device. The relay learns as
+little as addressing a message physically requires — and, with sealed sender,
+not even *who* sent it.
 
-**1. At-Rest (auf dem Gerät)** — implementiert in Etappe 1:
+## Security model
+
+Two independent encryption layers, plus a metadata-minimising transport.
+
+### 1. At rest (on the device)
 
 ```
-passphrase --Argon2id(salt, 256 MiB)--> KEK  (non-extractable, nur RAM)
-KEK        --wrap/unwrap AES-256-GCM--> DEK  (non-extractable, zufällig)
-DEK        --AES-256-GCM (frischer 96-bit Nonce + AAD)--> alle Records
+passphrase --Argon2id(salt, high memory cost)--> KEK   (non-extractable, RAM only)
+KEK        --wrap / unwrap (AES-256-GCM)-------->  DEK  (non-extractable, random)
+DEK        --AES-256-GCM (fresh 96-bit nonce + AAD)--> every record
 ```
 
-Der DEK ist ein **non-extractable `CryptoKey`** → rohes Schlüsselmaterial ist
-für JS/XSS nicht auslesbar. Falsche Passphrase wird über den fehlschlagenden
-GCM-Auth-Tag erkannt — ohne separaten Verifier.
+The DEK is a **non-extractable `CryptoKey`**, so raw key material can never be
+read out by JS/XSS. A wrong passphrase is detected by the failing GCM auth tag —
+no separate verifier, nothing to brute-force offline beyond Argon2id itself.
 
-**2. Transport (E2E über das Netz)** — Etappe 3–4:
-X3DH-Handshake + Double Ratchet (Signal-Stil, via libsodium-Primitive) für
-Forward Secrecy und Post-Compromise Security.
+### 2. Transport (end-to-end over the network)
+
+- **X3DH** handshake to establish a shared secret from prekey bundles.
+- **Double Ratchet** (Signal-style, over libsodium primitives — Ed25519 for
+  signing, X25519 for key agreement) for **forward secrecy** and
+  **post-compromise security**, tolerant of out-of-order delivery.
+- **Sealed sender**: the relay routes to a recipient pseudonym without learning
+  the sender. What remains is the irreducible residue any addressed transport
+  leaks (which inbox, timing, size) — documented, not hidden.
+
+### 3. Multi-device (identity, linking, revocation)
+
+- A **master identity** (cross-signing key) anchors all of a user's devices; the
+  master **private** key never leaves the primary device.
+- **Device linking** pairs a new device via a **SAS** (7-emoji short
+  authentication string) the human compares on both screens — the linking
+  channel carries only public material until that human confirmation.
+- Each of a peer's authorised devices gets its **own** X3DH + ratchet session
+  (per-device fan-out). Invariant: a message key is used exactly once **per
+  session** — ratchets are never shared across devices (no two-time pad).
+- **Revocation** is a master-signed device list: a device absent from a newer
+  list loses reachability. Peers stop fanning out to it.
+
+The full threat model, including what is deliberately out of scope, lives in
+**[SECURITY.md](SECURITY.md)** — it is the honest, mechanism-by-mechanism
+breakdown and is kept current with the code.
 
 ## Stack
 
-- **Frontend:** Vite + React 19 + TypeScript, als installierbare PWA
-- **Krypto:** `hash-wasm` (Argon2id) + WebCrypto (AES-256-GCM)
-- **Backend:** Cloudflare Worker + **Durable Object** (WebSocket-Relay,
-  Hibernation API) + D1 (Mailbox, später)
-- **Storage:** IndexedDB (nur Ciphertext)
+- **Frontend:** Vite + React 19 + TypeScript, installable PWA
+- **Crypto:** libsodium (Ed25519, X25519) for the messaging layer; Argon2id
+  (hash-wasm) + WebCrypto AES-256-GCM for the at-rest vault
+- **Backend:** Cloudflare Worker + **Durable Object** (WebSocket relay,
+  Hibernation API); content-free Web Push for wake-ups
+- **Storage:** IndexedDB — ciphertext only
 
-## Roadmap
+## Status
 
-- [x] **Etappe 1** — Scaffold + At-Rest-Kern (Argon2id / KEK-DEK / AES-256-GCM)
-- [x] **Etappe 2** — Identität: Ed25519 + X25519 Keys, im Tresor verschlüsselt, Safety Number
-- [x] **Etappe 3** — Key Exchange: Prekey-Bundles + X3DH (HKDF-SHA256, MITM-Abwehr)
-- [x] **Etappe 4** — Double Ratchet (Forward Secrecy + Post-Compromise Security, Out-of-Order)
-- [x] **Etappe 5** — Relay + Chat-UI: Wire-Format, Session-Persistenz, Live-Chat über Durable Object
-- [x] **Etappe 6** — PWA-Härtung: CSP + Security-Header, Update-Prompt (kein Silent-Swap), Auto-Lock, Lazy-Load, [SECURITY.md](SECURITY.md)
-- [ ] **Später** — Metadaten-Schutz (Sealed Sender), Gruppen (MLS?)
+| Area | State |
+| --- | --- |
+| At-rest vault (Argon2id / KEK-DEK / AES-256-GCM) | ✅ |
+| Identity (Ed25519 + X25519), safety number | ✅ |
+| X3DH + Double Ratchet (FS + PCS, out-of-order) | ✅ |
+| Relay + live chat (Worker + Durable Object) | ✅ |
+| PWA hardening (CSP, update prompt, auto-lock, lazy-load) | ✅ |
+| Sealed sender (sender metadata minimisation) | ✅ |
+| Multi-device: master identity + cross-signed device certs | ✅ |
+| Device linking (SAS), per-device sessions, revocation | ✅ |
+| Self-sync of *sent* messages to your own devices | ✅ |
+| **Link initial-sync** (profile + contacts + history → new device) | 🚧 in progress |
+| Groups × devices (a group message reaching a member's 2nd device) | ⏳ deferred |
 
-## Entwicklung
+Because a linked device does not yet receive your existing profile, contacts and
+history, it currently looks empty even though it is cryptographically the same
+account. Closing that gap is the active work.
+
+## Development
 
 ```bash
-npm install        # .npmrc setzt ignore-scripts (umgeht miniflares sharp-Build)
-npm run dev        # Vite-Dev-Server (nur Frontend, ohne Relay)
-npm run build && npm run cf:dev  # Worker + Durable Object lokal (inkl. Relay)
-npm run deploy     # Build + wrangler deploy
+npm install        # .npmrc sets ignore-scripts (skips miniflare's sharp build)
+npm run dev        # Vite dev server (frontend only, no relay)
+npm run build && npm run cf:dev   # Worker + Durable Object locally (incl. relay)
+npm run deploy     # build + wrangler deploy
 ```
 
-### Zu zweit testen (1:1-Chat)
+Checks:
 
-1. `npm run build && npm run cf:dev` starten → zwei Browser-Fenster auf die
-   lokale Worker-URL öffnen (oder die App deployen und auf zwei Geräten öffnen).
-2. In jedem Fenster einen Tresor anlegen (eigene Passphrase).
-3. In Fenster A **„Mich teilen (QR / Link)"** → den **QR mit der Handy-Kamera
-   scannen** lassen oder den **Link schicken** (ein Tap fügt hinzu). Alternativ
-   Link/Token unter **„Kontakt hinzufügen"** einfügen. Umgekehrt genauso.
-4. Einer schreibt zuerst — er wird X3DH-Initiator, der andere antwortet. Ab da
-   läuft der Double Ratchet.
+```bash
+npx tsc --noEmit   # type-check
+npm test           # node test suite (pure crypto + conversation layers)
+```
 
-Das Kontakt-Bundle enthält **nur öffentliche Schlüssel** — der Link darf über
-jeden Kanal (auch unsicher) geteilt werden. Gegen Man-in-the-Middle vergleicht
-ihr danach eure **Safety Number**.
+The test suite bundles the transport-/storage-agnostic core with esbuild and
+runs it under Node. Every security property has at least one assertion, and each
+assertion ships with a **negative control** (fed a deliberately wrong input once,
+so a green test can never be false confidence).
 
-## Ehrliche Grenzen
+### Testing with two devices
 
-- **Metadaten:** Der Relay sieht *wer-mit-wem-wann*. Inhalt nie. Sealed Sender
-  ist geplant, aber Traffic-Analyse bleibt schwer.
-- **Code-Delivery:** Eine PWA lädt JS vom Server — ein kompromittierter Server
-  könnte backdoored Code ausliefern. Gegenmittel: Service-Worker-Pinning der
-  installierten App + reproducible builds. Wird dokumentiert, nicht versteckt.
-- **Endpoint:** Gegen ein kompromittiertes Gerät hilft keine Verschlüsselung.
+1. `npm run build && npm run cf:dev`, then open two browser windows on the local
+   Worker URL (or deploy and open on two devices). **Two devices need two
+   separate storage origins** — two tabs in the same browser profile share one
+   vault and are the *same* device.
+2. Create a vault (your own passphrase) in each.
+3. In window A: **"Share me (QR / link)"** → scan the QR, or send the link (one
+   tap adds). Or paste the link/token under **"Add contact"**. Same in reverse.
+4. One person writes first (becomes the X3DH initiator); the other replies. From
+   there the Double Ratchet runs.
+
+The contact bundle contains **only public keys** — the link may travel over any
+channel, even an insecure one. Compare your **safety number** afterwards to rule
+out a man-in-the-middle.
+
+## Honest limits
+
+- **Metadata:** the relay sees *which inbox, when, how big* — never content, and
+  (with sealed sender) not the sender. Traffic analysis remains hard; full
+  network-level unlinkability would need Tor/a mixnet.
+- **Code delivery:** a PWA loads JS from a server, so a compromised server could
+  serve backdoored code. Mitigated (not eliminated) by service-worker pinning of
+  the installed app and reproducible builds.
+- **Endpoint:** no encryption helps against a compromised device (malware,
+  client-side scanning in the OS, physical access to an unlocked vault) — which
+  is precisely the point of the objection to Chat Control.
+- **Multi-device:** see [Status](#status) — initial-sync and groups × devices are
+  not finished yet.
+
+---
+
+*The user-facing app is in German by design (its audience); developer-facing
+content — code, comments, docs, commits — is in English.*

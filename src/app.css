@@ -2320,3 +2320,17 @@ select {
   color: var(--muted);
   opacity: 0.7;
 }
+
+/* Attachment placeholder states (loading from / missing in the blob store) */
+.file-loading,
+.file-missing {
+  font-size: 12.5px;
+  color: var(--muted);
+  padding: 10px 12px;
+}
+.file-missing {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-style: italic;
+}

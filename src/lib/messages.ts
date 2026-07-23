@@ -6,12 +6,28 @@
 import { seal, open, utf8 } from '../crypto';
 import { loadRecord, saveRecord, deleteRecord } from './db';
 
+/**
+ * An attachment on a message. ONE write format going forward — a reference
+ * (`attId`) into the out-of-band, per-chunk-sealed attachment store — and TWO read
+ * formats: a reference, or a legacy/inline `dataB64`. Stickers stay inline (they are
+ * tiny cropped squares, and the sticker library dedups on their bytes). Everything
+ * else is stored by reference so the message log never re-encrypts a whole file on
+ * each append. `attId` takes precedence when both are present.
+ */
+export interface FileRef {
+  name: string;
+  mime: string;
+  dataB64?: string; // legacy/inline bytes (base64) — still read, and used for stickers
+  attId?: string; // reference into the attachment store (src/lib/attachments.ts)
+  size?: number; // plaintext byte size (for the reference case)
+}
+
 export interface ChatMessage {
   mine: boolean;
   ts: number;
   sender?: string; // display name of the sender, for group messages
   text?: string;
-  file?: { name: string; mime: string; dataB64: string };
+  file?: FileRef;
   mid?: string; // stable E2E/bubble id (Stage 3d: shared across fan-out + self-sync copies)
   // Delivery to the relay (not read-receipt): pending until the DO confirms the
   // SQLite insert, then 'sent'; 'failed' on nack (mailbox full) or ack timeout.

@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import { IconPlay, IconPause } from './icons';
-import { b64ToBytes } from './lib/bytes';
 
 const BARS = 34;
 // Fallback shape when the browser can't decode this codec for analysis.
@@ -39,8 +38,9 @@ function fmtDur(sec: number): string {
   return `${Math.floor(sec / 60)}:${Math.floor(sec % 60).toString().padStart(2, '0')}`;
 }
 
-/** Voice/audio message player with a seekable WhatsApp-style RMS waveform. */
-export function AudioPlayer({ dataB64, mime }: { dataB64: string; mime: string }) {
+/** Voice/audio message player with a seekable WhatsApp-style RMS waveform. Takes a
+ *  Blob so it works from either attachment store format (the caller resolves it). */
+export function AudioPlayer({ blob, mime }: { blob: Blob; mime: string }) {
   const ref = useRef<HTMLAudioElement>(null);
   const waveRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef(false);
@@ -51,13 +51,12 @@ export function AudioPlayer({ dataB64, mime }: { dataB64: string; mime: string }
   const [playing, setPlaying] = useState(false);
 
   useEffect(() => {
-    const bytes = b64ToBytes(dataB64);
-    const objUrl = URL.createObjectURL(new Blob([bytes], { type: mime }));
+    const objUrl = URL.createObjectURL(blob);
     setUrl(objUrl);
     let cancelled = false;
-    (async () => {
+    void (async () => {
       try {
-        const buf = await getCtx().decodeAudioData(bytes.slice(0).buffer);
+        const buf = await getCtx().decodeAudioData(await blob.arrayBuffer());
         if (!cancelled) {
           setPeaks(computePeaks(buf, BARS));
           setDur(buf.duration);
@@ -70,7 +69,7 @@ export function AudioPlayer({ dataB64, mime }: { dataB64: string; mime: string }
       cancelled = true;
       URL.revokeObjectURL(objUrl);
     };
-  }, [dataB64, mime]);
+  }, [blob, mime]);
 
   function toggle() {
     const a = ref.current;

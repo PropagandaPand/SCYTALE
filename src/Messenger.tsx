@@ -106,8 +106,9 @@ import {
   saveBootstrapRequest,
   type BootstrapRequest,
 } from './lib/bootstrap';
+import { putAttachment, newAttachmentId, deleteAttachment } from './lib/attachments';
 import { pushSupported, enablePush, disablePush, currentSubscription } from './lib/push';
-import { loadMessages, saveMessages, clearMessages, aggregateDelivery, hasMessage, type ChatMessage, type DeviceDelivery } from './lib/messages';
+import { loadMessages, saveMessages, clearMessages, aggregateDelivery, hasMessage, type ChatMessage, type DeviceDelivery, type FileRef } from './lib/messages';
 import { RelayClient, type RelayStatus } from './lib/relay';
 import { makeQr } from './lib/qr';
 import { bytesToB64, b64ToBytes } from './lib/bytes';
@@ -116,7 +117,7 @@ import { Identicon } from './Identicon';
 import { QrScanner } from './QrScanner';
 import { CropModal } from './CropModal';
 import { BackupModal } from './BackupModal';
-import { AudioPlayer } from './AudioPlayer';
+import { Attachment, LightboxImg } from './Attachment';
 import {
   IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach, IconMic, IconTrash, IconDots, IconGroup,
   IconBell, IconDevices, IconArchive, IconChevron,
@@ -213,18 +214,6 @@ function msgStatusEl(m: ChatMessage) {
       {kind === 'partial' && <span className="msg-partial"> {text}</span>}
     </span>
   );
-}
-
-function downloadFile(f: { name: string; mime: string; dataB64: string }) {
-  const blob = new Blob([b64ToBytes(f.dataB64)], { type: f.mime });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = f.name;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
 interface Props {
@@ -340,7 +329,7 @@ export function Messenger({ dek, onLock }: Props) {
   const [groupSel, setGroupSel] = useState<Set<string>>(new Set());
   const [safetyNumber, setSafetyNumber] = useState('');
   const [safetyQr, setSafetyQr] = useState('');
-  const [zoomImg, setZoomImg] = useState<string | null>(null); // full-screen image viewer
+  const [zoomImg, setZoomImg] = useState<Blob | null>(null); // full-screen image viewer (its own object URL)
   const [notifOn, setNotifOn] = useState(false);
   const [notifBusy, setNotifBusy] = useState(false);
   const [qrFull, setQrFull] = useState(false); // own QR blown up full-screen for scanning
@@ -382,6 +371,19 @@ export function Messenger({ dek, onLock }: Props) {
   }, [activeGroup]);
 
   const commitMessages = () => setMessages({ ...messagesRef.current });
+
+  /**
+   * Turn attachment bytes into a stored FileRef. Non-stickers go to the out-of-band
+   * attachment store (so the message log never re-encrypts a whole file on append);
+   * stickers stay inline (tiny, and the sticker library dedups on their bytes). The
+   * WIRE is unchanged — files still travel as inline bytes; this is local storage.
+   */
+  async function fileRefFor(name: string, mime: string, data: Uint8Array): Promise<FileRef> {
+    if (name === STICKER_FILENAME) return { name, mime, dataB64: bytesToB64(data) };
+    const attId = newAttachmentId();
+    await putAttachment(dek, attId, data, name, mime);
+    return { name, mime, attId, size: data.length };
+  }
 
   async function appendMessage(roomId: string, msg: ChatMessage) {
     // Hydrate a COLD room from storage before appending. Boot preloads every
@@ -1534,7 +1536,7 @@ export function Messenger({ dek, onLock }: Props) {
         if (!already && (inner.kind === 'text' || inner.kind === 'file')) {
           const synced: ChatMessage =
             inner.kind === 'file'
-              ? { mine: content.origin === 'sent', ts: content.ts, mid: content.innerMid, file: { name: inner.name, mime: inner.mime, dataB64: bytesToB64(inner.data) } }
+              ? { mine: content.origin === 'sent', ts: content.ts, mid: content.innerMid, file: await fileRefFor(inner.name, inner.mime, inner.data) }
               : { mine: content.origin === 'sent', ts: content.ts, mid: content.innerMid, text: inner.text };
           await appendMessage(displayRoom, synced);
           if (content.origin !== 'sent' && !(viewRef.current === 'chat' && activeRoomRef.current === displayRoom)) {
@@ -1573,7 +1575,11 @@ export function Messenger({ dek, onLock }: Props) {
         // can't be forged to suppress a real future message of the SAME direction.
         // Already have it — skip (the ackId is still recorded in `finally`).
       } else {
-        await appendMessage(contact.roomId, incomingMessage(content, mid));
+        const inMsg: ChatMessage =
+          content.kind === 'file'
+            ? { mine: false, ts: Date.now(), mid, file: await fileRefFor(content.name, content.mime, content.data) }
+            : incomingMessage(content, mid);
+        await appendMessage(contact.roomId, inMsg);
         if (!(viewRef.current === 'chat' && activeRoomRef.current === contact.roomId)) {
           unreadRef.current[contact.roomId] = (unreadRef.current[contact.roomId] ?? 0) + 1;
         }
@@ -1770,6 +1776,14 @@ export function Messenger({ dek, onLock }: Props) {
     setChatMenu(false);
   }, [activeRoom, activeGroup]);
 
+  /** Delete the out-of-band attachments referenced by a room's messages, so
+   *  removing a chat does not leak its videos in the vault. */
+  async function gcRoomAttachments(roomId: string) {
+    for (const m of messagesRef.current[roomId] ?? []) {
+      if (m.file?.attId) await deleteAttachment(m.file.attId);
+    }
+  }
+
   async function deleteContactAction(roomId: string) {
     setChatMenu(false);
     const sendRoom = sendRoomRef.current.get(roomId);
@@ -1782,6 +1796,7 @@ export function Messenger({ dek, onLock }: Props) {
     delete messagesRef.current[roomId];
     delete unreadRef.current[roomId];
     profileSentRef.current.delete(roomId);
+    await gcRoomAttachments(roomId);
     await removeContact(dek, roomId);
     if (activeRoom === roomId) {
       setActiveRoom(null);
@@ -2013,6 +2028,7 @@ export function Messenger({ dek, onLock }: Props) {
     groupsRef.current = groupsRef.current.filter((g) => g.id !== gid);
     delete messagesRef.current[gid];
     delete unreadRef.current[gid];
+    await gcRoomAttachments(gid);
     await removeGroup(dek, gid);
     if (activeGroup === gid) {
       setActiveGroup(null);
@@ -2285,7 +2301,7 @@ export function Messenger({ dek, onLock }: Props) {
       // on the other side. Harmless but confusing, so rename it.
       if (name === STICKER_FILENAME) name = 'datei';
       const mid = randomMid();
-      const localMsg: ChatMessage = { mine: true, ts: Date.now(), file: { name, mime, dataB64: bytesToB64(data) }, mid };
+      const localMsg: ChatMessage = { mine: true, ts: Date.now(), file: await fileRefFor(name, mime, data), mid };
       if (activeGroup) {
         await groupSend({ kind: 'file', name, mime, data }, localMsg);
         return;
@@ -2360,7 +2376,7 @@ export function Messenger({ dek, onLock }: Props) {
       const localMsg: ChatMessage = {
         mine: true,
         ts: Date.now(),
-        file: { name: STICKER_FILENAME, mime: st.mime, dataB64: st.dataB64 },
+        file: await fileRefFor(STICKER_FILENAME, st.mime, data),
         mid,
       };
       if (activeGroup) {
@@ -2450,7 +2466,7 @@ export function Messenger({ dek, onLock }: Props) {
     }
     const name = `sprachnachricht.${ext}`;
     const mid = randomMid();
-    const localMsg: ChatMessage = { mine: true, ts: Date.now(), file: { name, mime, dataB64: bytesToB64(data) }, mid };
+    const localMsg: ChatMessage = { mine: true, ts: Date.now(), file: await fileRefFor(name, mime, data), mid };
     try {
       if (activeGroup) {
         await groupSend({ kind: 'file', name, mime, data }, localMsg);
@@ -2713,14 +2729,7 @@ export function Messenger({ dek, onLock }: Props) {
   }, []);
 
   // Full-screen image viewer (avatars, later chat images). Tap anywhere closes.
-  const lightbox = zoomImg ? (
-    <div className="lightbox" onClick={() => setZoomImg(null)} role="dialog" aria-label="Bild">
-      <img src={zoomImg} alt="" />
-      <button className="lightbox-close" onClick={() => setZoomImg(null)} aria-label="Schließen">
-        ×
-      </button>
-    </div>
-  ) : null;
+  const lightbox = zoomImg ? <LightboxImg blob={zoomImg} onClose={() => setZoomImg(null)} /> : null;
 
   // Tapping a sticker in a chat opens it large, with the option to keep it. The
   // action button must stop propagation — the backdrop closes on click.
@@ -3225,36 +3234,12 @@ export function Messenger({ dek, onLock }: Props) {
               className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file && isSticker(m.file) ? ' is-sticker' : m.file && (m.file.mime.startsWith('image/') || m.file.mime.startsWith('video/')) ? ' has-file' : ''}`}
             >
               {m.file ? (
-                isSticker(m.file) ? (
-                  <img
-                    className="bubble-sticker"
-                    src={`data:${m.file.mime};base64,${m.file.dataB64}`}
-                    alt="Sticker"
-                    onClick={() => setStickerZoom({ mime: m.file!.mime, dataB64: m.file!.dataB64 })}
-                  />
-                ) : m.file.mime.startsWith('video/') ? (
-                  <video
-                    className="bubble-video"
-                    src={`data:${m.file.mime};base64,${m.file.dataB64}`}
-                    controls
-                    playsInline
-                    preload="metadata"
-                  />
-                ) : m.file.mime.startsWith('image/') ? (
-                  <img
-                    className="bubble-img"
-                    src={`data:${m.file.mime};base64,${m.file.dataB64}`}
-                    alt={m.file.name}
-                    onClick={() => setZoomImg(`data:${m.file!.mime};base64,${m.file!.dataB64}`)}
-                  />
-                ) : m.file.mime.startsWith('audio/') ? (
-                  <AudioPlayer dataB64={m.file.dataB64} mime={m.file.mime} />
-                ) : (
-                  <button className="file-chip" onClick={() => downloadFile(m.file!)}>
-                    <IconAttach size={16} />
-                    <span className="fn">{m.file.name}</span>
-                  </button>
-                )
+<Attachment
+                  dek={dek}
+                  file={m.file}
+                  onImageZoom={(b) => setZoomImg(b)}
+                  onStickerZoom={(f) => setStickerZoom({ mime: f.mime, dataB64: f.dataB64 ?? '' })}
+                />
               ) : (
                 m.text
               )}
@@ -3348,31 +3333,12 @@ export function Messenger({ dek, onLock }: Props) {
             >
               {!m.mine && m.sender && <div className="bubble-sender">{m.sender}</div>}
               {m.file ? (
-                isSticker(m.file) ? (
-                  <img
-                    className="bubble-sticker"
-                    src={`data:${m.file.mime};base64,${m.file.dataB64}`}
-                    alt="Sticker"
-                    onClick={() => setStickerZoom({ mime: m.file!.mime, dataB64: m.file!.dataB64 })}
-                  />
-                ) : m.file.mime.startsWith('video/') ? (
-                  <video
-                    className="bubble-video"
-                    src={`data:${m.file.mime};base64,${m.file.dataB64}`}
-                    controls
-                    playsInline
-                    preload="metadata"
-                  />
-                ) : m.file.mime.startsWith('image/') ? (
-                  <img className="bubble-img" src={`data:${m.file.mime};base64,${m.file.dataB64}`} alt={m.file.name} />
-                ) : m.file.mime.startsWith('audio/') ? (
-                  <AudioPlayer dataB64={m.file.dataB64} mime={m.file.mime} />
-                ) : (
-                  <button className="file-chip" onClick={() => downloadFile(m.file!)}>
-                    <IconAttach size={16} />
-                    <span className="fn">{m.file.name}</span>
-                  </button>
-                )
+<Attachment
+                  dek={dek}
+                  file={m.file}
+                  onImageZoom={(b) => setZoomImg(b)}
+                  onStickerZoom={(f) => setStickerZoom({ mime: f.mime, dataB64: f.dataB64 ?? '' })}
+                />
               ) : (
                 m.text
               )}
@@ -3542,7 +3508,7 @@ export function Messenger({ dek, onLock }: Props) {
         <div className="contact-body">
           <button
             className="contact-avatar"
-            onClick={() => hasAvatar && setZoomImg(avatarSrc(c.peerAvatarB64!))}
+            onClick={() => hasAvatar && setZoomImg(new Blob([b64ToBytes(c.peerAvatarB64!)], { type: 'image/jpeg' }))}
             aria-label={hasAvatar ? 'Profilbild groß ansehen' : undefined}
           >
             {hasAvatar ? (

@@ -132,6 +132,8 @@ const MAX_REC_SECONDS = 180;
 // speech and puts the full 180 s at roughly 540 KB, inside the cap.
 const VOICE_BITS_PER_SECOND = 24_000;
 // Erst-Sync sizing: keeps a snapshot comfortably under MAX_ATTACH without splitting.
+const REPLY_MAX = 72; // px a bubble can be dragged right before it stops moving
+const REPLY_TRIGGER = 52; // px of drag that opens a reply on release
 const ROSTER_MAX = 512; // metadata-only entries, ~250 B each
 const AVATAR_IMPORT_CAP = 96 * 1024; // decoded-ish ceiling for a carried avatar
 const HISTORY_CHUNK_BYTES = 64 * 1024; // per history frame; measured in UTF-8 BYTES
@@ -412,36 +414,46 @@ export function Messenger({ dek, onLock }: Props) {
     return { ...base, text: '' };
   }
 
-  // Swipe a bubble right-to-left to reply to it. Horizontal-only (a vertical drag
-  // scrolls the chat); the bubble follows the finger and, past a threshold, opens
-  // the reply. Transform is set on the element directly to avoid per-frame renders.
+  // Swipe a bubble LEFT→RIGHT to reply. Horizontal only (a vertical drag scrolls
+  // the chat); the bubble is dragged along with the finger, a reply arrow fades in
+  // behind it, and past the trigger it opens the reply. On release it springs back
+  // (CSS transition). Transform/CSS var are set on the element directly, so nothing
+  // re-renders per frame; --reply-progress drives the arrow's fade + scale.
+  function resetSwipe(el: HTMLElement) {
+    el.style.transition = ''; // back to the stylesheet spring for the snap-back
+    el.style.transform = '';
+    el.style.setProperty('--reply-progress', '0');
+  }
   function onBubblePointerDown(e: React.PointerEvent<HTMLDivElement>, m: ChatMessage) {
     if (!m.mid) return; // nothing to link a reply to
     swipeReplyRef.current = { mid: m.mid, x: e.clientX, y: e.clientY, el: e.currentTarget };
+    e.currentTarget.style.transition = 'none'; // follow the finger 1:1 while dragging
   }
   function onBubblePointerMove(e: React.PointerEvent<HTMLDivElement>) {
     const st = swipeReplyRef.current;
     if (!st) return;
     const dx = e.clientX - st.x;
     const dy = e.clientY - st.y;
-    if (Math.abs(dy) > Math.abs(dx)) {
-      st.el.style.transform = '';
-      swipeReplyRef.current = null; // vertical intent → let the chat scroll
+    if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 6) {
+      resetSwipe(st.el); // vertical intent → let the chat scroll
+      swipeReplyRef.current = null;
       return;
     }
-    st.el.style.transform = `translateX(${Math.max(-80, Math.min(0, dx))}px)`;
+    const t = Math.max(0, Math.min(REPLY_MAX, dx)); // drag RIGHT only
+    st.el.style.transform = `translateX(${t}px)`;
+    st.el.style.setProperty('--reply-progress', String(Math.min(1, t / REPLY_TRIGGER)));
   }
   function onBubblePointerUp(e: React.PointerEvent<HTMLDivElement>, m: ChatMessage) {
     const st = swipeReplyRef.current;
     if (!st) return;
     const dx = e.clientX - st.x;
-    st.el.style.transform = '';
+    resetSwipe(st.el); // springs back to rest
     swipeReplyRef.current = null;
-    if (dx < -55) setReplyTo(quoteFrom(m));
+    if (dx > REPLY_TRIGGER) setReplyTo(quoteFrom(m));
   }
   function clearBubbleSwipe() {
     if (swipeReplyRef.current) {
-      swipeReplyRef.current.el.style.transform = '';
+      resetSwipe(swipeReplyRef.current.el);
       swipeReplyRef.current = null;
     }
   }

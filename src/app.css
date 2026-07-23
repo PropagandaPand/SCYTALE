@@ -2335,9 +2335,25 @@ select {
   font-style: italic;
 }
 
-/* ── Reply / quote (swipe a bubble left to reply) ─────────────────────── */
+/* ── Reply / quote (drag a bubble left→right to reply) ────────────────── */
 .bubble {
+  position: relative;
   transition: transform 0.18s var(--ease-out);
+}
+/* Reply arrow that fades + scales in behind the bubble as it is dragged right.
+   Driven entirely by the --reply-progress CSS var the pointer handler sets, so it
+   animates with the finger without any React re-render. */
+.bubble::before {
+  content: '↩';
+  position: absolute;
+  right: calc(100% + 6px);
+  top: 50%;
+  font-size: 17px;
+  color: var(--accent);
+  opacity: var(--reply-progress, 0);
+  transform: translateY(-50%) scale(calc(0.6 + 0.4 * var(--reply-progress, 0)));
+  transition: opacity 0.15s ease;
+  pointer-events: none;
 }
 .bubble-quote {
   display: flex;

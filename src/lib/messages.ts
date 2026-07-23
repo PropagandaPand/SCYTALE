@@ -22,12 +22,22 @@ export interface FileRef {
   size?: number; // plaintext byte size (for the reference case)
 }
 
+/** A quoted message shown above a reply. Self-contained (a rendered preview + who
+ *  wrote it), so it still renders if the original is gone; `mid` links back to it. */
+export interface Quote {
+  mid: string;
+  text: string; // short preview of the quoted message
+  sender?: string; // display name of its author (groups); undefined for 1:1
+  mine: boolean; // was the quoted message mine
+}
+
 export interface ChatMessage {
   mine: boolean;
   ts: number;
   sender?: string; // display name of the sender, for group messages
   text?: string;
   file?: FileRef;
+  reply?: Quote; // this message is a reply to another; shown as a quote above it
   mid?: string; // stable E2E/bubble id (Stage 3d: shared across fan-out + self-sync copies)
   // Delivery to the relay (not read-receipt): pending until the DO confirms the
   // SQLite insert, then 'sent'; 'failed' on nack (mailbox full) or ack timeout.

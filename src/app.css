@@ -2334,3 +2334,78 @@ select {
   gap: 6px;
   font-style: italic;
 }
+
+/* ── Reply / quote (swipe a bubble left to reply) ─────────────────────── */
+.bubble {
+  transition: transform 0.18s var(--ease-out);
+}
+.bubble-quote {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0 0 5px;
+  padding: 5px 9px;
+  border-left: 3px solid currentColor;
+  border-radius: 5px;
+  background: rgba(127, 127, 127, 0.14);
+  font-size: 12.5px;
+  line-height: 1.35;
+  opacity: 0.92;
+}
+.bq-who {
+  font-weight: 600;
+  opacity: 0.85;
+}
+.bq-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60vw;
+}
+
+.composer {
+  flex-wrap: wrap;
+}
+.reply-bar {
+  flex-basis: 100%;
+  order: -1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  background: var(--surface);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+}
+.reply-bar-tx {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+.reply-bar-who {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+}
+.reply-bar-text {
+  font-size: 12.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reply-bar-x {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--surface2);
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}

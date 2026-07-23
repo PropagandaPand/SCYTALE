@@ -49,6 +49,7 @@ import {
   type RotationStatement,
 } from '../crypto';
 import { bytesToB64, b64ToBytes } from './bytes';
+import type { Quote } from './messages';
 
 export interface Contact {
   roomId: string;
@@ -788,7 +789,10 @@ export type MessageContent =
   // listack is NOT self-gated (an ack over MY list is legitimate from any peer).
   | { kind: 'bootstrap'; bid: string; parts: BootstrapPart[] }
   | { kind: 'listack'; epoch: number; version: number }
-  | { kind: 'bootreq'; requestId: string };
+  | { kind: 'bootreq'; requestId: string }
+  // A reply carries a self-contained QUOTE of the message it answers plus the
+  // actual content as `inner` (text or file). Wraps like `group`/`sync`.
+  | { kind: 'reply'; quote: Quote; inner: MessageContent };
 
 /** A decrypted inbound message plus its sender-stamped E2E dedup id. */
 export interface ReceivedMessage {
@@ -923,6 +927,9 @@ export async function frameContent(c: MessageContent): Promise<Bytes> {
   }
   if (c.kind === 'listack') return prefixed(11, utf8.encode(JSON.stringify({ e: c.epoch, v: c.version })));
   if (c.kind === 'bootreq') return prefixed(12, utf8.encode(JSON.stringify({ q: c.requestId })));
+  if (c.kind === 'reply') {
+    return prefixed(13, utf8.encode(JSON.stringify({ q: c.quote, i: bytesToB64(await frameContent(c.inner)) })));
+  }
   // ginvite
   return prefixed(4, utf8.encode(JSON.stringify(c.group)));
 }
@@ -1024,6 +1031,11 @@ export async function unframeContent(bytes: Bytes): Promise<MessageContent> {
   // Only type 1 is a real file. Anything else is a corrupt/unknown frame — throw
   // so it's dropped, never rendered as a junk "file" in the chat (e.g. a mangled
   // profile update must not surface as a downloadable attachment).
+  if (bytes[0] === 13) {
+    const j = JSON.parse(utf8.decode(bytes.slice(1)));
+    return { kind: 'reply', quote: j.q as Quote, inner: await unframeContent(b64ToBytes(j.i)) };
+  }
+
   if (bytes[0] !== 1) throw new Error('Unbekannter Frame-Typ: ' + bytes[0]);
 
   let o = 1;

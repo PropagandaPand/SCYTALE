@@ -108,7 +108,7 @@ import {
 } from './lib/bootstrap';
 import { putAttachment, newAttachmentId, deleteAttachment, allAttachmentIds } from './lib/attachments';
 import { pushSupported, enablePush, disablePush, currentSubscription } from './lib/push';
-import { loadMessages, saveMessages, clearMessages, allMessageRoomIds, aggregateDelivery, hasMessage, type ChatMessage, type DeviceDelivery, type FileRef } from './lib/messages';
+import { loadMessages, saveMessages, clearMessages, allMessageRoomIds, aggregateDelivery, hasMessage, type ChatMessage, type DeviceDelivery, type FileRef, type Quote } from './lib/messages';
 import { RelayClient, type RelayStatus } from './lib/relay';
 import { makeQr } from './lib/qr';
 import { bytesToB64, b64ToBytes } from './lib/bytes';
@@ -339,6 +339,8 @@ export function Messenger({ dek, onLock }: Props) {
   const [stickerPanel, setStickerPanel] = useState(false);
   // A sticker tapped in a chat, shown big with the option to keep it.
   const [stickerZoom, setStickerZoom] = useState<{ mime: string; dataB64: string } | null>(null);
+  const [replyTo, setReplyTo] = useState<Quote | null>(null); // message being answered
+  const swipeReplyRef = useRef<{ mid: string; x: number; y: number; el: HTMLElement } | null>(null);
   const [backupMode, setBackupMode] = useState<'export' | 'import' | null>(null);
   // ── Device linking ────────────────────────────────────────────────
   // 'menu'  : choose join-as-new vs add-a-device
@@ -383,6 +385,65 @@ export function Messenger({ dek, onLock }: Props) {
     const attId = newAttachmentId();
     await putAttachment(dek, attId, data, name, mime);
     return { name, mime, attId, size: data.length };
+  }
+
+  /** A self-contained quote of a message, for the reply preview + the sent frame. */
+  function quoteFrom(m: ChatMessage): Quote {
+    let text = m.text ?? '';
+    if (!text && m.file) {
+      text = isSticker(m.file)
+        ? 'Sticker'
+        : m.file.mime.startsWith('image/')
+          ? 'Foto'
+          : m.file.mime.startsWith('video/')
+            ? 'Video'
+            : m.file.mime.startsWith('audio/')
+              ? 'Sprachnachricht'
+              : m.file.name;
+    }
+    return { mid: m.mid ?? '', text: text.slice(0, 140), sender: m.sender, mine: !!m.mine };
+  }
+
+  /** Build the display message for an inbound `reply` frame (quote + inner text/file). */
+  async function replyMessage(quote: Quote, inner: MessageContent, mid: string, mine: boolean): Promise<ChatMessage> {
+    const base = { mine, ts: Date.now(), mid, reply: quote };
+    if (inner.kind === 'text') return { ...base, text: inner.text };
+    if (inner.kind === 'file') return { ...base, file: await fileRefFor(inner.name, inner.mime, inner.data) };
+    return { ...base, text: '' };
+  }
+
+  // Swipe a bubble right-to-left to reply to it. Horizontal-only (a vertical drag
+  // scrolls the chat); the bubble follows the finger and, past a threshold, opens
+  // the reply. Transform is set on the element directly to avoid per-frame renders.
+  function onBubblePointerDown(e: React.PointerEvent<HTMLDivElement>, m: ChatMessage) {
+    if (!m.mid) return; // nothing to link a reply to
+    swipeReplyRef.current = { mid: m.mid, x: e.clientX, y: e.clientY, el: e.currentTarget };
+  }
+  function onBubblePointerMove(e: React.PointerEvent<HTMLDivElement>) {
+    const st = swipeReplyRef.current;
+    if (!st) return;
+    const dx = e.clientX - st.x;
+    const dy = e.clientY - st.y;
+    if (Math.abs(dy) > Math.abs(dx)) {
+      st.el.style.transform = '';
+      swipeReplyRef.current = null; // vertical intent → let the chat scroll
+      return;
+    }
+    st.el.style.transform = `translateX(${Math.max(-80, Math.min(0, dx))}px)`;
+  }
+  function onBubblePointerUp(e: React.PointerEvent<HTMLDivElement>, m: ChatMessage) {
+    const st = swipeReplyRef.current;
+    if (!st) return;
+    const dx = e.clientX - st.x;
+    st.el.style.transform = '';
+    swipeReplyRef.current = null;
+    if (dx < -55) setReplyTo(quoteFrom(m));
+  }
+  function clearBubbleSwipe() {
+    if (swipeReplyRef.current) {
+      swipeReplyRef.current.el.style.transform = '';
+      swipeReplyRef.current = null;
+    }
   }
 
   async function appendMessage(roomId: string, msg: ChatMessage) {
@@ -1533,11 +1594,13 @@ export function Messenger({ dek, onLock }: Props) {
         // and vice versa — the peer knows this mid (it decrypted its own fan-out copy),
         // so a mid-only namespace would let it silently drop my own message here.
         const already = hasMessage(messagesRef.current[displayRoom] ?? [], content.innerMid, content.origin === 'sent');
-        if (!already && (inner.kind === 'text' || inner.kind === 'file')) {
+        if (!already && (inner.kind === 'text' || inner.kind === 'file' || inner.kind === 'reply')) {
           const synced: ChatMessage =
             inner.kind === 'file'
               ? { mine: content.origin === 'sent', ts: content.ts, mid: content.innerMid, file: await fileRefFor(inner.name, inner.mime, inner.data) }
-              : { mine: content.origin === 'sent', ts: content.ts, mid: content.innerMid, text: inner.text };
+              : inner.kind === 'reply'
+                ? await replyMessage(inner.quote, inner.inner, content.innerMid, content.origin === 'sent')
+                : { mine: content.origin === 'sent', ts: content.ts, mid: content.innerMid, text: inner.text };
           await appendMessage(displayRoom, synced);
           if (content.origin !== 'sent' && !(viewRef.current === 'chat' && activeRoomRef.current === displayRoom)) {
             unreadRef.current[displayRoom] = (unreadRef.current[displayRoom] ?? 0) + 1;
@@ -1578,7 +1641,9 @@ export function Messenger({ dek, onLock }: Props) {
         const inMsg: ChatMessage =
           content.kind === 'file'
             ? { mine: false, ts: Date.now(), mid, file: await fileRefFor(content.name, content.mime, content.data) }
-            : incomingMessage(content, mid);
+            : content.kind === 'reply'
+              ? await replyMessage(content.quote, content.inner, mid, false)
+              : incomingMessage(content, mid);
         await appendMessage(contact.roomId, inMsg);
         if (!(viewRef.current === 'chat' && activeRoomRef.current === contact.roomId)) {
           unreadRef.current[contact.roomId] = (unreadRef.current[contact.roomId] ?? 0) + 1;
@@ -2252,8 +2317,11 @@ export function Messenger({ dek, onLock }: Props) {
     const id = identityRef.current;
     if (!text || !id) return;
     if (activeGroup) {
+      const q = replyTo;
       setMsgInput('');
-      await groupSend({ kind: 'text', text }, { mine: true, text, ts: Date.now() });
+      setReplyTo(null);
+      const content: MessageContent = q ? { kind: 'reply', quote: q, inner: { kind: 'text', text } } : { kind: 'text', text };
+      await groupSend(content, { mine: true, text, ts: Date.now(), reply: q ?? undefined });
       return;
     }
     if (!activeRoom) return;
@@ -2266,11 +2334,14 @@ export function Messenger({ dek, onLock }: Props) {
       // wire, and returns per-device delivery rows for the aggregate bubble.
       const mid = randomMid();
       const ts = Date.now();
-      const deliveries = await fanoutSend(contact, { kind: 'text', text }, mid);
+      const q = replyTo;
+      const content: MessageContent = q ? { kind: 'reply', quote: q, inner: { kind: 'text', text } } : { kind: 'text', text };
+      const deliveries = await fanoutSend(contact, content, mid);
       // Mirror to my own other devices so they show it in this conversation.
-      void syncToOwnDevices(contact.peerMasterPub, 'sent', mid, ts, { kind: 'text', text });
-      await appendMessage(activeRoom, { mine: true, text, ts, mid, deliveries });
+      void syncToOwnDevices(contact.peerMasterPub, 'sent', mid, ts, content);
+      await appendMessage(activeRoom, { mine: true, text, ts, mid, deliveries, reply: q ?? undefined });
       setMsgInput('');
+      setReplyTo(null);
       void ensureProfileSent(contact);
       bump();
     } catch (e) {
@@ -2972,6 +3043,17 @@ export function Messenger({ dek, onLock }: Props) {
     </div>
   ) : (
     <div className="composer">
+      {replyTo && (
+        <div className="reply-bar">
+          <div className="reply-bar-tx">
+            <span className="reply-bar-who">{replyTo.mine ? 'Antwort an dich' : 'Antwort'}</span>
+            <span className="reply-bar-text">{replyTo.text || '📎 Anhang'}</span>
+          </div>
+          <button className="reply-bar-x" onClick={() => setReplyTo(null)} aria-label="Antwort verwerfen">
+            ×
+          </button>
+        </div>
+      )}
       <input ref={fileInputRef} type="file" hidden onChange={(e) => void onPickFile(e)} />
       <input
         ref={stickerInputRef}
@@ -3247,7 +3329,17 @@ export function Messenger({ dek, onLock }: Props) {
             <div
               key={`${m.ts}-${i}`}
               className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file && isSticker(m.file) ? ' is-sticker' : m.file && (m.file.mime.startsWith('image/') || m.file.mime.startsWith('video/')) ? ' has-file' : ''}`}
+              onPointerDown={(e) => onBubblePointerDown(e, m)}
+              onPointerMove={onBubblePointerMove}
+              onPointerUp={(e) => onBubblePointerUp(e, m)}
+              onPointerCancel={clearBubbleSwipe}
             >
+              {m.reply && (
+                <div className="bubble-quote">
+                  {(m.reply.mine || m.reply.sender) && <span className="bq-who">{m.reply.mine ? 'Du' : m.reply.sender}</span>}
+                  <span className="bq-text">{m.reply.text || '📎 Anhang'}</span>
+                </div>
+              )}
               {m.file ? (
 <Attachment
                   dek={dek}
@@ -3345,8 +3437,18 @@ export function Messenger({ dek, onLock }: Props) {
             <div
               key={`${m.ts}-${i}`}
               className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file && isSticker(m.file) ? ' is-sticker' : m.file && (m.file.mime.startsWith('image/') || m.file.mime.startsWith('video/')) ? ' has-file' : ''}`}
+              onPointerDown={(e) => onBubblePointerDown(e, m)}
+              onPointerMove={onBubblePointerMove}
+              onPointerUp={(e) => onBubblePointerUp(e, m)}
+              onPointerCancel={clearBubbleSwipe}
             >
               {!m.mine && m.sender && <div className="bubble-sender">{m.sender}</div>}
+              {m.reply && (
+                <div className="bubble-quote">
+                  {(m.reply.mine || m.reply.sender) && <span className="bq-who">{m.reply.mine ? 'Du' : m.reply.sender}</span>}
+                  <span className="bq-text">{m.reply.text || '📎 Anhang'}</span>
+                </div>
+              )}
               {m.file ? (
 <Attachment
                   dek={dek}

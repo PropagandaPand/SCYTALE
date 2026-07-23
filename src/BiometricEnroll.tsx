@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { enableBiometricUnlock, WrongPassphraseError } from './lib/vaultService';
+import { IconEye, IconEyeOff } from './icons';
 
 /**
  * One-time enrollment for Face ID / Touch ID unlock. The passphrase is needed once
@@ -11,6 +12,7 @@ export function BiometricEnroll({ onDone, onClose }: { onDone: () => void; onClo
   const [pass, setPass] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
+  const [showPass, setShowPass] = useState(false);
 
   async function enable() {
     if (busy || !pass) return;
@@ -40,15 +42,26 @@ export function BiometricEnroll({ onDone, onClose }: { onDone: () => void; onClo
         </p>
         <label className="backup-field">
           <span>Tresor-Passphrase</span>
-          <input
-            type="password"
-            value={pass}
-            autoComplete="current-password"
-            autoFocus
-            disabled={busy}
-            onChange={(e) => setPass(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && void enable()}
-          />
+          <div className="pass-reveal">
+            <input
+              type={showPass ? 'text' : 'password'}
+              value={pass}
+              autoComplete="current-password"
+              autoFocus
+              disabled={busy}
+              onChange={(e) => setPass(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && void enable()}
+            />
+            <button
+              type="button"
+              className="pass-eye"
+              onClick={() => setShowPass((v) => !v)}
+              aria-label={showPass ? 'Passphrase verbergen' : 'Passphrase anzeigen'}
+              aria-pressed={showPass}
+            >
+              {showPass ? <IconEyeOff size={17} /> : <IconEye size={17} />}
+            </button>
+          </div>
         </label>
         {err && <div className="err-note">{err}</div>}
       </div>

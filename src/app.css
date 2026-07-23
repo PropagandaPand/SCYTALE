@@ -235,6 +235,35 @@ select {
   font-size: 16px;
   letter-spacing: 0.15em;
 }
+/* Eye toggle to reveal the passphrase — used in the lock field and the enroll modal. */
+.pass-eye {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 0;
+  padding: 4px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+.pass-eye:hover {
+  color: var(--text);
+}
+.pass-reveal {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.pass-reveal input {
+  flex: 1;
+  padding-right: 36px; /* room for the absolutely-positioned eye */
+}
+.pass-reveal .pass-eye {
+  position: absolute;
+  right: 6px;
+}
 .lock-form .btn {
   margin-top: 14px;
 }

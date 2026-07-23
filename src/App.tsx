@@ -14,7 +14,7 @@ import {
 import { cryptoSelfTest } from './lib/selftest';
 import { Messenger } from './Messenger';
 import { ReloadPrompt } from './ReloadPrompt';
-import { IconLock } from './icons';
+import { IconLock, IconEye, IconEyeOff } from './icons';
 
 type Phase = 'loading' | 'create' | 'unlock' | 'open';
 type StatusKind = '' | 'ok' | 'err';
@@ -32,6 +32,7 @@ export function App() {
   const [lockRemaining, setLockRemaining] = useState(0);
   const [dek, setDek] = useState<CryptoKey | null>(null);
   const [canBiometric, setCanBiometric] = useState(false); // enrolled AND supported on this device
+  const [showPass, setShowPass] = useState(false); // reveal the passphrase via the eye toggle
   const lockTimer = useRef<number | null>(null);
 
   function say(msg: string, kind: StatusKind = '') {
@@ -220,7 +221,7 @@ export function App() {
                 <IconLock size={15} />
               </span>
               <input
-                type="password"
+                type={showPass ? 'text' : 'password'}
                 value={passphrase}
                 autoComplete={phase === 'create' ? 'new-password' : 'current-password'}
                 placeholder="············"
@@ -228,6 +229,15 @@ export function App() {
                 onChange={(e) => setPassphrase(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && void submit()}
               />
+              <button
+                type="button"
+                className="pass-eye"
+                onClick={() => setShowPass((v) => !v)}
+                aria-label={showPass ? 'Passphrase verbergen' : 'Passphrase anzeigen'}
+                aria-pressed={showPass}
+              >
+                {showPass ? <IconEyeOff size={17} /> : <IconEye size={17} />}
+              </button>
             </div>
             <button
               className={`btn btn-tall ${phase === 'unlock' && canBiometric ? '' : 'btn-primary'}`}

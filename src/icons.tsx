@@ -236,3 +236,27 @@ export function IconChevron({ size = 16 }: { size?: number }) {
     </svg>
   );
 }
+
+export function IconEye({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M1 8s2.6-4.5 7-4.5S15 8 15 8s-2.6 4.5-7 4.5S1 8 1 8Z" fill="none" stroke="currentColor" strokeWidth="1.3" />
+      <circle cx="8" cy="8" r="1.9" fill="none" stroke="currentColor" strokeWidth="1.3" />
+    </svg>
+  );
+}
+
+export function IconEyeOff({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M6.3 3.4A6.9 6.9 0 0 1 8 3.5c4.4 0 7 4.5 7 4.5a12.6 12.6 0 0 1-2.4 2.9M9.8 9.8A2 2 0 0 1 6.2 6.2M1 8s1.3-2.3 3.5-3.6M2 2l12 12"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}

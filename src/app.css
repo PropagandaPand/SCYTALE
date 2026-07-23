@@ -843,7 +843,9 @@ select {
   font-size: 14.5px;
   line-height: 1.4;
   word-wrap: break-word;
-  animation: msg-in 0.2s var(--ease-out) both;
+  /* No `both` fill-mode: it would pin the keyframe's `transform: none` after the
+     entrance finishes and override the drag-to-reply transform we set inline. */
+  animation: msg-in 0.2s var(--ease-out);
 }
 .bubble.mine {
   align-self: flex-end;
@@ -2339,17 +2341,22 @@ select {
 .bubble {
   position: relative;
   transition: transform 0.18s var(--ease-out);
+  touch-action: pan-y; /* keep vertical scroll; deliver horizontal drags to JS (no cancel) */
 }
-/* Reply arrow that fades + scales in behind the bubble as it is dragged right.
-   Driven entirely by the --reply-progress CSS var the pointer handler sets, so it
-   animates with the finger without any React re-render. */
+/* Reply cue that fades + scales in beside the bubble as it is dragged right.
+   A masked SVG in the app's line-icon style, tinted with --accent. Driven entirely
+   by the --reply-progress var the pointer handler sets, so it animates with the
+   finger without any React re-render. */
 .bubble::before {
-  content: '↩';
+  content: '';
   position: absolute;
-  right: calc(100% + 6px);
+  right: calc(100% + 8px);
   top: 50%;
-  font-size: 17px;
-  color: var(--accent);
+  width: 18px;
+  height: 18px;
+  background: var(--accent);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='9 17 4 12 9 7'/%3E%3Cpath d='M20 18v-2a4 4 0 0 0-4-4H4'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='9 17 4 12 9 7'/%3E%3Cpath d='M20 18v-2a4 4 0 0 0-4-4H4'/%3E%3C/svg%3E") center / contain no-repeat;
   opacity: var(--reply-progress, 0);
   transform: translateY(-50%) scale(calc(0.6 + 0.4 * var(--reply-progress, 0)));
   transition: opacity 0.15s ease;
@@ -2384,6 +2391,9 @@ select {
 }
 .reply-bar {
   flex-basis: 100%;
+  min-width: 0; /* don't balloon to the quoted text's intrinsic width → keeps the × on screen */
+  max-width: 100%;
+  box-sizing: border-box;
   order: -1;
   display: flex;
   align-items: center;
@@ -2399,7 +2409,11 @@ select {
   flex-direction: column;
   gap: 1px;
   min-width: 0;
+  overflow: hidden;
   flex: 1;
+}
+.reply-bar-text {
+  max-width: 100%;
 }
 .reply-bar-who {
   font-size: 12px;

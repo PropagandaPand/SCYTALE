@@ -428,6 +428,13 @@ export function Messenger({ dek, onLock }: Props) {
     if (!m.mid) return; // nothing to link a reply to
     swipeReplyRef.current = { mid: m.mid, x: e.clientX, y: e.clientY, el: e.currentTarget };
     e.currentTarget.style.transition = 'none'; // follow the finger 1:1 while dragging
+    // Capture so move/up keep firing on this bubble even as the pointer leaves its
+    // (small) bounds while dragging right — otherwise the drag freezes part-way.
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      /* not fatal — capture is a nicety, the drag still works without it */
+    }
   }
   function onBubblePointerMove(e: React.PointerEvent<HTMLDivElement>) {
     const st = swipeReplyRef.current;

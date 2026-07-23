@@ -9,8 +9,8 @@ transposition cipher.
 
 > **Status:** the cryptographic core (identity, X3DH, Double Ratchet, sealed
 > sender, at-rest vault, multi-device identity + device linking) is implemented
-> and tested. Making a freshly linked second device a full 1:1 copy of your
-> account (profile, contacts, history) is **in progress** — see
+> and tested. A newly linked device now receives your profile and contacts and is
+> reliably reachable for your peers; **chat history does not travel yet**. See
 > [Status](#status) and the open issues.
 
 ## Principle
@@ -143,8 +143,8 @@ out a man-in-the-middle.
 - **Endpoint:** no encryption helps against a compromised device (malware,
   client-side scanning in the OS, physical access to an unlocked vault) — which
   is precisely the point of the objection to Chat Control.
-- **Multi-device:** see [Status](#status) — initial-sync and groups × devices are
-  not finished yet.
+- **Multi-device:** see [Status](#status) — chat history does not yet reach a
+  newly linked device, and group messages never reach a member's second device.
 
 ---
 

@@ -124,6 +124,11 @@ import {
 
 const MAX_ATTACH = 600 * 1024; // inline cap — keeps the WS frame under Cloudflare's ~1 MiB limit
 const MAX_REC_SECONDS = 180;
+// Voice bitrate. Without this the browser default (~128 kbps) makes 30 s of speech
+// ~480 KB, so a recording the UI happily allowed could not be sent — MAX_REC_SECONDS
+// and MAX_ATTACH contradicted each other. Opus at 24 kbps is plainly enough for
+// speech and puts the full 180 s at roughly 540 KB, inside the cap.
+const VOICE_BITS_PER_SECOND = 24_000;
 // Erst-Sync sizing: keeps a snapshot comfortably under MAX_ATTACH without splitting.
 const ROSTER_MAX = 512; // metadata-only entries, ~250 B each
 const AVATAR_IMPORT_CAP = 96 * 1024; // decoded-ish ceiling for a carried avatar
@@ -2369,7 +2374,10 @@ export function Messenger({ dek, onLock }: Props) {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       recStreamRef.current = stream;
       const mime = pickAudioMime();
-      const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      const rec = new MediaRecorder(stream, {
+        ...(mime ? { mimeType: mime } : {}),
+        audioBitsPerSecond: VOICE_BITS_PER_SECOND,
+      });
       recChunksRef.current = [];
       sendOnStopRef.current = true;
       rec.ondataavailable = (e) => {

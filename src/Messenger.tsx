@@ -133,6 +133,7 @@ const MAX_REC_SECONDS = 180;
 const VOICE_BITS_PER_SECOND = 24_000;
 // Erst-Sync sizing: keeps a snapshot comfortably under MAX_ATTACH without splitting.
 const SWIPE_SLOP = 8; // px of travel before the drag commits to an axis (horizontal vs scroll)
+const SWIPE_BIAS = 1.25; // vertical must dominate horizontal by this factor to be treated as scroll
 const REPLY_TRIGGER = 52; // px of drag that opens a reply on release
 const REPLY_MAX = 96; // soft ceiling; past the trigger the bubble rubber-bands, never a hard wall
 const REPLY_DAMP = 0.35; // resistance applied to travel beyond the trigger
@@ -350,6 +351,7 @@ export function Messenger({ dek, onLock }: Props) {
     y: number;
     el: HTMLElement;
     lock: 'h' | 'v' | null; // committed drag axis; decided once, then never re-checked
+    dx: number; // last horizontal travel, so a cancelled-but-far-enough drag still fires
   } | null>(null);
   const [backupMode, setBackupMode] = useState<'export' | 'import' | null>(null);
   // ── Device linking ────────────────────────────────────────────────
@@ -436,31 +438,38 @@ export function Messenger({ dek, onLock }: Props) {
     if (!m.mid) return; // nothing to link a reply to
     // Don't touch transition/transform yet — wait until the drag commits to the
     // horizontal axis, so a tap or a vertical scroll leaves the bubble untouched.
-    swipeReplyRef.current = { mid: m.mid, x: e.clientX, y: e.clientY, el: e.currentTarget, lock: null };
+    swipeReplyRef.current = { mid: m.mid, x: e.clientX, y: e.clientY, el: e.currentTarget, lock: null, dx: 0 };
   }
   function onBubblePointerMove(e: React.PointerEvent<HTMLDivElement>) {
     const st = swipeReplyRef.current;
     if (!st) return;
     const dx = e.clientX - st.x;
     const dy = e.clientY - st.y;
-    // Decide the axis ONCE, after a little slop, then never re-check it — so a small
-    // vertical wobble mid-drag can't abort a horizontal reply gesture (the old bug).
+    const ax = Math.abs(dx);
+    const ay = Math.abs(dy);
+    // Decide the axis ONCE, then never re-check it — so a vertical wobble mid-drag
+    // can't abort a horizontal reply gesture. Bias toward horizontal: vertical only
+    // wins if it CLEARLY dominates (SWIPE_BIAS×), otherwise a mostly-sideways drag
+    // that drifts a little down stays a reply drag instead of being handed to scroll.
     if (st.lock === null) {
-      if (Math.abs(dx) < SWIPE_SLOP && Math.abs(dy) < SWIPE_SLOP) return; // too early to tell
-      if (Math.abs(dy) > Math.abs(dx)) {
-        swipeReplyRef.current = null; // vertical intent → hand it to the native scroll
+      if (ax >= SWIPE_SLOP && ax >= ay) {
+        st.lock = 'h';
+        st.el.style.transition = 'none'; // now follow the finger 1:1
+        try {
+          // Capture so move/up keep firing even once the pointer leaves the bubble.
+          st.el.setPointerCapture(e.pointerId);
+        } catch {
+          /* capture is a nicety; the drag still works without it */
+        }
+      } else if (ay >= SWIPE_SLOP && ay > ax * SWIPE_BIAS) {
+        swipeReplyRef.current = null; // clear vertical intent → hand it to native scroll
         return;
-      }
-      st.lock = 'h';
-      st.el.style.transition = 'none'; // now follow the finger 1:1
-      try {
-        // Capture so move/up keep firing even once the pointer leaves the bubble.
-        st.el.setPointerCapture(e.pointerId);
-      } catch {
-        /* capture is a nicety; the drag still works without it */
+      } else {
+        return; // still ambiguous — wait for a clearer direction
       }
     }
     if (st.lock !== 'h') return;
+    st.dx = dx;
     // 1:1 up to the trigger, then rubber-band with resistance instead of a hard wall.
     let t = Math.max(0, dx);
     if (t > REPLY_TRIGGER) t = REPLY_TRIGGER + (t - REPLY_TRIGGER) * REPLY_DAMP;
@@ -468,20 +477,16 @@ export function Messenger({ dek, onLock }: Props) {
     st.el.style.transform = `translateX(${t}px)`;
     st.el.style.setProperty('--reply-progress', String(Math.min(1, t / REPLY_TRIGGER)));
   }
-  function onBubblePointerUp(e: React.PointerEvent<HTMLDivElement>, m: ChatMessage) {
+  // Shared end for both pointerup and pointercancel. Using the last tracked dx (not
+  // the event's coordinates) means a drag the browser CANCELS after it passed the
+  // trigger still opens the reply, instead of being silently lost.
+  function endBubbleSwipe(m: ChatMessage) {
     const st = swipeReplyRef.current;
     if (!st) return;
-    const dx = e.clientX - st.x;
-    const fire = st.lock === 'h' && dx > REPLY_TRIGGER;
+    const fire = st.lock === 'h' && st.dx > REPLY_TRIGGER;
     if (st.lock === 'h') resetSwipe(st.el); // springs back to rest
     swipeReplyRef.current = null;
     if (fire) setReplyTo(quoteFrom(m));
-  }
-  function clearBubbleSwipe() {
-    if (swipeReplyRef.current) {
-      resetSwipe(swipeReplyRef.current.el);
-      swipeReplyRef.current = null;
-    }
   }
   // Tapping a reply's quoted preview smooth-scrolls the chat to the original
   // message and flashes it. No-op if the original isn't in the loaded log.
@@ -496,6 +501,17 @@ export function Messenger({ dek, onLock }: Props) {
     target.classList.add('quote-flash');
     window.setTimeout(() => target.classList.remove('quote-flash'), 1200);
   }
+  // Once a reply drag is committed to horizontal, stop the browser from scrolling
+  // the chat. Without this the browser can hijack a drag that drifts vertically and
+  // fire pointercancel, snapping the bubble back mid-gesture. Must be a NON-passive
+  // listener for preventDefault to actually suppress the scroll.
+  useEffect(() => {
+    const stopScrollWhileDragging = (e: TouchEvent) => {
+      if (swipeReplyRef.current?.lock === 'h') e.preventDefault();
+    };
+    document.addEventListener('touchmove', stopScrollWhileDragging, { passive: false });
+    return () => document.removeEventListener('touchmove', stopScrollWhileDragging);
+  }, []);
 
   async function appendMessage(roomId: string, msg: ChatMessage) {
     // Hydrate a COLD room from storage before appending. Boot preloads every
@@ -3383,8 +3399,8 @@ export function Messenger({ dek, onLock }: Props) {
               className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file && isSticker(m.file) ? ' is-sticker' : m.file && (m.file.mime.startsWith('image/') || m.file.mime.startsWith('video/')) ? ' has-file' : ''}`}
               onPointerDown={(e) => onBubblePointerDown(e, m)}
               onPointerMove={onBubblePointerMove}
-              onPointerUp={(e) => onBubblePointerUp(e, m)}
-              onPointerCancel={clearBubbleSwipe}
+              onPointerUp={() => endBubbleSwipe(m)}
+              onPointerCancel={() => endBubbleSwipe(m)}
             >
               {m.reply && (
                 <div
@@ -3497,8 +3513,8 @@ export function Messenger({ dek, onLock }: Props) {
               className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file && isSticker(m.file) ? ' is-sticker' : m.file && (m.file.mime.startsWith('image/') || m.file.mime.startsWith('video/')) ? ' has-file' : ''}`}
               onPointerDown={(e) => onBubblePointerDown(e, m)}
               onPointerMove={onBubblePointerMove}
-              onPointerUp={(e) => onBubblePointerUp(e, m)}
-              onPointerCancel={clearBubbleSwipe}
+              onPointerUp={() => endBubbleSwipe(m)}
+              onPointerCancel={() => endBubbleSwipe(m)}
             >
               {!m.mine && m.sender && <div className="bubble-sender">{m.sender}</div>}
               {m.reply && (

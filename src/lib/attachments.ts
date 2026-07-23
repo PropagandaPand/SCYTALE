@@ -19,7 +19,7 @@
  * The per-chunk AAD binds each chunk to its id AND index, so a chunk cannot be
  * swapped between attachments or reordered under the seal.
  */
-import { seal, open, utf8, type SealedRecord } from '../crypto';
+import { seal, open, utf8, type SealedRecord, type Bytes } from '../crypto';
 import { loadRecord, saveRecord, deleteRecord, listRecordKeys } from './db';
 import { bytesToB64 } from './bytes';
 
@@ -34,10 +34,22 @@ export interface AttachmentMeta {
   chunks: number;
 }
 
+/** A marker that an INCOMING chunked transfer is in progress for `id`. Present from
+ *  the first chunk until the message is appended, so (a) the orphan GC never collects
+ *  a half-received attachment and (b) a reload can resume/finalise it. */
+export interface RecvMarker {
+  total: number; // expected wire-chunk count
+  name: string;
+  mime: string;
+  size: number; // expected plaintext bytes (validated against the cap before storing)
+}
+
 const metaKey = (id: string) => `att:${id}:meta`;
 const chunkKey = (id: string, idx: number) => `att:${id}:${idx}`;
+const recvKey = (id: string) => `attrecv:${id}`;
 const metaAad = (id: string) => utf8.encode(`scytale:att-meta:v1:${id}`);
 const chunkAad = (id: string, idx: number) => utf8.encode(`scytale:att:v1:${id}:${idx}`);
+const recvAad = (id: string) => utf8.encode(`scytale:att-recv:v1:${id}`);
 
 /** A fresh random attachment id (16 bytes, hex). */
 export function newAttachmentId(): string {
@@ -71,9 +83,48 @@ export async function putAttachmentChunk(id: string, idx: number, sealed: Sealed
   await saveRecord(chunkKey(id, idx), sealed);
 }
 
+/** Seal + store one incoming WIRE chunk directly as attachment chunk `idx`. A wire
+ *  chunk becomes a store chunk one-to-one, so a transfer is persisted as it arrives
+ *  (crash-safe, never assembled whole in memory) and getAttachmentBlob reassembles
+ *  it regardless of chunk sizes. Idempotent: a re-delivered chunk overwrites its key. */
+export async function sealAndPutChunk(dek: CryptoKey, id: string, idx: number, bytes: Bytes): Promise<void> {
+  await saveRecord(chunkKey(id, idx), await seal(dek, bytes, chunkAad(id, idx)));
+}
+
+/** How many distinct chunk records are stored for `id` (ignores the meta record).
+ *  Drives completion detection for an incoming transfer: === total ⇒ all arrived. */
+export async function storedChunkCount(id: string): Promise<number> {
+  const keys = await listRecordKeys(`att:${id}:`);
+  let n = 0;
+  for (const k of keys) if (/^att:[^:]+:\d+$/.test(k)) n++;
+  return n;
+}
+
 /** Finalise an incrementally-written attachment by committing its meta LAST. */
 export async function finalizeAttachment(dek: CryptoKey, id: string, meta: AttachmentMeta): Promise<void> {
   await saveRecord(metaKey(id), await seal(dek, utf8.encode(JSON.stringify(meta)), metaAad(id)));
+}
+
+/** Mark an incoming transfer in progress (written on the first chunk). */
+export async function putRecvMarker(dek: CryptoKey, id: string, m: RecvMarker): Promise<void> {
+  await saveRecord(recvKey(id), await seal(dek, utf8.encode(JSON.stringify(m)), recvAad(id)));
+}
+export async function getRecvMarker(dek: CryptoKey, id: string): Promise<RecvMarker | null> {
+  const rec = await loadRecord(recvKey(id));
+  if (!rec) return null;
+  try {
+    return JSON.parse(utf8.decode(await open(dek, rec, recvAad(id)))) as RecvMarker;
+  } catch {
+    return null;
+  }
+}
+export async function clearRecvMarker(id: string): Promise<void> {
+  await deleteRecord(recvKey(id));
+}
+/** Every id with an in-progress incoming-transfer marker — for boot-resume AND so the
+ *  orphan sweep treats a half-received attachment as in-use, not collectable. */
+export async function allRecvMarkerIds(): Promise<string[]> {
+  return (await listRecordKeys('attrecv:')).map((k) => k.slice('attrecv:'.length));
 }
 
 export async function getAttachmentMeta(dek: CryptoKey, id: string): Promise<AttachmentMeta | null> {

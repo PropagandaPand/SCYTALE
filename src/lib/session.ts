@@ -807,7 +807,12 @@ export type MessageContent =
   | { kind: 'bootreq'; requestId: string }
   // A reply carries a self-contained QUOTE of the message it answers plus the
   // actual content as `inner` (text or file). Wraps like `group`/`sync`.
-  | { kind: 'reply'; quote: Quote; inner: MessageContent };
+  | { kind: 'reply'; quote: Quote; inner: MessageContent }
+  // One piece of a large attachment sent out-of-band of the inline path. Every chunk
+  // carries the full transfer descriptor (tid/total/size/name/mime) so it is
+  // self-describing and order-independent. Gated on the peer device's pv (>= 2): a
+  // stale device is never sent a byte-14 frame, which it would throw on and lose.
+  | { kind: 'chunk'; tid: string; idx: number; total: number; size: number; name: string; mime: string; data: Bytes };
 
 /** A decrypted inbound message plus its sender-stamped E2E dedup id. */
 export interface ReceivedMessage {
@@ -945,6 +950,17 @@ export async function frameContent(c: MessageContent): Promise<Bytes> {
   if (c.kind === 'reply') {
     return prefixed(13, utf8.encode(JSON.stringify({ q: c.quote, i: bytesToB64(await frameContent(c.inner)) })));
   }
+  if (c.kind === 'chunk') {
+    // [14][headerLen u32][header JSON][raw data]: JSON for the tiny descriptor, raw
+    // bytes for the payload so the bulk isn't base64-inflated on the wire.
+    const header = utf8.encode(JSON.stringify({ t: c.tid, i: c.idx, n: c.total, s: c.size, nm: c.name, m: c.mime }));
+    const out = new Uint8Array(1 + 4 + header.length + c.data.length);
+    new DataView(out.buffer).setUint32(1, header.length);
+    out[0] = 14;
+    out.set(header, 5);
+    out.set(c.data, 5 + header.length);
+    return out;
+  }
   // ginvite
   return prefixed(4, utf8.encode(JSON.stringify(c.group)));
 }
@@ -1049,6 +1065,20 @@ export async function unframeContent(bytes: Bytes): Promise<MessageContent> {
   if (bytes[0] === 13) {
     const j = JSON.parse(utf8.decode(bytes.slice(1)));
     return { kind: 'reply', quote: j.q as Quote, inner: await unframeContent(b64ToBytes(j.i)) };
+  }
+  if (bytes[0] === 14) {
+    const hlen = dv.getUint32(1);
+    const j = JSON.parse(utf8.decode(bytes.slice(5, 5 + hlen)));
+    return {
+      kind: 'chunk',
+      tid: String(j.t),
+      idx: Number(j.i),
+      total: Number(j.n),
+      size: Number(j.s),
+      name: String(j.nm),
+      mime: String(j.m),
+      data: bytes.slice(5 + hlen),
+    };
   }
 
   if (bytes[0] !== 1) throw new Error('Unbekannter Frame-Typ: ' + bytes[0]);

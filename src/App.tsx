@@ -182,6 +182,9 @@ export function App() {
           <span className="d" />
           Argon2id · 256 MiB · non-extractable DEK
         </div>
+        {/* Temporary: reach the WebAuthn/PRF probe from inside the installed PWA
+            (a standalone PWA has no address bar). Remove once biometrics is decided. */}
+        <a className="lock-probe" href="/prf-probe.html">Face ID / Touch ID testen</a>
       </div>
       <ReloadPrompt />
     </>

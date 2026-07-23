@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b0f0e" />
+    <title>SCYTALE · WebAuthn/PRF-Test</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: env(safe-area-inset-top) 16px calc(env(safe-area-inset-bottom) + 24px);
+        background: #0b0f0e;
+        color: #e6efec;
+        font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        -webkit-text-size-adjust: 100%;
+      }
+      header { padding: 22px 0 10px; }
+      h1 { font-size: 18px; margin: 0 0 4px; }
+      p.sub { margin: 0; color: #8fa3a0; font-size: 13px; }
+      button#run {
+        width: 100%;
+        margin: 18px 0;
+        padding: 15px;
+        font-size: 16px;
+        font-weight: 600;
+        color: #04120e;
+        background: #12a488;
+        border: 0;
+        border-radius: 12px;
+        cursor: pointer;
+      }
+      button#run:disabled { opacity: 0.5; }
+      #log { display: flex; flex-direction: column; gap: 6px; }
+      .row {
+        padding: 9px 11px;
+        border-radius: 8px;
+        background: #121a18;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12.5px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .row.ok { background: #10241d; color: #7fe6c4; }
+      .row.fail { background: #2a1414; color: #ff9b9b; }
+      .row.warn { color: #e8c98a; }
+      .row.muted { background: transparent; color: #8fa3a0; padding: 4px 11px; }
+      .row.verdict { font-family: inherit; font-size: 15px; font-weight: 700; padding: 14px; }
+      a.back { display: inline-block; margin-top: 22px; color: #12a488; font-size: 14px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>WebAuthn / PRF-Test</h1>
+      <p class="sub">Prüft, ob Face ID/Touch ID hier ein stabiles Schlüsselgeheimnis liefert. Einmal als Safari-Tab und einmal als installierte PWA ausführen.</p>
+    </header>
+    <button id="run">Test starten</button>
+    <div id="log"></div>
+    <a class="back" href="/">← zurück zu SCYTALE</a>
+    <script src="/prf-probe.js"></script>
+  </body>
+</html>

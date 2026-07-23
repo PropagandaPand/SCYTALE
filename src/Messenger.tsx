@@ -2431,6 +2431,18 @@ export function Messenger({ dek, onLock }: Props) {
     const c = contactsRef.current.find((x) => x.roomId === activeRoom);
     if (!c) return;
     c.verified = true;
+    c.verifiedSuggestion = undefined; // acted on — the hint has served its purpose
+    await saveContact(dek, c);
+    bump();
+  }
+
+  /** Hide the "verified on your other device" hint for good. Only the hint — it
+   *  never granted trust, so dismissing it changes nothing about `verified`. */
+  async function dismissVerifiedSuggestion() {
+    const c = contactsRef.current.find((x) => x.roomId === activeRoom);
+    if (!c) return;
+    c.verifiedSuggestion = undefined;
+    c.verifiedSuggestionDismissed = true; // survives a re-delivered snapshot
     await saveContact(dek, c);
     bump();
   }
@@ -2642,8 +2654,8 @@ export function Messenger({ dek, onLock }: Props) {
             <div className="link-head">Gerät gekoppelt</div>
             <p className="link-sub">
               {linkRole === 'primary'
-                ? 'Das neue Gerät gehört jetzt zu deiner Identität.'
-                : 'Dieses Gerät nutzt jetzt deine bestehende Identität. Bestehende Kontakte müssen die neue Identität bestätigen — schreibe ihnen, um das auszulösen.'}
+                ? 'Das neue Gerät gehört jetzt zu deiner Identität. Es holt sich gleich dein Profil und deine Kontaktliste.'
+                : 'Dieses Gerät nutzt jetzt deine bestehende Identität. Profil und Kontakte werden gerade von deinem Hauptgerät übertragen — das kann einen Moment dauern. Bestehende Kontakte müssen die neue Identität bestätigen; schreibe ihnen, um das auszulösen.'}
             </p>
             <button className="btn btn-primary btn-tall" onClick={() => setLinkView(null)}>
               Fertig
@@ -3350,6 +3362,25 @@ export function Messenger({ dek, onLock }: Props) {
             <IconLock size={12} />
             {verified ? 'verifiziert' : 'nicht verifiziert · zum Prüfen antippen'}
           </button>
+
+          {!verified && c.verifiedSuggestion && !c.verifiedSuggestionDismissed && (
+            <div className="contact-warn">
+              <div className="cw-text">
+                <b>Auf deinem anderen Gerät bestätigt</b>
+                <span>
+                  Beim Übernehmen deiner Kontakte kam die Info mit, dass du diesen Kontakt auf einem anderen Gerät
+                  schon verifiziert hast. Das allein zählt hier NICHT als Bestätigung — vergleiche die
+                  Sicherheitsnummer auf diesem Gerät selbst.
+                </span>
+              </div>
+              <button className="btn btn-primary sm" onClick={() => void openVerify()}>
+                Sicherheitsnummer vergleichen
+              </button>
+              <button className="btn btn-ghost sm" onClick={() => void dismissVerifiedSuggestion()}>
+                Ausblenden
+              </button>
+            </div>
+          )}
 
           {c.retiredAttempt && (
             <div className="contact-warn">

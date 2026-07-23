@@ -72,6 +72,7 @@ import {
   type Contact,
   type BootstrapPart,
   type RosterEntry,
+  type HistoryMessage,
   type MessageContent,
   type GroupInvite,
   type PreKeyLookup,
@@ -126,6 +127,7 @@ const MAX_REC_SECONDS = 180;
 // Erst-Sync sizing: keeps a snapshot comfortably under MAX_ATTACH without splitting.
 const ROSTER_MAX = 512; // metadata-only entries, ~250 B each
 const AVATAR_IMPORT_CAP = 96 * 1024; // decoded-ish ceiling for a carried avatar
+const HISTORY_CHUNK_BYTES = 200 * 1024; // per history frame, well under MAX_ATTACH
 const GOSSIP_COOLDOWN_MS = 30_000; // first re-offer delay; doubles per attempt
 const GOSSIP_MAX_BACKOFF_MS = 60 * 60_000; // ceiling, so a never-acking peer stays cheap
 
@@ -625,6 +627,58 @@ export function Messenger({ dek, onLock }: Props) {
    * device — the requester. METADATA ONLY: no ratchet, no bundle, no device list,
    * so a substituted device gains no send capability to my contact graph.
    */
+  /** Fan ONE bootstrap frame to exactly one of my devices. */
+  async function sendBootstrapFrame(targetSignPub: Bytes, bid: string, parts: BootstrapPart[]) {
+    const id = identityRef.current;
+    if (!id) return;
+    const self = await ensureSelfContact();
+    if (!self) return;
+    const content: MessageContent = { kind: 'bootstrap', bid, parts };
+    const { deliveries } = await enqueueInbox(async () => {
+      const r = await fanoutDeliveries(id, self, content, randomMid(), id.sign.publicKey, targetSignPub);
+      await saveContact(dek, self);
+      return r;
+    });
+    await dispatchDeliveries(deliveries);
+  }
+
+  /**
+   * P side: send past messages to a freshly linked device, ONE CHUNK PER FRAME.
+   * Every chunk carries its OWN bid — the applied-marker skips a whole frame, so a
+   * shared id would silently drop every chunk after the first.
+   *
+   * TEXT ONLY for now: a stored attachment is base64 (~4/3 of its 600 KB cap), so a
+   * single one already exceeds one frame. Attachments follow with chunked transfer
+   * (issue #9).
+   */
+  async function sendHistoryTo(targetSignPub: Bytes, baseBid: string) {
+    const id = identityRef.current;
+    if (!id || !isPrimaryDevice(id)) return;
+    let n = 0;
+    for (const c of contactsRef.current) {
+      if (c.hidden || c.staleIdentity || bytesEqual(c.peerMasterPub, id.master.publicKey)) continue;
+      const msgs: HistoryMessage[] = (messagesRef.current[c.roomId] ?? [])
+        .filter((m) => m.mid && typeof m.text === 'string' && m.text.length > 0)
+        .map((m) => ({ mine: !!m.mine, ts: m.ts, mid: m.mid as string, text: m.text as string, sender: m.sender }));
+      if (!msgs.length) continue;
+      let batch: HistoryMessage[] = [];
+      let bytes = 0;
+      const flush = async () => {
+        if (!batch.length) return;
+        await sendBootstrapFrame(targetSignPub, `${baseBid}-h${n++}`, [{ t: 'history', pm: c.peerMasterPub, msgs: batch }]);
+        batch = [];
+        bytes = 0;
+      };
+      for (const m of msgs) {
+        const size = m.text.length + (m.sender?.length ?? 0) + 80;
+        if (bytes + size > HISTORY_CHUNK_BYTES) await flush();
+        batch.push(m);
+        bytes += size;
+      }
+      await flush();
+    }
+  }
+
   async function sendBootstrapTo(targetSignPub: Bytes, bid: string) {
     const id = identityRef.current;
     if (!id || !isPrimaryDevice(id)) return; // only the primary answers a pull
@@ -648,13 +702,9 @@ export function Messenger({ dek, onLock }: Props) {
       { t: 'profile', name: prof.name, avatar },
       { t: 'roster', contacts },
     ];
-    const content: MessageContent = { kind: 'bootstrap', bid, parts };
-    const { deliveries } = await enqueueInbox(async () => {
-      const r = await fanoutDeliveries(id, self, content, randomMid(), id.sign.publicKey, targetSignPub);
-      await saveContact(dek, self);
-      return r;
-    });
-    await dispatchDeliveries(deliveries);
+    await sendBootstrapFrame(targetSignPub, bid, parts);
+    // Then the past messages, chunked, each frame independently applicable.
+    await sendHistoryTo(targetSignPub, bid);
   }
 
   /**
@@ -784,6 +834,24 @@ export function Messenger({ dek, onLock }: Props) {
           await saveProfile(dek, next);
           setProfileName(next.name ?? '');
           setMyAvatarB64(next.avatarB64 ?? '');
+        }
+      } else if (p.t === 'history') {
+        // DISPLAY ROOM derived locally from (my master, pm) — never from the wire,
+        // exactly like a roster entry. Missing messages are appended and the log
+        // re-sorted by timestamp; dedup by (mid, direction) so a message this device
+        // already holds from the live path is not duplicated.
+        const room = await computeMasterRoomId(myMaster, asMasterPub(p.pm));
+        const arr = messagesRef.current[room] ?? (await loadMessages(dek, room));
+        let added = 0;
+        for (const h of p.msgs) {
+          if (hasMessage(arr, h.mid, h.mine)) continue;
+          arr.push({ mine: h.mine, ts: h.ts, mid: h.mid, text: h.text, sender: h.sender });
+          added++;
+        }
+        messagesRef.current[room] = arr;
+        if (added) {
+          arr.sort((a, b) => a.ts - b.ts);
+          await saveMessages(dek, room, arr);
         }
       } else if (p.t === 'roster') {
         for (const entry of p.contacts) {

@@ -712,7 +712,34 @@ export interface GroupInvite {
 /** One stage of a bootstrap snapshot sent to a freshly linked OWN device (Erst-Sync). */
 export type BootstrapPart =
   | { t: 'profile'; name?: string; avatar?: string } // avatar = avatarB64 (JPEG)
-  | { t: 'roster'; contacts: RosterEntry[] };
+  | { t: 'roster'; contacts: RosterEntry[] }
+  | { t: 'history'; pm: Bytes; msgs: HistoryMessage[] };
+
+/**
+ * One past message as carried in a history chunk. The DISPLAY ROOM is never on the
+ * wire — the receiver derives it from (my master, `pm`) exactly like a roster
+ * entry, so a manipulated snapshot cannot file history into a foreign conversation.
+ *
+ * Delivery state is deliberately absent: `status`/`deliveries` describe what THIS
+ * device saw of a relay hand-off and mean nothing on another device — carrying
+ * them would leave permanent "pending" ticks on copies that were long delivered.
+ */
+/** Wire shape of one history message (short keys keep a chunk small). */
+interface WireHistoryMsg {
+  i?: boolean;
+  t?: number;
+  d?: string;
+  x?: string;
+  s?: string | null;
+}
+
+export interface HistoryMessage {
+  mine: boolean;
+  ts: number;
+  mid: string;
+  text: string;
+  sender?: string; // group messages keep their authenticated display name
+}
 
 /**
  * A contact as carried in a bootstrap roster: METADATA ONLY. Deliberately no
@@ -866,7 +893,13 @@ export async function frameContent(c: MessageContent): Promise<Bytes> {
     const parts = c.parts.map((p) =>
       p.t === 'profile'
         ? { t: 'profile', n: p.name ?? '', a: p.avatar ?? '' }
-        : {
+        : p.t === 'history'
+          ? {
+              t: 'history',
+              m: bytesToB64(p.pm),
+              h: p.msgs.map((x) => ({ i: x.mine, t: x.ts, d: x.mid, x: x.text, s: x.sender ?? null })),
+            }
+          : {
             t: 'roster',
             c: p.contacts.map((e) => ({
               m: bytesToB64(e.pm),
@@ -932,7 +965,17 @@ export async function unframeContent(bytes: Bytes): Promise<MessageContent> {
     const parts: BootstrapPart[] = [];
     for (const p of Array.isArray(j.parts) ? j.parts : []) {
       if (p.t === 'profile') parts.push({ t: 'profile', name: p.n || undefined, avatar: p.a || undefined });
-      else if (p.t === 'roster') {
+      else if (p.t === 'history') {
+        const rawH: WireHistoryMsg[] = Array.isArray(p.h) ? p.h : [];
+        const msgs: HistoryMessage[] = rawH.map((x) => ({
+          mine: x.i === true,
+          ts: Number(x.t),
+          mid: String(x.d),
+          text: String(x.x ?? ''),
+          sender: x.s ?? undefined,
+        }));
+        parts.push({ t: 'history', pm: b64ToBytes(p.m), msgs });
+      } else if (p.t === 'roster') {
         const rawContacts = (Array.isArray(p.c) ? p.c : []) as Array<{
           m: string;
           e: number;

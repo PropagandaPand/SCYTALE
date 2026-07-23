@@ -106,9 +106,9 @@ import {
   saveBootstrapRequest,
   type BootstrapRequest,
 } from './lib/bootstrap';
-import { putAttachment, newAttachmentId, deleteAttachment } from './lib/attachments';
+import { putAttachment, newAttachmentId, deleteAttachment, allAttachmentIds } from './lib/attachments';
 import { pushSupported, enablePush, disablePush, currentSubscription } from './lib/push';
-import { loadMessages, saveMessages, clearMessages, aggregateDelivery, hasMessage, type ChatMessage, type DeviceDelivery, type FileRef } from './lib/messages';
+import { loadMessages, saveMessages, clearMessages, allMessageRoomIds, aggregateDelivery, hasMessage, type ChatMessage, type DeviceDelivery, type FileRef } from './lib/messages';
 import { RelayClient, type RelayStatus } from './lib/relay';
 import { makeQr } from './lib/qr';
 import { bytesToB64, b64ToBytes } from './lib/bytes';
@@ -1712,6 +1712,7 @@ export function Messenger({ dek, onLock }: Props) {
         for (const g of gs) messagesRef.current[g.id] = await loadMessages(dek, g.id);
         commitMessages();
         bump();
+        await sweepOrphanAttachments(); // race-free: still inside the boot task
       });
       // AFTER the boot task (never inside it — both of these enqueue on the same
       // chain, so awaiting them from within it would deadlock the inbox):
@@ -1778,6 +1779,18 @@ export function Messenger({ dek, onLock }: Props) {
 
   /** Delete the out-of-band attachments referenced by a room's messages, so
    *  removing a chat does not leak its videos in the vault. */
+  /** Delete attachment blobs no message references any more — orphans from an
+   *  interrupted store, or from a message that never got persisted. Runs once at
+   *  boot INSIDE the inbox task, before any delivery, so it can never race a
+   *  concurrent store and delete a live attachment. */
+  async function sweepOrphanAttachments() {
+    const referenced = new Set<string>();
+    for (const roomId of await allMessageRoomIds()) {
+      for (const m of await loadMessages(dek, roomId)) if (m.file?.attId) referenced.add(m.file.attId);
+    }
+    for (const id of await allAttachmentIds()) if (!referenced.has(id)) await deleteAttachment(id);
+  }
+
   async function gcRoomAttachments(roomId: string) {
     for (const m of messagesRef.current[roomId] ?? []) {
       if (m.file?.attId) await deleteAttachment(m.file.attId);
@@ -2466,8 +2479,10 @@ export function Messenger({ dek, onLock }: Props) {
     }
     const name = `sprachnachricht.${ext}`;
     const mid = randomMid();
-    const localMsg: ChatMessage = { mine: true, ts: Date.now(), file: await fileRefFor(name, mime, data), mid };
     try {
+      // Inside the try: storing the attachment can fail (quota), and that must
+      // surface as an error, not an unhandled rejection that silently drops it.
+      const localMsg: ChatMessage = { mine: true, ts: Date.now(), file: await fileRefFor(name, mime, data), mid };
       if (activeGroup) {
         await groupSend({ kind: 'file', name, mime, data }, localMsg);
         return;

@@ -49,13 +49,20 @@ export function newAttachmentId(): string {
  *  that they never touch the message log and are read back incrementally. */
 export async function putAttachment(dek: CryptoKey, id: string, bytes: Uint8Array, name: string, mime: string): Promise<AttachmentMeta> {
   const chunks = Math.max(1, Math.ceil(bytes.length / STORE_CHUNK));
-  for (let i = 0; i < chunks; i++) {
-    const slice = bytes.slice(i * STORE_CHUNK, (i + 1) * STORE_CHUNK);
-    await saveRecord(chunkKey(id, i), await seal(dek, slice, chunkAad(id, i)));
+  try {
+    for (let i = 0; i < chunks; i++) {
+      const slice = bytes.slice(i * STORE_CHUNK, (i + 1) * STORE_CHUNK);
+      await saveRecord(chunkKey(id, i), await seal(dek, slice, chunkAad(id, i)));
+    }
+    const meta: AttachmentMeta = { name, mime, size: bytes.length, chunks };
+    await saveRecord(metaKey(id), await seal(dek, utf8.encode(JSON.stringify(meta)), metaAad(id))); // LAST
+    return meta;
+  } catch (e) {
+    // Clean up our own partial write (e.g. out of space mid-store) so a failed
+    // put never leaves orphan chunks behind, then let the caller see the error.
+    await deleteAttachment(id).catch(() => undefined);
+    throw e;
   }
-  const meta: AttachmentMeta = { name, mime, size: bytes.length, chunks };
-  await saveRecord(metaKey(id), await seal(dek, utf8.encode(JSON.stringify(meta)), metaAad(id))); // LAST
-  return meta;
 }
 
 /** Store one already-sealed chunk (used by the incoming chunked-transfer path, which

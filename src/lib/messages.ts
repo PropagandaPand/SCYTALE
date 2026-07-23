@@ -4,7 +4,7 @@
  * per room via AAD. Loaded on unlock so conversations survive lock/reload.
  */
 import { seal, open, utf8 } from '../crypto';
-import { loadRecord, saveRecord, deleteRecord } from './db';
+import { loadRecord, saveRecord, deleteRecord, listRecordKeys } from './db';
 
 /**
  * An attachment on a message. ONE write format going forward — a reference
@@ -106,4 +106,11 @@ export async function saveMessages(
 
 export async function clearMessages(roomId: string): Promise<void> {
   await deleteRecord(recordKey(roomId));
+}
+
+/** Every roomId that has a stored message log — including cardless self-sync rooms
+ *  that boot does not otherwise load. Used to find every attachment reference for
+ *  the orphan sweep, so no still-referenced attachment is ever collected. */
+export async function allMessageRoomIds(): Promise<string[]> {
+  return (await listRecordKeys(recordKey(''))).map((k) => k.slice(recordKey('').length));
 }

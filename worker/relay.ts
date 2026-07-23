@@ -37,7 +37,17 @@ interface Att {
 }
 
 const enc = new TextEncoder();
-const MAX_QUEUE = 1000; // max undelivered messages per inbox (flood guard)
+// Flood/abuse guards for the store-and-forward mailbox. Sending is deliberately
+// auth-less (sealed sender — the relay can't identify who queues), so the mailbox
+// is bounded by resource, not by sender. Sizes are measured on the base64 body we
+// store (ASCII → chars == bytes); ciphertext is ~3/4 of that.
+const MAX_QUEUE = 1000; // max undelivered messages per inbox
+const MAX_MSG_B64 = 1_200_000; // ~900 KB ciphertext: the relay carries only SMALL
+// messages — large attachments transfer out-of-band, so a single oversized send is
+// a misbehaving client and is rejected (see SECURITY.md, groups/attachment limits).
+const MAX_QUEUE_B64 = 20 * 1024 * 1024; // ~15 MB ciphertext backlog cap per inbox
+const QUEUE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // sweep undelivered messages after 30 days
+const PUSH_COALESCE_MS = 3000; // collapse a burst of sends into ONE wake-up push
 
 function b64d(s: string): Uint8Array {
   const bin = atob(s);
@@ -62,9 +72,46 @@ function hex(b: Uint8Array): string {
 export class RelayRoom extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS q (id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT)');
+    this.ctx.storage.sql.exec(
+      'CREATE TABLE IF NOT EXISTS q (id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT, ts INTEGER)',
+    );
+    // Migrate mailboxes created before the TTL column existed. ALTER throws if the
+    // column is already there (new DOs) — that's the "already migrated" case.
+    try {
+      this.ctx.storage.sql.exec('ALTER TABLE q ADD COLUMN ts INTEGER');
+    } catch {
+      /* column already present */
+    }
     // Push subscriptions for this inbox's owner (only ever written after auth).
     this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS subs (endpoint TEXT PRIMARY KEY, sub TEXT)');
+  }
+
+  /** Drop undelivered messages past the TTL — frees storage in mailboxes that are
+   *  never drained (an abandoned account). Pre-TTL rows have ts=NULL and are left
+   *  alone, so migrating an existing mailbox never mass-deletes its backlog. */
+  private sweepExpired(): void {
+    this.ctx.storage.sql.exec('DELETE FROM q WHERE ts IS NOT NULL AND ts < ?', Date.now() - QUEUE_TTL_MS);
+  }
+
+  private ownerOnline(): boolean {
+    return [...this.ctx.getWebSockets()].some((p) => ((p.deserializeAttachment() ?? {}) as Att).owner);
+  }
+
+  /** Arm a single coalescing alarm so a burst of sends (e.g. many small frames)
+   *  wakes the owner with ONE push, not one per message. Only sets it if none is
+   *  pending; the alarm is one-shot, so the next burst arms a fresh one. */
+  private async scheduleWake(): Promise<void> {
+    if ((await this.ctx.storage.getAlarm()) === null) {
+      await this.ctx.storage.setAlarm(Date.now() + PUSH_COALESCE_MS);
+    }
+  }
+
+  /** The coalescing alarm: sweep expired messages, then send exactly one wake-up
+   *  push — but only if the owner is still offline and something is waiting. */
+  async alarm(): Promise<void> {
+    this.sweepExpired();
+    const pending = this.ctx.storage.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM q').one().n;
+    if (pending > 0 && !this.ownerOnline()) await this.notifyOwner();
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -122,6 +169,7 @@ export class RelayRoom extends DurableObject<Env> {
         }
         if (!valid) return;
         ws.serializeAttachment({ ...att, owner: true } satisfies Att);
+        this.sweepExpired(); // don't deliver (or keep storing) messages past the TTL
         for (const row of this.ctx.storage.sql.exec<{ id: number; body: string }>('SELECT id, body FROM q ORDER BY id')) {
           ws.send(JSON.stringify({ t: 'msg', id: row.id, b64: row.body }));
         }
@@ -129,30 +177,45 @@ export class RelayRoom extends DurableObject<Env> {
       }
       case 'send': {
         if (typeof m.b64 !== 'string') return;
-        // Bounded mailbox: anyone who knows an inbox id can queue to it (no
-        // sender auth by design), so cap the backlog to stop a flood from
-        // growing the DO's storage without limit. Drop when full; it self-heals
-        // as the owner drains. (Replays are already rejected by the ratchet.)
-        const pending = this.ctx.storage.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM q').one().n;
-        if (pending >= MAX_QUEUE) {
-          // Honest rejection: tell the sender instead of silently dropping (which
-          // would leave a delivered-looking checkmark). Also logged for `wrangler tail`.
-          console.warn(`relay: inbox full (${pending}), rejecting send`);
+        const mid = typeof m.mid === 'string' ? m.mid : null;
+        // Sending is auth-less by design (sealed sender), so the mailbox is bounded
+        // by RESOURCE, not by sender. Honest rejection (a nack, not a silent drop —
+        // which would leave a delivered-looking checkmark); it self-heals as the
+        // owner drains. Replays are already rejected by the ratchet.
+        //
+        // Per-message cap: the relay only carries small frames. A single oversized
+        // send is a misbehaving client (large attachments go out-of-band), rejected
+        // distinctly so the client can surface "too large" rather than "mailbox full".
+        if (m.b64.length > MAX_MSG_B64) {
           try {
-            ws.send(JSON.stringify({ t: 'nack', mid: typeof m.mid === 'string' ? m.mid : null, reason: 'full' }));
+            ws.send(JSON.stringify({ t: 'nack', mid, reason: 'toolarge' }));
+          } catch {
+            /* sender socket gone */
+          }
+          return;
+        }
+        // Row AND byte caps: bound an orphaned/flooded mailbox's storage.
+        const stat = this.ctx.storage.sql
+          .exec<{ n: number; bytes: number }>('SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(body)), 0) AS bytes FROM q')
+          .one();
+        if (stat.n >= MAX_QUEUE || stat.bytes + m.b64.length > MAX_QUEUE_B64) {
+          // Counter only, never the inbox id — Cloudflare logs must not accumulate metadata.
+          console.warn(`relay: inbox full (rows=${stat.n}, bytes=${stat.bytes}), rejecting send`);
+          try {
+            ws.send(JSON.stringify({ t: 'nack', mid, reason: 'full' }));
           } catch {
             /* sender socket gone */
           }
           return;
         }
         const inserted = this.ctx.storage.sql
-          .exec<{ id: number }>('INSERT INTO q (body) VALUES (?) RETURNING id', m.b64)
+          .exec<{ id: number }>('INSERT INTO q (body, ts) VALUES (?, ?) RETURNING id', m.b64, Date.now())
           .one();
-        // Positive delivery ack: the message is durably in the mailbox. The
-        // sender only shows a checkmark once this arrives — a lost socket
-        // between send() and here yields NO ack, so no false checkmark.
+        // Positive delivery ack: the message is durably in the mailbox. The sender
+        // only shows a checkmark once this arrives — a lost socket between send()
+        // and here yields NO ack, so no false checkmark.
         try {
-          ws.send(JSON.stringify({ t: 'sent', mid: typeof m.mid === 'string' ? m.mid : null }));
+          ws.send(JSON.stringify({ t: 'sent', mid }));
         } catch {
           /* sender socket gone */
         }
@@ -168,8 +231,9 @@ export class RelayRoom extends DurableObject<Env> {
             }
           }
         }
-        // Owner not connected => wake their device with a content-free push.
-        if (!ownerOnline) this.ctx.waitUntil(this.notifyOwner());
+        // Owner offline => arm the coalescing alarm instead of pushing per message,
+        // so a burst (e.g. a fan-out or many small frames) yields ONE wake, not many.
+        if (!ownerOnline) this.ctx.waitUntil(this.scheduleWake());
         return;
       }
       case 'ack': {

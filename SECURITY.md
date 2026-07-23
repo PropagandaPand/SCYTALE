@@ -447,13 +447,18 @@ both arrive.
   **"not delivered"**. **Invariant: once `sent`, always `sent`** — a late `nack`/timeout cannot downgrade a
   confirmed delivery (only `failed → sent` recovery is allowed). The tick means "the relay has it", **not**
   "read".
-- **Queue capped** (`MAX_QUEUE`=1000 per inbox): since sending is deliberately auth-less, the cap limits
-  flooding; on full, `nack` (+ a `console.warn` **with a counter only, no inbox id** — Cloudflare logs must not
-  accumulate metadata). Heals on drain. **Replays** inject no messages — the Double Ratchet rejects already-used
-  message keys.
+- **Mailbox bounded by resource, not by sender.** Sending is deliberately auth-less (sealed sender — the relay
+  cannot identify who queues), so abuse is bounded by resource caps rather than per-sender quotas: a **row cap**
+  (`MAX_QUEUE`=1000), a **total byte cap** (~15 MB ciphertext per inbox), a **per-message size cap** (~900 KB —
+  the relay carries only small frames; large attachments transfer out-of-band), and a **30-day TTL** that sweeps
+  undelivered messages from mailboxes that are never drained (an abandoned account). On any cap, an honest `nack`
+  (+ a `console.warn` **with counters only, no inbox id** — Cloudflare logs must not accumulate metadata), never a
+  silent drop (which would leave a delivered-looking checkmark). Heals on drain. **Replays** inject no messages —
+  the Double Ratchet rejects already-used message keys.
+- **Push coalescing.** When the owner is offline, a burst of sends to one inbox arms a single ~3 s alarm and wakes
+  the device with **one** content-free push, not one per message — so a rapid burst can't fan out into a push storm.
 - **One-way onboarding**: passing the code suffices; the other writes first and the contact forms automatically
   from the prekey header.
-- **A sender rate limit** against targeted flooding is still missing (the cap bounds only total queue depth).
 - Only **ciphertext** ever transits.
 
 ---
@@ -562,6 +567,10 @@ Node/npm version.)
 - **Prekey downgrade**: with no OPK in the bundle, X3DH runs on DH1–DH3 (only the *first* message then has reduced
   forward secrecy — as in the Signal standard). An active attacker *modifying* the bundle (stripping the OPK) is
   caught only by the safety-number comparison.
+- **No per-sender fairness at the relay.** Under sealed sender the relay has no sender identity, so it cannot
+  enforce per-sender quotas — abuse is bounded only by the per-inbox resource caps (row/byte/per-message) and the
+  TTL. A determined flooder can still fill a *specific* target inbox up to its byte cap (whereupon that inbox
+  honestly nacks further sends until it drains); it cannot grow storage without bound or affect other inboxes.
 - **Code-delivery trust**: mitigated but not eliminated by the reproducible build; a real user-facing mitigation
   (an independent verifier publishing signed hashes) is open.
 

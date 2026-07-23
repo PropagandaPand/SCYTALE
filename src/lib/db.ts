@@ -53,6 +53,14 @@ export async function deleteRecord(key: string): Promise<void> {
   await (await db()).delete('records', key);
 }
 
+/** Every record key starting with `prefix`. A real key-range scan, not a sealed
+ *  index blob — an index blob would recreate exactly the "one growing blob" problem
+ *  the attachment store exists to avoid. Used to enumerate an attachment's chunks
+ *  and to garbage-collect orphaned ones. `￿` is the upper bound of the range. */
+export async function listRecordKeys(prefix: string): Promise<string[]> {
+  return (await db()).getAllKeys('records', IDBKeyRange.bound(prefix, prefix + '￿'));
+}
+
 // --- Device key (non-extractable CryptoKey, never leaves this device/profile) ---
 
 export async function loadDeviceKey(): Promise<CryptoKey | undefined> {

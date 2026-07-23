@@ -56,9 +56,15 @@ export function BackupModal({
     if (!file) return setErr('Bitte eine Backup-Datei wählen.');
     setBusy(true);
     try {
-      await importBackup(dek, exportPass, new Uint8Array(await file.arrayBuffer()));
-      setDone('Wiederhergestellt. Die App lädt gleich neu…');
-      setTimeout(() => location.reload(), 1200);
+      // Pass the File itself: importBackup reads it section by section, so a large
+      // backup is never loaded into one array.
+      const failed = await importBackup(dek, exportPass, file);
+      setDone(
+        failed > 0
+          ? `Wiederhergestellt. ${failed} Anhang/Anhänge waren beschädigt und fehlen. Die App lädt gleich neu…`
+          : 'Wiederhergestellt. Die App lädt gleich neu…',
+      );
+      setTimeout(() => location.reload(), 1600);
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Import fehlgeschlagen.');
       setBusy(false);

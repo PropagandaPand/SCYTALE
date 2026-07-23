@@ -194,14 +194,17 @@ export async function exportBackup(dek: CryptoKey, exportPassphrase: string): Pr
 
   const metaSec = await encSection(key, await gather(dek, attMeta));
 
+  // Each section is wrapped in its own Blob immediately, so its ciphertext array can
+  // be released and the browser may back the growing file with disk — peak memory is
+  // ~one attachment (its plaintext + ciphertext while it encrypts), not the whole set.
   const atts: V2Header['atts'] = [];
-  const attCts: Bytes[] = [];
+  const bodyParts: BlobPart[] = [new Blob([metaSec.ct])];
   for (const id of ids) {
     const blob = await getAttachmentBlob(dek, id);
     if (!blob) continue; // incomplete/GC'd between listing and reading — skip
     const sec = await encSection(key, new Uint8Array(await blob.arrayBuffer()));
     atts.push({ id, iv: await b64encode(sec.iv), len: sec.ct.length });
-    attCts.push(sec.ct);
+    bodyParts.push(new Blob([sec.ct]));
   }
 
   const header: V2Header = {
@@ -214,53 +217,86 @@ export async function exportBackup(dek: CryptoKey, exportPassphrase: string): Pr
   const headerBytes = utf8.encode(JSON.stringify(header));
   const prefix = new Uint8Array(4);
   new DataView(prefix.buffer).setUint32(0, headerBytes.length);
-  // A Blob of parts: the browser can back this with disk, so the whole backup is
-  // never one contiguous array in RAM.
-  return new Blob([prefix, headerBytes, metaSec.ct, ...attCts], { type: 'application/octet-stream' });
+  return new Blob([prefix, headerBytes, ...bodyParts], { type: 'application/octet-stream' });
 }
 
-/** Restore an encrypted backup into the local vault (overwrites identity/state).
- *  Accepts both the v2 binary container and the legacy v1 JSON file. */
-export async function importBackup(dek: CryptoKey, exportPassphrase: string, file: Bytes): Promise<void> {
+const CORRUPT = 'Beschädigtes Backup — die Datei ist unvollständig oder kein SCYTALE-Backup.';
+const WRONG_PASS = 'Falsche Export-Passphrase oder beschädigtes Backup.';
+
+async function sliceBytes(file: Blob, start: number, end: number): Promise<Bytes> {
+  return new Uint8Array(await file.slice(start, end).arrayBuffer());
+}
+
+/**
+ * Restore an encrypted backup into the local vault (overwrites identity/state).
+ * Accepts both the v2 binary container and the legacy v1 JSON file. Reads the file
+ * SECTION BY SECTION (never the whole thing into one array). Returns the number of
+ * attachments that could not be restored: the account and all readable data come
+ * back even if a single attachment section is damaged — one bad section never
+ * discards the intact ones.
+ */
+export async function importBackup(dek: CryptoKey, exportPassphrase: string, file: Blob): Promise<number> {
+  const head = await sliceBytes(file, 0, 4);
+  if (head.length === 0) throw new Error(CORRUPT);
+
   // v1 files are a JSON object → start with '{'. v2 starts with a 4-byte length.
-  if (file[0] === 0x7b) {
-    const c = JSON.parse(utf8.decode(file)) as V1Container;
+  if (head[0] === 0x7b) {
+    let c: V1Container;
+    try {
+      c = JSON.parse(utf8.decode(await sliceBytes(file, 0, file.size))) as V1Container;
+    } catch {
+      throw new Error(CORRUPT);
+    }
     if (c.v !== 1) throw new Error('Unbekanntes Backup-Format.');
     const key = await deriveExportKey(exportPassphrase, await b64decode(c.salt), c.argon2);
     let plain: Bytes;
     try {
       plain = await decSection(key, await b64decode(c.iv), await b64decode(c.ct));
     } catch {
-      throw new Error('Falsche Export-Passphrase oder beschädigtes Backup.');
+      throw new Error(WRONG_PASS);
     }
     await restoreMeta(dek, JSON.parse(utf8.decode(plain)) as BackupBlob);
-    return;
+    return 0;
   }
 
   // v2 binary container.
-  const dv = new DataView(file.buffer, file.byteOffset, file.byteLength);
-  const headerLen = dv.getUint32(0);
-  let off = 4;
-  const header = JSON.parse(utf8.decode(new Uint8Array(file.slice(off, off + headerLen)))) as V2Header;
+  if (head.length < 4) throw new Error(CORRUPT);
+  const headerLen = new DataView(head.buffer, head.byteOffset, head.byteLength).getUint32(0);
+  let header: V2Header;
+  try {
+    header = JSON.parse(utf8.decode(await sliceBytes(file, 4, 4 + headerLen))) as V2Header;
+  } catch {
+    throw new Error(CORRUPT);
+  }
   if (header.v !== 2) throw new Error('Unbekanntes Backup-Format.');
-  off += headerLen;
+  let off = 4 + headerLen;
   const key = await deriveExportKey(exportPassphrase, await b64decode(header.salt), header.argon2);
 
-  const metaCt = new Uint8Array(file.slice(off, off + header.meta.len));
+  // Metadata FIRST: a wrong passphrase fails its auth tag here, before anything is
+  // written — so a bad passphrase never leaves a half-restored vault.
+  const metaCt = await sliceBytes(file, off, off + header.meta.len);
   off += header.meta.len;
   let blob: BackupBlob;
   try {
     blob = JSON.parse(utf8.decode(await decSection(key, await b64decode(header.meta.iv), metaCt))) as BackupBlob;
   } catch {
-    throw new Error('Falsche Export-Passphrase oder beschädigtes Backup.');
+    throw new Error(WRONG_PASS);
   }
   await restoreMeta(dek, blob);
 
+  // Attachments: each isolated. Advance the offset BEFORE decrypting, so a damaged
+  // section is skipped without desyncing the ones after it.
+  let failed = 0;
   for (const a of header.atts) {
-    const ct = new Uint8Array(file.slice(off, off + a.len));
+    const start = off;
     off += a.len;
-    const bytes = await decSection(key, await b64decode(a.iv), ct);
-    const nm = blob.attMeta?.[a.id];
-    await putAttachment(dek, a.id, bytes, nm?.name ?? 'anhang', nm?.mime ?? 'application/octet-stream');
+    try {
+      const bytes = await decSection(key, await b64decode(a.iv), await sliceBytes(file, start, start + a.len));
+      const nm = blob.attMeta?.[a.id];
+      await putAttachment(dek, a.id, bytes, nm?.name ?? 'anhang', nm?.mime ?? 'application/octet-stream');
+    } catch {
+      failed++; // damaged/undecryptable attachment — the rest still restore
+    }
   }
+  return failed;
 }

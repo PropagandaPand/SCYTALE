@@ -2,8 +2,8 @@
 
 SCYTALE ist gegen **anlasslose Massenüberwachung** gebaut (Chatkontrolle /
 CSAR). Dieses Dokument ist die genaue Aufschlüsselung aller Mechanismen und
-sagt ehrlich, was geschützt ist — und was nicht. Stand: v0.20.2 (Stufe 3d
-Multi-Device: Fan-out + Per-Device-Sessions + Self-Sync).
+sagt ehrlich, was geschützt ist — und was nicht. Stand: v0.21.0 (Stufe 3d
+Multi-Device + Link-Erst-Sync: Profil & Kontakte aufs gekoppelte Gerät).
 
 **Leitprinzipien:** niemals eigene Krypto erfinden (vetted Primitiven +
 etablierte Protokolle: X3DH, Double Ratchet); der Server ist ein **dummer
@@ -261,6 +261,80 @@ Primitiven beim Start.
   Aggregat-Status („an N/M Geräten") und der Erreichbarkeits-Punkt bewerten das
   **aktuelle** Geräteset. Das ist dieselbe Umkehrung wie bei der Tür: die
   identitätsstiftende Größe ist die Person.
+
+### Link initial-sync — the account snapshot a newly linked device receives
+
+*(written in English per the repo-content language policy; the rest of this file
+is still German and is tracked for translation in issue #7)*
+
+Linking establishes identity, not content. Until this stage a linked device was
+cryptographically the same account but visually empty — indistinguishable from a
+failed pairing. It now receives a **snapshot** (`bootstrap` frame) carrying the
+**profile** (name, avatar) and the **contact roster**. Chat history does **not**
+travel yet (issue #1).
+
+**PULL, not push.** The primary does not send the snapshot when the SAS is
+confirmed: at that moment the new device has not installed its identity yet, so
+the message would be delivered, acked and lost. Instead the new device mints a
+`requestId`, persists it as pending, and asks (`bootreq`); the primary — and only
+the primary, so sibling devices do not all answer — replies to exactly that one
+device. The request survives reloads and is retried until a snapshot lands, so a
+pairing done while the primary was offline still completes later.
+
+**What the snapshot deliberately does NOT contain.** A roster entry carries only
+`peerMasterPub / peerEpoch / peerSignPub / peerDhPub / nickname / peerName` plus a
+verification *hint*. It carries **no ratchet state, no prekey bundle, no peer
+device list, no roomId**. Consequences, all intended:
+
+- **No ratchet is ever cloned.** Two devices sharing one ratchet would both
+  advance it and reuse a message key — a two-time pad. Every device builds its
+  own X3DH session per peer device (the Stage 3d invariant is preserved).
+- **Imported contacts are send-blocked** until the real peer learns this device
+  and writes. A substituted or maliciously linked device therefore gains **no
+  immediate ability to send into the whole contact graph** — it can only receive.
+  Minimal metadata beats instant usability here.
+- **`roomId` and the fingerprint are always derived locally** from
+  (my master, peer master), never taken from the wire, so a manipulated snapshot
+  cannot steer a conversation into the wrong room or overwrite one.
+
+**Trust never travels.** `verified` is a device-local flag and is never adopted
+from a snapshot. The sender's flag arrives only as a **suggestion** that opens the
+normal safety-number comparison on the receiving device; there is no one-tap
+"accept". A compromised primary can therefore not plant false trust on a device it
+links. Dismissing the hint is persistent, so a re-delivered snapshot cannot nag.
+
+**Merging fills gaps, never overwrites.** A contact this device already pinned,
+verified or learned via TOFU wins over the snapshot; only missing fields are
+filled. Entries for my own master, for a denylisted (abandoned) master, or whose
+locally derived room is already occupied by a *different* peer are skipped
+outright. A contact left over from the pre-link identity (`staleIdentity`) is
+**not** silently reactivated: its room still belongs to the abandoned master, so
+un-staling it without re-keying would send into a room the peer discards while the
+relay still acks — silent loss with a "sent" tick — and would remove the explicit
+"reconnect" affordance. The merge refuses that case.
+
+**Gating and idempotency.** `bootstrap` and `bootreq` are accepted **only** from
+my own devices (`peerMaster == my master`), enforced both at the source
+(`receiveEnvelope`) and again in the inbox handler. Both are terminal: never
+rendered as a message, never re-fanned. Import is idempotent via the snapshot id,
+whose marker is written **last**, so a crash mid-import simply replays the merge.
+
+**Reachability (`listack`).** A newly linked device is useless if peers keep
+talking only to the primary. Peers therefore acknowledge which version of my
+device list they hold, and I re-offer it while their acknowledgement lags —
+addressed to the device that offered it, since the watermark is per device.
+`listack` is intentionally **not** self-gated: an acknowledgement about *my* list
+is legitimate from any peer and can only move a watermark forward; an
+acknowledgement naming a version I never published is ignored. Re-offers back off
+exponentially (capped at an hour) so a peer that cannot acknowledge — an older
+build, or one that is simply offline — never turns into a flood that fills their
+relay mailbox. While a peer is still behind, messages I receive from them are
+additionally mirrored to my own devices; that stops as soon as they acknowledge.
+
+**Residual exposure.** The snapshot is end-to-end encrypted to the target
+device's key, so the relay never sees its content — but its **size and timing**
+leak roughly how many contacts an account has, in one burst right after a
+pairing. Padding and spreading that burst are not implemented.
 
 ### Gerätekopplung (Device-Linking)
 

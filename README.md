@@ -85,12 +85,15 @@ current with the code.
 | Multi-device: master identity + cross-signed device certs | ✅ |
 | Device linking (SAS), per-device sessions, revocation | ✅ |
 | Self-sync of *sent* messages to your own devices | ✅ |
-| **Link initial-sync** (profile + contacts + history → new device) | 🚧 in progress |
+| **Link initial-sync**: profile + contacts land on a newly linked device | ✅ |
+| Reliable inbound to a linked device (ack-driven device-list re-gossip) | ✅ |
+| Link initial-sync: full chat **history** to a linked device | 🚧 [#1](https://github.com/PropagandaPand/SCYTALE/issues/1) |
+| Device management (see / remove linked devices, device names) | 🚧 [#2](https://github.com/PropagandaPand/SCYTALE/issues/2) |
 | Groups × devices (a group message reaching a member's 2nd device) | ⏳ deferred |
 
-Because a linked device does not yet receive your existing profile, contacts and
-history, it currently looks empty even though it is cryptographically the same
-account. Closing that gap is the active work.
+A newly linked device now pulls your profile and contact list from the primary,
+so it is recognisably your account rather than an empty shell. Chat history does
+not travel yet — that is the next piece of work.
 
 ## Development
 

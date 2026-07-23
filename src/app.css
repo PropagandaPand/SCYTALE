@@ -2374,6 +2374,19 @@ select {
   font-size: 12.5px;
   line-height: 1.35;
   opacity: 0.92;
+  cursor: pointer; /* tap to jump to the quoted message */
+}
+/* Brief ripple on the bubble a reply points at, after the smooth-scroll lands. */
+.bubble.quote-flash {
+  animation: quote-flash 1.2s var(--ease-out);
+}
+@keyframes quote-flash {
+  0% {
+    box-shadow: 0 0 0 0 rgba(18, 164, 136, 0.55);
+  }
+  100% {
+    box-shadow: 0 0 0 9px rgba(18, 164, 136, 0);
+  }
 }
 .bq-who {
   font-weight: 600;

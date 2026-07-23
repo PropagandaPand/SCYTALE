@@ -132,8 +132,10 @@ const MAX_REC_SECONDS = 180;
 // speech and puts the full 180 s at roughly 540 KB, inside the cap.
 const VOICE_BITS_PER_SECOND = 24_000;
 // Erst-Sync sizing: keeps a snapshot comfortably under MAX_ATTACH without splitting.
-const REPLY_MAX = 72; // px a bubble can be dragged right before it stops moving
+const SWIPE_SLOP = 8; // px of travel before the drag commits to an axis (horizontal vs scroll)
 const REPLY_TRIGGER = 52; // px of drag that opens a reply on release
+const REPLY_MAX = 96; // soft ceiling; past the trigger the bubble rubber-bands, never a hard wall
+const REPLY_DAMP = 0.35; // resistance applied to travel beyond the trigger
 const ROSTER_MAX = 512; // metadata-only entries, ~250 B each
 const AVATAR_IMPORT_CAP = 96 * 1024; // decoded-ish ceiling for a carried avatar
 const HISTORY_CHUNK_BYTES = 64 * 1024; // per history frame; measured in UTF-8 BYTES
@@ -342,7 +344,13 @@ export function Messenger({ dek, onLock }: Props) {
   // A sticker tapped in a chat, shown big with the option to keep it.
   const [stickerZoom, setStickerZoom] = useState<{ mime: string; dataB64: string } | null>(null);
   const [replyTo, setReplyTo] = useState<Quote | null>(null); // message being answered
-  const swipeReplyRef = useRef<{ mid: string; x: number; y: number; el: HTMLElement } | null>(null);
+  const swipeReplyRef = useRef<{
+    mid: string;
+    x: number;
+    y: number;
+    el: HTMLElement;
+    lock: 'h' | 'v' | null; // committed drag axis; decided once, then never re-checked
+  } | null>(null);
   const [backupMode, setBackupMode] = useState<'export' | 'import' | null>(null);
   // ── Device linking ────────────────────────────────────────────────
   // 'menu'  : choose join-as-new vs add-a-device
@@ -426,27 +434,37 @@ export function Messenger({ dek, onLock }: Props) {
   }
   function onBubblePointerDown(e: React.PointerEvent<HTMLDivElement>, m: ChatMessage) {
     if (!m.mid) return; // nothing to link a reply to
-    swipeReplyRef.current = { mid: m.mid, x: e.clientX, y: e.clientY, el: e.currentTarget };
-    e.currentTarget.style.transition = 'none'; // follow the finger 1:1 while dragging
-    // Capture so move/up keep firing on this bubble even as the pointer leaves its
-    // (small) bounds while dragging right — otherwise the drag freezes part-way.
-    try {
-      e.currentTarget.setPointerCapture(e.pointerId);
-    } catch {
-      /* not fatal — capture is a nicety, the drag still works without it */
-    }
+    // Don't touch transition/transform yet — wait until the drag commits to the
+    // horizontal axis, so a tap or a vertical scroll leaves the bubble untouched.
+    swipeReplyRef.current = { mid: m.mid, x: e.clientX, y: e.clientY, el: e.currentTarget, lock: null };
   }
   function onBubblePointerMove(e: React.PointerEvent<HTMLDivElement>) {
     const st = swipeReplyRef.current;
     if (!st) return;
     const dx = e.clientX - st.x;
     const dy = e.clientY - st.y;
-    if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 6) {
-      resetSwipe(st.el); // vertical intent → let the chat scroll
-      swipeReplyRef.current = null;
-      return;
+    // Decide the axis ONCE, after a little slop, then never re-check it — so a small
+    // vertical wobble mid-drag can't abort a horizontal reply gesture (the old bug).
+    if (st.lock === null) {
+      if (Math.abs(dx) < SWIPE_SLOP && Math.abs(dy) < SWIPE_SLOP) return; // too early to tell
+      if (Math.abs(dy) > Math.abs(dx)) {
+        swipeReplyRef.current = null; // vertical intent → hand it to the native scroll
+        return;
+      }
+      st.lock = 'h';
+      st.el.style.transition = 'none'; // now follow the finger 1:1
+      try {
+        // Capture so move/up keep firing even once the pointer leaves the bubble.
+        st.el.setPointerCapture(e.pointerId);
+      } catch {
+        /* capture is a nicety; the drag still works without it */
+      }
     }
-    const t = Math.max(0, Math.min(REPLY_MAX, dx)); // drag RIGHT only
+    if (st.lock !== 'h') return;
+    // 1:1 up to the trigger, then rubber-band with resistance instead of a hard wall.
+    let t = Math.max(0, dx);
+    if (t > REPLY_TRIGGER) t = REPLY_TRIGGER + (t - REPLY_TRIGGER) * REPLY_DAMP;
+    t = Math.min(t, REPLY_MAX);
     st.el.style.transform = `translateX(${t}px)`;
     st.el.style.setProperty('--reply-progress', String(Math.min(1, t / REPLY_TRIGGER)));
   }
@@ -454,15 +472,29 @@ export function Messenger({ dek, onLock }: Props) {
     const st = swipeReplyRef.current;
     if (!st) return;
     const dx = e.clientX - st.x;
-    resetSwipe(st.el); // springs back to rest
+    const fire = st.lock === 'h' && dx > REPLY_TRIGGER;
+    if (st.lock === 'h') resetSwipe(st.el); // springs back to rest
     swipeReplyRef.current = null;
-    if (dx > REPLY_TRIGGER) setReplyTo(quoteFrom(m));
+    if (fire) setReplyTo(quoteFrom(m));
   }
   function clearBubbleSwipe() {
     if (swipeReplyRef.current) {
       resetSwipe(swipeReplyRef.current.el);
       swipeReplyRef.current = null;
     }
+  }
+  // Tapping a reply's quoted preview smooth-scrolls the chat to the original
+  // message and flashes it. No-op if the original isn't in the loaded log.
+  function scrollToQuoted(mid: string | undefined) {
+    if (!mid) return;
+    const container = document.getElementById('msgs');
+    const target = container?.querySelector<HTMLElement>(`[data-mid="${CSS.escape(mid)}"]`);
+    if (!target) return;
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    target.classList.remove('quote-flash');
+    void target.offsetWidth; // reflow so the animation restarts on repeat taps
+    target.classList.add('quote-flash');
+    window.setTimeout(() => target.classList.remove('quote-flash'), 1200);
   }
 
   async function appendMessage(roomId: string, msg: ChatMessage) {
@@ -3347,6 +3379,7 @@ export function Messenger({ dek, onLock }: Props) {
           {msgs.map((m, i) => (
             <div
               key={`${m.ts}-${i}`}
+              data-mid={m.mid}
               className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file && isSticker(m.file) ? ' is-sticker' : m.file && (m.file.mime.startsWith('image/') || m.file.mime.startsWith('video/')) ? ' has-file' : ''}`}
               onPointerDown={(e) => onBubblePointerDown(e, m)}
               onPointerMove={onBubblePointerMove}
@@ -3354,7 +3387,12 @@ export function Messenger({ dek, onLock }: Props) {
               onPointerCancel={clearBubbleSwipe}
             >
               {m.reply && (
-                <div className="bubble-quote">
+                <div
+                  className="bubble-quote"
+                  role="button"
+                  title="Zur Nachricht springen"
+                  onClick={() => scrollToQuoted(m.reply?.mid)}
+                >
                   {(m.reply.mine || m.reply.sender) && <span className="bq-who">{m.reply.mine ? 'Du' : m.reply.sender}</span>}
                   <span className="bq-text">{m.reply.text || '📎 Anhang'}</span>
                 </div>
@@ -3455,6 +3493,7 @@ export function Messenger({ dek, onLock }: Props) {
           {msgs.map((m, i) => (
             <div
               key={`${m.ts}-${i}`}
+              data-mid={m.mid}
               className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file && isSticker(m.file) ? ' is-sticker' : m.file && (m.file.mime.startsWith('image/') || m.file.mime.startsWith('video/')) ? ' has-file' : ''}`}
               onPointerDown={(e) => onBubblePointerDown(e, m)}
               onPointerMove={onBubblePointerMove}
@@ -3463,7 +3502,12 @@ export function Messenger({ dek, onLock }: Props) {
             >
               {!m.mine && m.sender && <div className="bubble-sender">{m.sender}</div>}
               {m.reply && (
-                <div className="bubble-quote">
+                <div
+                  className="bubble-quote"
+                  role="button"
+                  title="Zur Nachricht springen"
+                  onClick={() => scrollToQuoted(m.reply?.mid)}
+                >
                   {(m.reply.mine || m.reply.sender) && <span className="bq-who">{m.reply.mine ? 'Du' : m.reply.sender}</span>}
                   <span className="bq-text">{m.reply.text || '📎 Anhang'}</span>
                 </div>

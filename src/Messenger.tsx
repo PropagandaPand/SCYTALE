@@ -28,6 +28,7 @@ import {
   type Bytes,
   type IdentityKeys,
   type SasResult,
+  type DeviceList,
 } from './crypto';
 import {
   startLinkOnN,
@@ -57,6 +58,7 @@ import {
   reconnectContact,
   migrateContactRoomId,
   applyDeviceListUpdate,
+  mergeRosterEntry,
   masterKeyB64,
   sendDeviceList,
   MasterChangedError,
@@ -66,6 +68,8 @@ import {
   computeRoomId,
   computeMasterRoomId,
   type Contact,
+  type BootstrapPart,
+  type RosterEntry,
   type MessageContent,
   type GroupInvite,
   type PreKeyLookup,
@@ -92,6 +96,13 @@ import {
   MAX_STICKERS,
   type Sticker,
 } from './lib/stickers';
+import {
+  loadBootstrapApplied,
+  saveBootstrapApplied,
+  loadBootstrapRequest,
+  saveBootstrapRequest,
+  type BootstrapRequest,
+} from './lib/bootstrap';
 import { pushSupported, enablePush, disablePush, currentSubscription } from './lib/push';
 import { loadMessages, saveMessages, clearMessages, aggregateDelivery, hasMessage, type ChatMessage, type DeviceDelivery } from './lib/messages';
 import { RelayClient, type RelayStatus } from './lib/relay';
@@ -110,6 +121,9 @@ import {
 
 const MAX_ATTACH = 600 * 1024; // inline cap — keeps the WS frame under Cloudflare's ~1 MiB limit
 const MAX_REC_SECONDS = 180;
+// Erst-Sync sizing: keeps a snapshot comfortably under MAX_ATTACH without splitting.
+const ROSTER_MAX = 512; // metadata-only entries, ~250 B each
+const AVATAR_IMPORT_CAP = 96 * 1024; // decoded-ish ceiling for a carried avatar
 
 function pickAudioMime(): string {
   const cands = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
@@ -248,6 +262,16 @@ export function Messenger({ dek, onLock }: Props) {
   const myProfileRef = useRef<MyProfile>({});
   const profileSentRef = useRef<Set<string>>(new Set());
   const retiredMastersRef = useRef<Set<string>>(new Set()); // global master denylist, loaded at boot
+  // ── Erst-Sync (link initial state) ──────────────────────────────────
+  // Bootstrap ids already imported on THIS device — the idempotency marker, so a
+  // re-delivered snapshot is a no-op. Written LAST when applying (crash → the
+  // idempotent merge just re-runs on re-delivery).
+  const bootstrapAppliedRef = useRef<Set<string>>(new Set());
+  // N's pending PULL: after installGrant we keep asking P for the snapshot until
+  // one arrives. Persisted so a reload keeps asking.
+  const bootstrapRequestRef = useRef<BootstrapRequest | null>(null);
+  // My own current device list — the (epoch, version) peers must acknowledge.
+  const ownListRef = useRef<DeviceList | null>(null);
   const groupsRef = useRef<Group[]>([]);
   // Buffered group messages carry the AUTHENTICATED sender key so the membership
   // check can run on flush (once we have the roster from the invite).
@@ -539,7 +563,10 @@ export function Messenger({ dek, onLock }: Props) {
       contactsRef.current = [...contactsRef.current, c];
     }
     const ownList = await loadOrCreateOwnDeviceList(dek, id, ownSpkPublic(pre));
-    if (ownList) await applyDeviceListUpdate(c, ownList, retiredMastersRef.current);
+    if (ownList) {
+      ownListRef.current = ownList; // the (epoch, version) peers must acknowledge
+      await applyDeviceListUpdate(c, ownList, retiredMastersRef.current);
+    }
     setMultiDevice((ownList?.devices.length ?? 1) > 1);
     await saveContact(dek, c);
     return c;
@@ -565,6 +592,123 @@ export function Messenger({ dek, onLock }: Props) {
       connectDeviceInbox(room);
       relaysRef.current.get(room)?.send(d.sealed, randomMid());
     }
+  }
+
+  // ── Erst-Sync: the snapshot that makes a linked device a real 1:1 ─────────
+  // Sizing: an avatar is capped at AVATAR_IMPORT_CAP and the roster at ROSTER_MAX
+  // metadata-only entries (~250 B each), so a snapshot stays well under MAX_ATTACH
+  // — no splitting needed at this stage (history, which does need it, is deferred).
+
+  /** Send every delivery of a fan-out to its device inbox. */
+  async function dispatchDeliveries(deliveries: { deviceSignPub: Bytes; sealed: Bytes }[]) {
+    for (const d of deliveries) {
+      const room = await inboxRoom(d.deviceSignPub);
+      connectDeviceInbox(room);
+      relaysRef.current.get(room)?.send(d.sealed, randomMid());
+    }
+  }
+
+  /**
+   * P side: answer a linked device's PULL with the account snapshot, over the SELF
+   * contact (authenticated as coming from my own master) and fanned to exactly ONE
+   * device — the requester. METADATA ONLY: no ratchet, no bundle, no device list,
+   * so a substituted device gains no send capability to my contact graph.
+   */
+  async function sendBootstrapTo(targetSignPub: Bytes, bid: string) {
+    const id = identityRef.current;
+    if (!id || !isPrimaryDevice(id)) return; // only the primary answers a pull
+    const self = await ensureSelfContact();
+    if (!self) return;
+    const prof = myProfileRef.current;
+    const avatar = prof.avatarB64 && prof.avatarB64.length <= AVATAR_IMPORT_CAP ? prof.avatarB64 : undefined;
+    const contacts: RosterEntry[] = contactsRef.current
+      .filter((c) => !c.hidden && !c.staleIdentity && !bytesEqual(c.peerMasterPub, id.master.publicKey))
+      .slice(0, ROSTER_MAX)
+      .map((c) => ({
+        pm: c.peerMasterPub,
+        pe: c.peerEpoch,
+        psp: c.peerSignPub,
+        pdp: c.peerDhPub,
+        nick: c.nickname ?? null,
+        pn: c.peerName ?? null,
+        vf: c.verified === true, // a SUGGESTION on the far side, never adopted blindly
+      }));
+    const parts: BootstrapPart[] = [
+      { t: 'profile', name: prof.name, avatar },
+      { t: 'roster', contacts },
+    ];
+    const content: MessageContent = { kind: 'bootstrap', bid, parts };
+    const { deliveries } = await enqueueInbox(async () => {
+      const r = await fanoutDeliveries(id, self, content, randomMid(), id.sign.publicKey, targetSignPub);
+      await saveContact(dek, self);
+      return r;
+    });
+    await dispatchDeliveries(deliveries);
+  }
+
+  /**
+   * N side: ask my primary for the snapshot. PULL rather than an eager push at
+   * link time, because a push would arrive before this device has installed its
+   * identity — it would be acked and lost. Safe to repeat: the requestId doubles
+   * as the snapshot's idempotency key.
+   */
+  async function requestBootstrap() {
+    const id = identityRef.current;
+    if (!id || isPrimaryDevice(id)) return; // only a linked device pulls
+    const req = bootstrapRequestRef.current;
+    if (!req || !req.pending) return;
+    const self = await ensureSelfContact();
+    if (!self || !self.peerDeviceList || self.peerDeviceList.devices.length < 2) return;
+    const content: MessageContent = { kind: 'bootreq', requestId: req.requestId };
+    const { deliveries } = await enqueueInbox(async () => {
+      const r = await fanoutDeliveries(id, self, content, randomMid(), id.sign.publicKey);
+      await saveContact(dek, self);
+      return r;
+    });
+    await dispatchDeliveries(deliveries);
+  }
+
+  /**
+   * N side: apply a snapshot from my primary. Idempotent via `bid`. Every merge
+   * only FILLS GAPS — anything this device already pinned or verified wins, and
+   * `verified` is never adopted from the wire (only suggested).
+   */
+  async function applyBootstrapIfNew(bid: string, parts: BootstrapPart[]) {
+    const id = identityRef.current;
+    if (!id) return;
+    if (bootstrapAppliedRef.current.has(bid)) return; // already imported
+    const myMaster = asMasterPub(id.master.publicKey);
+    for (const p of parts) {
+      if (p.t === 'profile') {
+        // Gap-fill: never overwrite a name/avatar this device already has.
+        const cur = myProfileRef.current;
+        const avatar = p.avatar && p.avatar.length <= AVATAR_IMPORT_CAP ? p.avatar : undefined;
+        const next: MyProfile = { name: cur.name ?? p.name, avatarB64: cur.avatarB64 ?? avatar };
+        if (next.name !== cur.name || next.avatarB64 !== cur.avatarB64) {
+          myProfileRef.current = next;
+          await saveProfile(dek, next);
+          setProfileName(next.name ?? '');
+          setMyAvatarB64(next.avatarB64 ?? '');
+        }
+      } else if (p.t === 'roster') {
+        for (const entry of p.contacts) {
+          const merged = await mergeRosterEntry(contactsRef.current, entry, myMaster, retiredMastersRef.current);
+          if (!merged) continue; // self / denylisted / room collision
+          if (!contactsRef.current.includes(merged)) contactsRef.current = [...contactsRef.current, merged];
+          await saveContact(dek, merged);
+        }
+      }
+    }
+    // Marker LAST: a crash before this just replays the (idempotent) merge.
+    bootstrapAppliedRef.current.add(bid);
+    await saveBootstrapApplied(dek, bootstrapAppliedRef.current);
+    const req = bootstrapRequestRef.current;
+    if (req?.pending) {
+      bootstrapRequestRef.current = { ...req, pending: false }; // stop asking
+      await saveBootstrapRequest(dek, bootstrapRequestRef.current);
+    }
+    commitMessages();
+    bump();
   }
 
   // When a peer device is revoked, sweep this conversation's still-open delivery
@@ -829,6 +973,14 @@ export function Messenger({ dek, onLock }: Props) {
         if (!c.ownMasterPub) c.ownMasterPub = preSwapMaster; // the master the peer still pins us under
         await saveContact(dek, c);
       }
+      // Erst-Sync: ask the primary for the account snapshot (profile + contacts), so
+      // this device becomes a real 1:1 rather than an empty shell with the right
+      // identity. A PULL — an eager push from P would arrive before this device had
+      // installed its identity and be acked-and-lost. Persisted, so we keep asking
+      // (boot, reconnect) until a snapshot actually lands.
+      bootstrapRequestRef.current = { requestId: randomMid(), pending: true };
+      await saveBootstrapRequest(dek, bootstrapRequestRef.current);
+      void requestBootstrap();
       resetLink();
       setLinkView('done');
       bump();
@@ -1140,6 +1292,28 @@ export function Messenger({ dek, onLock }: Props) {
             unreadRef.current[displayRoom] = (unreadRef.current[displayRoom] ?? 0) + 1;
           }
         }
+      } else if (content.kind === 'bootreq') {
+        // A linked device of MINE pulls the account snapshot. receiveEnvelope already
+        // refuses this frame from a non-self contact; re-checking here is defence in
+        // depth. Only the PRIMARY answers, so sibling devices don't all reply to one
+        // request. TERMINAL: never appended to a conversation.
+        if (!bytesEqual(contact.peerMasterPub, id.master.publicKey)) {
+          console.warn('[recv] bootreq von einem Nicht-Selbst-Kontakt — verworfen.');
+        } else if (isPrimaryDevice(id)) {
+          // `dev` is a resolution hint only; for a prekey the device is authenticated
+          // in the header. Either way the reply is sealed to that device's key.
+          const requester = env.type === 'prekey' ? env.x3dh.identitySignPub : (env.dev ?? contact.peerSignPub);
+          void sendBootstrapTo(requester, content.requestId);
+        }
+      } else if (content.kind === 'bootstrap') {
+        // The account snapshot from my primary: profile + roster. Self-gated,
+        // TERMINAL (never rendered as a message, never re-fanned), and idempotent
+        // via `bid` so a re-delivery imports nothing twice.
+        if (!bytesEqual(contact.peerMasterPub, id.master.publicKey)) {
+          console.warn('[recv] bootstrap von einem Nicht-Selbst-Kontakt — verworfen.');
+        } else {
+          await applyBootstrapIfNew(content.bid, content.parts);
+        }
       } else if (mid && hasMessage(messagesRef.current[contact.roomId] ?? [], mid, false)) {
         // DEDUP on the E2E mid, WITHIN the received direction (mine=false): one peer
         // message can reach this device via direct fan-out AND (with receive-sync) a
@@ -1234,6 +1408,10 @@ export function Messenger({ dek, onLock }: Props) {
       makeQr(link).then(setQrDataUrl).catch(() => undefined);
 
       retiredMastersRef.current = await loadRetiredMasters(dek);
+      // Erst-Sync state: which snapshots this device already imported, and whether
+      // it is still waiting for one (a linked device keeps asking across reloads).
+      bootstrapAppliedRef.current = await loadBootstrapApplied(dek);
+      bootstrapRequestRef.current = await loadBootstrapRequest(dek);
       contactsRef.current = await loadContacts(dek);
       // Seed the inbox queue with the whole vault load + one-time master migration,
       // so every queued/live message the relay delivers on connect is processed
@@ -1251,6 +1429,9 @@ export function Messenger({ dek, onLock }: Props) {
         commitMessages();
         bump();
       });
+      // Still waiting for the account snapshot after a link? Ask again now that the
+      // relay is up. No-op on the primary and once a snapshot has been applied.
+      void bootLoad.then(() => requestBootstrap());
 
       connectInbox(await inboxRoom(id.sign.publicKey));
       // Restore an existing push subscription so the DO keeps waking this device.

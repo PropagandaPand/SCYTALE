@@ -11,6 +11,7 @@ import {
 import { cryptoSelfTest } from './lib/selftest';
 import { Messenger } from './Messenger';
 import { ReloadPrompt } from './ReloadPrompt';
+import { BiometricProbe } from './BiometricProbe';
 import { IconLock } from './icons';
 
 type Phase = 'loading' | 'create' | 'unlock' | 'open';
@@ -28,6 +29,7 @@ export function App() {
   const [lockState, setLockState] = useState<LockState>('idle');
   const [lockRemaining, setLockRemaining] = useState(0);
   const [dek, setDek] = useState<CryptoKey | null>(null);
+  const [showProbe, setShowProbe] = useState(false); // temporary: WebAuthn/PRF capability test
   const lockTimer = useRef<number | null>(null);
 
   function say(msg: string, kind: StatusKind = '') {
@@ -182,10 +184,13 @@ export function App() {
           <span className="d" />
           Argon2id · 256 MiB · non-extractable DEK
         </div>
-        {/* Temporary: reach the WebAuthn/PRF probe from inside the installed PWA
-            (a standalone PWA has no address bar). Remove once biometrics is decided. */}
-        <a className="lock-probe" href="/prf-probe.html">Face ID / Touch ID testen</a>
+        {/* Temporary: in-app WebAuthn/PRF probe (a standalone PWA has no address bar,
+            and a stray .html can be swallowed by the SW). Remove once biometrics is decided. */}
+        <button type="button" className="lock-probe" onClick={() => setShowProbe(true)}>
+          Face ID / Touch ID testen
+        </button>
       </div>
+      {showProbe && <BiometricProbe onClose={() => setShowProbe(false)} />}
       <ReloadPrompt />
     </>
   );

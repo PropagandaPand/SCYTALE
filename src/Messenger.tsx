@@ -28,6 +28,7 @@ import {
   type Bytes,
   type IdentityKeys,
   type SasResult,
+  isNewerDeviceList,
   type DeviceList,
 } from './crypto';
 import {
@@ -61,6 +62,7 @@ import {
   mergeRosterEntry,
   masterKeyB64,
   sendDeviceList,
+  sendListAck,
   MasterChangedError,
   RetiredIdentityError,
   RevokedDeviceError,
@@ -124,6 +126,7 @@ const MAX_REC_SECONDS = 180;
 // Erst-Sync sizing: keeps a snapshot comfortably under MAX_ATTACH without splitting.
 const ROSTER_MAX = 512; // metadata-only entries, ~250 B each
 const AVATAR_IMPORT_CAP = 96 * 1024; // decoded-ish ceiling for a carried avatar
+const GOSSIP_COOLDOWN_MS = 30_000; // don't re-offer my device list to the same peer more often
 
 function pickAudioMime(): string {
   const cands = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
@@ -272,6 +275,8 @@ export function Messenger({ dek, onLock }: Props) {
   const bootstrapRequestRef = useRef<BootstrapRequest | null>(null);
   // My own current device list — the (epoch, version) peers must acknowledge.
   const ownListRef = useRef<DeviceList | null>(null);
+  // Per-contact throttle for re-offering my device list (roomId → last attempt).
+  const listGossipAttemptRef = useRef<Map<string, { epoch: number; version: number; at: number }>>(new Map());
   const groupsRef = useRef<Group[]>([]);
   // Buffered group messages carry the AUTHENTICATED sender key so the membership
   // check can run on flush (once we have the roster from the invite).
@@ -407,7 +412,12 @@ export function Messenger({ dek, onLock }: Props) {
     sendRoomRef.current.set(contact.roomId, room);
     if (relaysRef.current.has(room)) return;
     const client = new RelayClient(room, {
-      onStatus: (s) => setStatuses((prev) => ({ ...prev, [contact.roomId]: s })),
+      onStatus: (s) => {
+        setStatuses((prev) => ({ ...prev, [contact.roomId]: s }));
+        // Coming back online is the strongest moment to re-offer my device list:
+        // a peer that was offline when I linked a device learns it here.
+        if (s === 'open') void ensureListGossiped(contact);
+      },
       onAck: (mid) => markStatus(mid, 'sent'),
       onNack: (mid) => markStatus(mid, 'failed', 'Nicht zugestellt — das Postfach des Empfängers ist voll.'),
     });
@@ -666,6 +676,32 @@ export function Messenger({ dek, onLock }: Props) {
       return r;
     });
     await dispatchDeliveries(deliveries);
+  }
+
+  /**
+   * Offer MY current device list to one peer — but only while their acknowledged
+   * (epoch, version) is behind it. This is what actually makes a newly linked
+   * device reachable: the one-shot gossip at link time misses every peer that was
+   * offline, and those peers would then keep sending to the primary only, forever.
+   * Throttled per contact so a chatty conversation can't turn into a gossip storm.
+   */
+  async function ensureListGossiped(contact: Contact) {
+    const id = identityRef.current;
+    const list = ownListRef.current;
+    if (!id || !list) return;
+    if (contact.hidden || contact.staleIdentity || !hasSession(contact)) return;
+    const acked = contact.peerAckedListEV;
+    if (acked && !isNewerDeviceList({ epoch: list.epoch, version: list.version }, acked)) return; // they're current
+    const last = listGossipAttemptRef.current.get(contact.roomId);
+    if (last && last.epoch === list.epoch && last.version === list.version && Date.now() - last.at < GOSSIP_COOLDOWN_MS) {
+      return; // asked recently for this very list — let the ack arrive
+    }
+    listGossipAttemptRef.current.set(contact.roomId, { epoch: list.epoch, version: list.version, at: Date.now() });
+    try {
+      await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendDeviceList(id, contact, list)));
+    } catch {
+      /* unreachable right now — the next trigger retries */
+    }
   }
 
   /**
@@ -1250,7 +1286,35 @@ export function Messenger({ dek, onLock }: Props) {
           // targets a later-linked sibling as well (Review fund 4).
           if (bytesEqual(contact.peerMasterPub, id.master.publicKey)) {
             await adoptDeviceList(dek, id, content.list);
+            ownListRef.current = content.list;
             setMultiDevice(content.list.devices.length > 1);
+          }
+        }
+        // ACK UNCONDITIONALLY — also when the list was NOT newer and applyDevice-
+        // ListUpdate returned false. The sender re-offers until our ack catches up;
+        // staying silent on an already-known list would keep it offering forever.
+        // The ack names the version we actually hold now.
+        if (!bytesEqual(contact.peerMasterPub, id.master.publicKey)) {
+          const held = contact.peerDeviceList ?? content.list;
+          try {
+            await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendListAck(id, contact, held.epoch, held.version)));
+          } catch {
+            /* best effort — they will re-offer and we ack again */
+          }
+        }
+      } else if (content.kind === 'listack') {
+        // A peer tells me which (epoch, version) of MY list they hold. Deliberately
+        // NOT self-gated: an ack about my own list is legitimate from anyone I sent
+        // it to, and it carries no state beyond moving a watermark FORWARD.
+        // TERMINAL: never rendered, never re-dispatched.
+        const mine = ownListRef.current;
+        const claimed = { epoch: content.epoch, version: content.version };
+        if (mine && !isNewerDeviceList(claimed, { epoch: mine.epoch, version: mine.version })) {
+          // Ignore an ack from the FUTURE (a version I never published) — it could
+          // otherwise silence the gossip for a list the peer does not actually have.
+          if (!contact.peerAckedListEV || isNewerDeviceList(claimed, contact.peerAckedListEV)) {
+            contact.peerAckedListEV = claimed;
+            await saveContact(dek, contact);
           }
         }
       } else if (content.kind === 'rotation') {
@@ -1328,10 +1392,30 @@ export function Messenger({ dek, onLock }: Props) {
         if (!(viewRef.current === 'chat' && activeRoomRef.current === contact.roomId)) {
           unreadRef.current[contact.roomId] = (unreadRef.current[contact.roomId] ?? 0) + 1;
         }
+        // Stopgap while this peer has not yet learned my other devices: mirror what
+        // I RECEIVE to them, so a freshly linked device doesn't miss incoming
+        // messages during the propagation window. Gated on the peer being BEHIND my
+        // current list — once they ack it they fan out to my devices themselves, and
+        // this stops (no permanent doubling of inbound traffic). Dedup by
+        // (mid, received) keeps it from showing twice next to their own copy.
+        const myList = ownListRef.current;
+        const peerBehind =
+          !!myList &&
+          (!contact.peerAckedListEV ||
+            isNewerDeviceList({ epoch: myList.epoch, version: myList.version }, contact.peerAckedListEV));
+        if (
+          peerBehind &&
+          mid &&
+          !bytesEqual(contact.peerMasterPub, id.master.publicKey) &&
+          (content.kind === 'text' || content.kind === 'file')
+        ) {
+          void syncToOwnDevices(contact.peerMasterPub, 'recv', mid, Date.now(), content);
+        }
       }
       await saveContact(dek, contact);
       if (wasNew && prekeysRef.current) await savePreKeys(dek, prekeysRef.current);
       void ensureProfileSent(contact);
+      void ensureListGossiped(contact); // keep peers current on MY devices
       bump();
     } catch {
       // Decrypt failure (e.g. a duplicate re-delivery) — drop it, don't spam UI.
@@ -1423,6 +1507,7 @@ export function Messenger({ dek, onLock }: Props) {
         await migrateContactsToMaster();
         await ensureSelfContact(); // hidden self-contact for self-sync; refresh my device list
         for (const c of contactsRef.current) await connectSend(c);
+        for (const c of contactsRef.current) await ensureListGossiped(c);
         const gs = await loadGroups(dek);
         groupsRef.current = gs;
         for (const g of gs) messagesRef.current[g.id] = await loadMessages(dek, g.id);
@@ -2398,6 +2483,21 @@ export function Messenger({ dek, onLock }: Props) {
     setError('');
     bump();
   }
+
+  // Periodic safety net: re-offer my device list to peers still behind, and re-ask
+  // for the account snapshot while this device is still waiting for one. Both are
+  // no-ops once everyone is current. Paused while the tab is hidden — a background
+  // tab should not spend battery on gossip nobody is waiting for.
+  useEffect(() => {
+    const t = window.setInterval(() => {
+      if (document.hidden) return;
+      void requestBootstrap();
+      for (const c of contactsRef.current) void ensureListGossiped(c);
+    }, 60_000);
+    return () => window.clearInterval(t);
+    // Reads everything through refs, so it never goes stale.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Full-screen image viewer (avatars, later chat images). Tap anywhere closes.
   const lightbox = zoomImg ? (

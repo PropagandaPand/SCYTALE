@@ -1130,6 +1130,20 @@ export async function sendDeviceList(me: IdentityKeys, contact: Contact, list: D
   return sendContent(me, contact, { kind: 'devlist', list });
 }
 
+/** Acknowledge the (epoch, version) of a peer's device list we now hold. The
+ *  sender keeps re-offering its list until this ack catches up, which is what
+ *  makes a newly linked device reliably reachable for peers that were offline
+ *  when it was added. Carries no state a peer could abuse — it only ever moves
+ *  the sender's per-contact watermark forward. */
+export async function sendListAck(
+  me: IdentityKeys,
+  contact: Contact,
+  epoch: number,
+  version: number,
+): Promise<Bytes> {
+  return sendContent(me, contact, { kind: 'listack', epoch, version });
+}
+
 /** Gossip a dual-signed master rotation to a contact that still pins our OLD
  *  master. Unlike the unproven previousMaster hint, this PROVES continuity, so
  *  the receiver's acceptRotation keeps `verified`. The producer (a co-signed

@@ -77,9 +77,10 @@ export async function decodeInitialHeader(o: InitialHeaderWire): Promise<Initial
  * this ONLY in the same release that ships the RECEIVE side of the new feature,
  * so `pv >= N` is a truthful "I can receive feature N".
  *
- *   1 = this envelope-versioning is present (no new content frames yet)
+ *   1 = envelope versioning present (no new content frames)
+ *   2 = can RECEIVE & reassemble chunked attachments (frame byte 14)
  */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 export type Envelope =
   | { type: 'prekey'; conv: string; x3dh: InitialMessageHeader; message: RatchetMessage; pv?: number }

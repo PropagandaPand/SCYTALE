@@ -106,7 +106,19 @@ import {
   saveBootstrapRequest,
   type BootstrapRequest,
 } from './lib/bootstrap';
-import { putAttachment, newAttachmentId, deleteAttachment, allAttachmentIds } from './lib/attachments';
+import {
+  putAttachment,
+  newAttachmentId,
+  deleteAttachment,
+  allAttachmentIds,
+  sealAndPutChunk,
+  storedChunkCount,
+  finalizeAttachment,
+  putRecvMarker,
+  getRecvMarker,
+  clearRecvMarker,
+  allRecvMarkerIds,
+} from './lib/attachments';
 import { pushSupported, enablePush, disablePush, currentSubscription } from './lib/push';
 import { loadMessages, saveMessages, clearMessages, allMessageRoomIds, aggregateDelivery, hasMessage, type ChatMessage, type DeviceDelivery, type FileRef, type Quote } from './lib/messages';
 import { RelayClient, type RelayStatus } from './lib/relay';
@@ -127,6 +139,13 @@ import {
 } from './icons';
 
 const MAX_ATTACH = 600 * 1024; // inline cap — keeps the WS frame under Cloudflare's ~1 MiB limit
+// Chunked-attachment RECEIVE caps (sanity bounds; the real flood limit is the relay
+// mailbox byte-cap, which rate-limits what a peer can push before we drain it).
+const RECV_MAX_BYTES = 30 * 1024 * 1024; // largest attachment we'll reassemble
+const RECV_MAX_CHUNKS = 800; // ceiling on a transfer's chunk count (bounds bookkeeping)
+const RECV_MAX_CHUNK_BYTES = 256 * 1024; // reject an over-large single chunk payload
+const MAX_CONCURRENT_RECV = 6; // cap simultaneous in-progress incoming transfers
+const RECV_TTL_MS = 24 * 60 * 60 * 1000; // abandoned incoming transfer (sender vanished) is swept after 24 h
 const MAX_REC_SECONDS = 180;
 // Voice bitrate. Without this the browser default (~128 kbps) makes 30 s of speech
 // ~480 KB, so a recording the UI happily allowed could not be sent — MAX_REC_SECONDS
@@ -539,6 +558,61 @@ export function Messenger({ dek, onLock }: Props) {
     messagesRef.current[roomId] = [...(messagesRef.current[roomId] ?? []), msg];
     commitMessages();
     await saveMessages(dek, roomId, messagesRef.current[roomId]);
+  }
+
+  // Receive one chunk of a large attachment (Stage 7b). A wire chunk is sealed and
+  // stored one-to-one as an attachment chunk, so the transfer is persisted as it
+  // arrives (crash-safe) and reassembled by getAttachmentBlob. On the last chunk the
+  // meta is committed and ONE message (keyed by the content-addressed tid) is
+  // appended. A storage-full error propagates so onInbox does NOT ack → the relay
+  // re-delivers the chunk. Terminal: a chunk never becomes a text bubble, is never
+  // self-synced/fanned. 1:1 only — a hidden (group-member) contact is not supported.
+  async function receiveChunk(contact: Contact, c: Extract<MessageContent, { kind: 'chunk' }>): Promise<void> {
+    if (contact.hidden) return; // groups excluded (W7) — drop (and ack)
+    // Validate BEFORE touching storage. A malformed/oversized descriptor is dropped.
+    if (!Number.isSafeInteger(c.total) || c.total < 1 || c.total > RECV_MAX_CHUNKS) return;
+    if (!Number.isSafeInteger(c.idx) || c.idx < 0 || c.idx >= c.total) return;
+    if (!Number.isSafeInteger(c.size) || c.size < 0 || c.size > RECV_MAX_BYTES) return;
+    if (c.data.length > RECV_MAX_CHUNK_BYTES) return;
+    // Already fully received (re-delivery after completion, or a crash-resume that
+    // already finished) → nothing to do.
+    if (hasMessage(messagesRef.current[contact.roomId] ?? [], c.tid, false)) return;
+
+    // First chunk of this transfer: register it (bounds concurrency, protects it from
+    // the orphan GC, enables resume). Later chunks trust the FIRST descriptor, so a
+    // peer can't change total/name mid-transfer.
+    let marker = await getRecvMarker(dek, c.tid);
+    if (!marker) {
+      if ((await allRecvMarkerIds()).length >= MAX_CONCURRENT_RECV) return; // too many in flight
+      marker = { total: c.total, name: c.name, mime: c.mime, size: c.size, ts: Date.now() };
+      await putRecvMarker(dek, c.tid, marker);
+    } else if (c.total !== marker.total) {
+      return; // inconsistent with the first chunk — drop
+    }
+
+    await sealAndPutChunk(dek, c.tid, c.idx, c.data); // may throw QuotaExceededError → no ack
+
+    if ((await storedChunkCount(c.tid)) >= marker.total) {
+      await finalizeAttachment(dek, c.tid, {
+        name: marker.name,
+        mime: marker.mime,
+        size: marker.size,
+        chunks: marker.total,
+      });
+      await clearRecvMarker(c.tid);
+      // Re-check dedup after the awaits — a concurrent path or resume must not double-append.
+      if (!hasMessage(messagesRef.current[contact.roomId] ?? [], c.tid, false)) {
+        await appendMessage(contact.roomId, {
+          mine: false,
+          ts: Date.now(),
+          mid: c.tid,
+          file: { name: marker.name, mime: marker.mime, attId: c.tid, size: marker.size },
+        });
+        if (!(viewRef.current === 'chat' && activeRoomRef.current === contact.roomId)) {
+          unreadRef.current[contact.roomId] = (unreadRef.current[contact.roomId] ?? 0) + 1;
+        }
+      }
+    }
   }
 
   // Serialize every inbox task (each queued/live message, and the boot migration
@@ -1707,6 +1781,10 @@ export function Messenger({ dek, onLock }: Props) {
         } else {
           await applyBootstrapIfNew(content.bid, content.parts);
         }
+      } else if (content.kind === 'chunk') {
+        // A piece of a large attachment: store it, and on the last chunk append the
+        // reassembled attachment. Terminal — never a bubble, never self-synced.
+        await receiveChunk(contact, content);
       } else if (mid && hasMessage(messagesRef.current[contact.roomId] ?? [], mid, false)) {
         // DEDUP on the E2E mid, WITHIN the received direction (mine=false): one peer
         // message can reach this device via direct fan-out AND (with receive-sync) a
@@ -1931,6 +2009,23 @@ export function Messenger({ dek, onLock }: Props) {
     const referenced = new Set<string>();
     for (const roomId of await allMessageRoomIds()) {
       for (const m of await loadMessages(dek, roomId)) if (m.file?.attId) referenced.add(m.file.attId);
+    }
+    // An in-progress INCOMING transfer is in-use, not an orphan — protect it. A stale
+    // one (sender vanished mid-transfer, marker older than the TTL) is dropped along
+    // with its partial chunks. A marker whose attachment already completed (referenced
+    // by a message) is just a leftover → clear it without touching the attachment.
+    for (const tid of await allRecvMarkerIds()) {
+      if (referenced.has(tid)) {
+        await clearRecvMarker(tid);
+        continue;
+      }
+      const marker = await getRecvMarker(dek, tid);
+      if (marker && Date.now() - marker.ts > RECV_TTL_MS) {
+        await clearRecvMarker(tid);
+        await deleteAttachment(tid);
+      } else {
+        referenced.add(tid); // live transfer — keep its chunks
+      }
     }
     for (const id of await allAttachmentIds()) if (!referenced.has(id)) await deleteAttachment(id);
   }

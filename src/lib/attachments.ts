@@ -42,6 +42,7 @@ export interface RecvMarker {
   name: string;
   mime: string;
   size: number; // expected plaintext bytes (validated against the cap before storing)
+  ts: number; // when the transfer started — a stale one (sender vanished) is swept
 }
 
 const metaKey = (id: string) => `att:${id}:meta`;

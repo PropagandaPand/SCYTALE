@@ -281,106 +281,13 @@ select {
   background: var(--verified);
   flex: none;
 }
-.lock-probe {
-  margin-top: 12px;
-  padding: 4px 8px;
-  background: none;
-  border: 0;
-  cursor: pointer;
-  font-family: var(--font-mono);
-  font-size: 10.5px;
+.lock-or {
+  margin: 4px 0;
+  text-align: center;
+  font-size: 11.5px;
   color: var(--faint);
-  opacity: 0.7;
+  letter-spacing: 0.02em;
 }
-.lock-probe:hover {
-  opacity: 1;
-}
-
-/* ── Temporary WebAuthn/PRF probe overlay ─────────────────────────────── */
-.probe {
-  position: fixed;
-  inset: 0;
-  z-index: 60;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: calc(env(safe-area-inset-top) + 18px) 16px calc(env(safe-area-inset-bottom) + 18px);
-  background: var(--bg);
-  overflow-y: auto;
-}
-.probe-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-.probe-title {
-  font-size: 17px;
-  font-weight: 600;
-}
-.probe-sub {
-  margin-top: 3px;
-  font-size: 12.5px;
-  color: var(--muted);
-}
-.probe-x {
-  flex: none;
-  width: 34px;
-  height: 34px;
-  border: 0;
-  border-radius: 9px;
-  background: var(--surface);
-  color: var(--text);
-  font-size: 20px;
-  line-height: 1;
-  cursor: pointer;
-}
-.probe-log {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.probe-row {
-  padding: 9px 11px;
-  border-radius: 8px;
-  background: var(--surface);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.probe-row.ok {
-  background: rgba(18, 164, 136, 0.14);
-  color: #7fe6c4;
-}
-.probe-row.fail {
-  background: rgba(210, 60, 60, 0.16);
-  color: #ff9b9b;
-}
-.probe-row.warn {
-  color: #e8c98a;
-}
-.probe-row.muted {
-  background: transparent;
-  color: var(--muted);
-  padding: 3px 11px;
-}
-.probe-row.verdict-ok,
-.probe-row.verdict-fail {
-  font-family: inherit;
-  font-size: 15px;
-  font-weight: 700;
-  padding: 14px;
-}
-.probe-row.verdict-ok {
-  background: rgba(18, 164, 136, 0.18);
-  color: #8ff0d0;
-}
-.probe-row.verdict-fail {
-  background: rgba(210, 60, 60, 0.18);
-  color: #ffb0b0;
-}
-
 /* ==== CONTACT LIST ==================================================== */
 .list {
   flex: 1;

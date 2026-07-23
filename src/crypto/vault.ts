@@ -31,6 +31,21 @@ export interface VaultHeader {
     iv: Uint8Array<ArrayBuffer>;
     ciphertext: Uint8Array<ArrayBuffer>;
   };
+  /**
+   * Optional biometric unlock: a SECOND wrap of the same random DEK, this time
+   * under a KEK derived from a WebAuthn PRF secret (Face ID / Touch ID) HKDF-salted
+   * with the device-bound secret. The DEK is unchanged; disk merely gains one more
+   * GCM copy that is useless without BOTH a live biometric UV on the passkey AND
+   * this device's device key — so at-rest security is preserved and the wrap does
+   * not travel with a cloud-synced passkey alone. Credential id and PRF salt are
+   * non-secret.
+   */
+  prf?: {
+    credentialId: Uint8Array<ArrayBuffer>;
+    salt: Uint8Array<ArrayBuffer>; // PRF eval input (per-vault random)
+    wrapIv: Uint8Array<ArrayBuffer>;
+    wrappedDek: Uint8Array<ArrayBuffer>; // AES-256-GCM(prfKek, rawDEK)
+  };
 }
 
 export class WrongPassphraseError extends Error {
@@ -102,6 +117,60 @@ async function unwrapDek(kek: CryptoKey, header: VaultHeader): Promise<CryptoKey
     { name: 'AES-GCM', iv: header.wrapIv },
     { name: 'AES-GCM', length: 256 },
     false, // DEK is non-extractable
+    ['encrypt', 'decrypt'],
+  );
+}
+
+// ── Biometric (WebAuthn PRF) unlock: a second wrap of the SAME DEK ──────────
+//
+// Enrollment needs the DEK in extractable form to re-wrap it under the PRF KEK.
+// The only holder of that is the passphrase KEK, so enabling biometrics requires
+// the passphrase once. None of this changes the DEK or the passphrase path.
+
+/** Re-derive the passphrase KEK for an existing header (for re-wrap operations). */
+export async function deriveHeaderKek(passphrase: string, header: VaultHeader): Promise<CryptoKey> {
+  const kekBytes = await deriveKekBytes(passphrase, header.salt, header.argon2);
+  return importKek(kekBytes);
+}
+
+/** Unwrap the DEK as an EXTRACTABLE key — used transiently at biometric enrollment
+ *  so the DEK can be re-wrapped under the PRF KEK. Throws if the KEK is wrong. */
+export async function unwrapDekExtractable(kek: CryptoKey, header: VaultHeader): Promise<CryptoKey> {
+  return crypto.subtle.unwrapKey(
+    'raw',
+    header.wrappedDek,
+    kek,
+    { name: 'AES-GCM', iv: header.wrapIv },
+    { name: 'AES-GCM', length: 256 },
+    true, // extractable, ONLY so wrapKey can re-wrap it below
+    ['encrypt', 'decrypt'],
+  );
+}
+
+/** Wrap an (extractable) DEK under a PRF-derived KEK. Returns the on-disk pieces. */
+export async function wrapDekUnder(
+  prfKek: CryptoKey,
+  extractableDek: CryptoKey,
+): Promise<{ wrapIv: Uint8Array<ArrayBuffer>; wrappedDek: Uint8Array<ArrayBuffer> }> {
+  const wrapIv = crypto.getRandomValues(new Uint8Array(IV_LEN));
+  const wrappedDek = new Uint8Array(
+    await crypto.subtle.wrapKey('raw', extractableDek, prfKek, { name: 'AES-GCM', iv: wrapIv }),
+  );
+  return { wrapIv, wrappedDek };
+}
+
+/** Unwrap the DEK from its PRF wrap into a NON-EXTRACTABLE working key. */
+export async function unwrapDekWithPrf(
+  prfKek: CryptoKey,
+  prf: NonNullable<VaultHeader['prf']>,
+): Promise<CryptoKey> {
+  return crypto.subtle.unwrapKey(
+    'raw',
+    prf.wrappedDek,
+    prfKek,
+    { name: 'AES-GCM', iv: prf.wrapIv },
+    { name: 'AES-GCM', length: 256 },
+    false, // working DEK is non-extractable, exactly like the passphrase path
     ['encrypt', 'decrypt'],
   );
 }

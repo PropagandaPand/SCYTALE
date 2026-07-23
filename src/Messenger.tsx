@@ -117,6 +117,8 @@ import { Identicon } from './Identicon';
 import { QrScanner } from './QrScanner';
 import { CropModal } from './CropModal';
 import { BackupModal } from './BackupModal';
+import { BiometricEnroll } from './BiometricEnroll';
+import { biometricAvailable, biometricEnrolled, disableBiometricUnlock } from './lib/vaultService';
 import { Attachment, LightboxImg } from './Attachment';
 import {
   IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach, IconMic, IconTrash, IconDots, IconGroup,
@@ -354,6 +356,9 @@ export function Messenger({ dek, onLock }: Props) {
     dx: number; // last horizontal travel, so a cancelled-but-far-enough drag still fires
   } | null>(null);
   const [backupMode, setBackupMode] = useState<'export' | 'import' | null>(null);
+  const [bioSupported, setBioSupported] = useState(false); // platform authenticator present
+  const [bioOn, setBioOn] = useState(false); // biometric unlock enrolled for this vault
+  const [bioEnroll, setBioEnroll] = useState(false); // enrollment modal open
   // ── Device linking ────────────────────────────────────────────────
   // 'menu'  : choose join-as-new vs add-a-device
   // 'qr'    : N shows its QR, waits for the offer
@@ -374,6 +379,13 @@ export function Messenger({ dek, onLock }: Props) {
   const swipeStart = useRef<{ x: number; y: number } | null>(null);
   const ackTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
+  useEffect(() => {
+    void (async () => {
+      const [avail, enrolled] = await Promise.all([biometricAvailable(), biometricEnrolled()]);
+      setBioSupported(avail);
+      setBioOn(enrolled);
+    })();
+  }, []);
   useEffect(() => {
     activeRoomRef.current = activeRoom;
   }, [activeRoom]);
@@ -3921,6 +3933,34 @@ export function Messenger({ dek, onLock }: Props) {
               <span className="setting-go"><IconChevron /></span>
             </button>
 
+            {bioSupported && (
+              <button
+                className="setting-row"
+                role="switch"
+                aria-checked={bioOn}
+                onClick={() => {
+                  if (bioOn) {
+                    if (confirm('Face ID / Touch ID entfernen? Der Tresor bleibt per Passphrase entsperrbar.')) {
+                      void disableBiometricUnlock()
+                        .then(() => setBioOn(false))
+                        .catch(() => {}); // header keeps prf → toggle stays on, which is the honest state
+                    }
+                  } else {
+                    setBioEnroll(true);
+                  }
+                }}
+              >
+                <span className="setting-ic"><IconLock size={15} /></span>
+                <span className="setting-tx">
+                  <span className="setting-title">Face ID / Touch ID</span>
+                  <span className="setting-sub">Entsperren ohne Passphrase — Schlüssel bleibt gleich</span>
+                </span>
+                <span className={`switch${bioOn ? ' on' : ''}`}>
+                  <span className="knob" />
+                </span>
+              </button>
+            )}
+
             <button className="setting-row" onClick={() => setBackupMode('export')}>
               <span className="setting-ic"><IconArchive /></span>
               <span className="setting-tx">
@@ -3941,6 +3981,15 @@ export function Messenger({ dek, onLock }: Props) {
           </div>
 
           {backupMode && <BackupModal mode={backupMode} dek={dek} onClose={() => setBackupMode(null)} />}
+          {bioEnroll && (
+            <BiometricEnroll
+              onDone={() => {
+                setBioOn(true);
+                setBioEnroll(false);
+              }}
+              onClose={() => setBioEnroll(false)}
+            />
+          )}
         </div>
         {linkOverlay}
       </div>

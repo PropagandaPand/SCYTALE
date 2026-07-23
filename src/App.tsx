@@ -7,11 +7,13 @@ import {
   DeviceBindingMissingError,
   LockedOutError,
   lockoutStatus,
+  unlockWithBiometric,
+  biometricAvailable,
+  biometricEnrolled,
 } from './lib/vaultService';
 import { cryptoSelfTest } from './lib/selftest';
 import { Messenger } from './Messenger';
 import { ReloadPrompt } from './ReloadPrompt';
-import { BiometricProbe } from './BiometricProbe';
 import { IconLock } from './icons';
 
 type Phase = 'loading' | 'create' | 'unlock' | 'open';
@@ -29,7 +31,7 @@ export function App() {
   const [lockState, setLockState] = useState<LockState>('idle');
   const [lockRemaining, setLockRemaining] = useState(0);
   const [dek, setDek] = useState<CryptoKey | null>(null);
-  const [showProbe, setShowProbe] = useState(false); // temporary: WebAuthn/PRF capability test
+  const [canBiometric, setCanBiometric] = useState(false); // enrolled AND supported on this device
   const lockTimer = useRef<number | null>(null);
 
   function say(msg: string, kind: StatusKind = '') {
@@ -51,6 +53,21 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Whether to offer the biometric button must be re-checked every time the unlock
+  // screen appears (initial load AND after each lock) — not once at boot — or the
+  // button goes stale the moment the user enables/disables Face ID in-session.
+  useEffect(() => {
+    if (phase !== 'unlock') return;
+    let alive = true;
+    void (async () => {
+      const [avail, enrolled] = await Promise.all([biometricAvailable(), biometricEnrolled()]);
+      if (alive) setCanBiometric(avail && enrolled);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [phase]);
+
   function beginLockoutCountdown(ms: number) {
     setLockState('locked');
     setLockRemaining(ms);
@@ -67,6 +84,48 @@ export function App() {
     }, 500);
   }
 
+  // Shared success transition for every unlock path (create, passphrase, biometric).
+  function openWith(newDek: CryptoKey) {
+    if (lockTimer.current) {
+      // A biometric unlock can succeed DURING a passphrase lockout (the biometric
+      // factor isn't lockout-gated) — stop the countdown so it can't fire post-open.
+      clearInterval(lockTimer.current);
+      lockTimer.current = null;
+    }
+    setLockState('unlocking');
+    setPassphrase('');
+    window.setTimeout(() => {
+      setDek(newDek);
+      setPhase('open');
+      say('');
+      setLockState('idle');
+      setBusy(false); // clear on SUCCESS too — otherwise busy leaks true for the
+      // whole session and disables the button after the next auto-lock.
+    }, 260);
+  }
+
+  async function unlockBiometric() {
+    if (lockState === 'locked' || busy) return;
+    setBusy(true);
+    setLockState('busy');
+    say('Warte auf Face ID / Touch ID…');
+    try {
+      openWith(await unlockWithBiometric());
+    } catch (e) {
+      const err = e as { name?: string };
+      if (err.name === 'NotAllowedError') {
+        // User cancelled or it timed out — no error, just fall back to the form.
+        say('');
+      } else {
+        // Show the error, but DON'T use 'deny' — that reddens the passphrase field,
+        // and no passphrase was even tried. Keep the form neutral and usable.
+        say('Biometrie fehlgeschlagen — bitte Passphrase nutzen.', 'err');
+      }
+      setLockState('idle');
+      setBusy(false);
+    }
+  }
+
   async function submit() {
     if (lockState === 'locked' || busy) return;
     if (phase === 'create' && passphrase.length < 8) return say('Mindestens 8 Zeichen.', 'err');
@@ -75,16 +134,7 @@ export function App() {
     say(phase === 'create' ? 'Erzeuge Tresor (Argon2id · 256 MiB)…' : 'Entsperre (Argon2id)…');
     try {
       const newDek = phase === 'create' ? await createBoundVault(passphrase) : await unlockBoundVault(passphrase);
-      setLockState('unlocking');
-      setPassphrase('');
-      window.setTimeout(() => {
-        setDek(newDek);
-        setPhase('open');
-        say('');
-        setLockState('idle');
-        setBusy(false); // clear on SUCCESS too — otherwise busy leaks true for
-        // the whole session and disables the button after the next auto-lock.
-      }, 260);
+      openWith(newDek);
     } catch (e) {
       if (e instanceof LockedOutError) {
         beginLockoutCountdown(e.remainingMs);
@@ -148,6 +198,22 @@ export function App() {
 
         {showForm && (
           <div className="lock-form">
+            {phase === 'unlock' && canBiometric && (
+              <>
+                <button
+                  className="btn btn-primary btn-tall"
+                  onClick={() => void unlockBiometric()}
+                  disabled={busy}
+                  // Deliberately NOT gated on lockState==='locked': the biometric
+                  // factor is hardware-rate-limited, not brute-forceable, so a
+                  // legitimate Face ID unlock should work even during a passphrase
+                  // cooldown (and it clears the cooldown on success).
+                >
+                  Mit Face ID / Touch ID entsperren
+                </button>
+                <div className="lock-or">oder Passphrase</div>
+              </>
+            )}
             <div className="field-lbl">Passphrase</div>
             <div className={`pass-field ${lockState === 'deny' ? 'deny' : ''}`}>
               <span className="glyph">
@@ -164,7 +230,7 @@ export function App() {
               />
             </div>
             <button
-              className="btn btn-primary btn-tall"
+              className={`btn btn-tall ${phase === 'unlock' && canBiometric ? '' : 'btn-primary'}`}
               onClick={() => void submit()}
               disabled={busy || lockState === 'locked'}
             >
@@ -173,7 +239,7 @@ export function App() {
             {lockState === 'locked' ? (
               <div className="lock-status err">Gesperrt — noch {seconds}s (zu viele Fehlversuche).</div>
             ) : (
-              <div className={`lock-status ${statusKind}`}>{status}</div>
+              <div className={`lock-status ${statusKind}`} aria-live="polite">{status}</div>
             )}
           </div>
         )}
@@ -184,13 +250,7 @@ export function App() {
           <span className="d" />
           Argon2id · 256 MiB · non-extractable DEK
         </div>
-        {/* Temporary: in-app WebAuthn/PRF probe (a standalone PWA has no address bar,
-            and a stray .html can be swallowed by the SW). Remove once biometrics is decided. */}
-        <button type="button" className="lock-probe" onClick={() => setShowProbe(true)}>
-          Face ID / Touch ID testen
-        </button>
       </div>
-      {showProbe && <BiometricProbe onClose={() => setShowProbe(false)} />}
       <ReloadPrompt />
     </>
   );

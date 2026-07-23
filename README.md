@@ -60,8 +60,8 @@ no separate verifier, nothing to brute-force offline beyond Argon2id itself.
   list loses reachability. Peers stop fanning out to it.
 
 The full threat model, including what is deliberately out of scope, lives in
-**[SECURITY.md](SECURITY.md)** — it is the honest, mechanism-by-mechanism
-breakdown and is kept current with the code.
+**[SECURITY.md](SECURITY.md)** — the mechanism-by-mechanism breakdown, kept
+current with the code.
 
 ## Stack
 
@@ -129,7 +129,7 @@ The contact bundle contains **only public keys** — the link may travel over an
 channel, even an insecure one. Compare your **safety number** afterwards to rule
 out a man-in-the-middle.
 
-## Honest limits
+## Limits
 
 - **Metadata:** the relay sees *which inbox, when, how big* — never content, and
   (with sealed sender) not the sender. Traffic analysis remains hard; full

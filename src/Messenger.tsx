@@ -679,11 +679,31 @@ export function Messenger({ dek, onLock }: Props) {
   }
 
   /**
+   * Acknowledge a peer's device list so they stop re-offering it.
+   *
+   * ⚠️ NEVER await this from inside an onInbox/queued task: encryptAndPersist
+   * enqueues on the SAME chain, so awaiting it from within a queued task chains a
+   * task behind the one that is waiting for it — the inbox would deadlock and stop
+   * processing messages entirely. Call it as `void sendListAckTo(...)`.
+   */
+  async function sendListAckTo(contact: Contact, epoch: number, version: number) {
+    const id = identityRef.current;
+    if (!id) return;
+    try {
+      await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendListAck(id, contact, epoch, version)));
+    } catch {
+      /* best effort — they re-offer and we ack again */
+    }
+  }
+
+  /**
    * Offer MY current device list to one peer — but only while their acknowledged
    * (epoch, version) is behind it. This is what actually makes a newly linked
    * device reachable: the one-shot gossip at link time misses every peer that was
    * offline, and those peers would then keep sending to the primary only, forever.
    * Throttled per contact so a chatty conversation can't turn into a gossip storm.
+   *
+   * ⚠️ Same rule as sendListAckTo: never await this from inside a queued task.
    */
   async function ensureListGossiped(contact: Contact) {
     const id = identityRef.current;
@@ -1296,11 +1316,7 @@ export function Messenger({ dek, onLock }: Props) {
         // The ack names the version we actually hold now.
         if (!bytesEqual(contact.peerMasterPub, id.master.publicKey)) {
           const held = contact.peerDeviceList ?? content.list;
-          try {
-            await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendListAck(id, contact, held.epoch, held.version)));
-          } catch {
-            /* best effort — they will re-offer and we ack again */
-          }
+          void sendListAckTo(contact, held.epoch, held.version); // fire-and-forget: see the helper
         }
       } else if (content.kind === 'listack') {
         // A peer tells me which (epoch, version) of MY list they hold. Deliberately
@@ -1507,16 +1523,20 @@ export function Messenger({ dek, onLock }: Props) {
         await migrateContactsToMaster();
         await ensureSelfContact(); // hidden self-contact for self-sync; refresh my device list
         for (const c of contactsRef.current) await connectSend(c);
-        for (const c of contactsRef.current) await ensureListGossiped(c);
         const gs = await loadGroups(dek);
         groupsRef.current = gs;
         for (const g of gs) messagesRef.current[g.id] = await loadMessages(dek, g.id);
         commitMessages();
         bump();
       });
-      // Still waiting for the account snapshot after a link? Ask again now that the
-      // relay is up. No-op on the primary and once a snapshot has been applied.
-      void bootLoad.then(() => requestBootstrap());
+      // AFTER the boot task (never inside it — both of these enqueue on the same
+      // chain, so awaiting them from within it would deadlock the inbox):
+      // re-ask for the account snapshot if this device is still waiting, and offer
+      // my device list to every peer whose acknowledgement is behind.
+      void bootLoad.then(async () => {
+        await requestBootstrap();
+        for (const c of contactsRef.current) await ensureListGossiped(c);
+      });
 
       connectInbox(await inboxRoom(id.sign.publicKey));
       // Restore an existing push subscription so the DO keeps waking this device.

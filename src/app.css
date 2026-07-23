@@ -310,13 +310,6 @@ select {
   background: var(--verified);
   flex: none;
 }
-.lock-or {
-  margin: 4px 0;
-  text-align: center;
-  font-size: 11.5px;
-  color: var(--faint);
-  letter-spacing: 0.02em;
-}
 /* ==== CONTACT LIST ==================================================== */
 .list {
   flex: 1;

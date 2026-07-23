@@ -34,6 +34,7 @@ export function App() {
   const [canBiometric, setCanBiometric] = useState(false); // enrolled AND supported on this device
   const [showPass, setShowPass] = useState(false); // reveal the passphrase via the eye toggle
   const lockTimer = useRef<number | null>(null);
+  const autoBioTriedRef = useRef(false); // auto-launch Face ID at most once per unlock-screen entry
 
   function say(msg: string, kind: StatusKind = '') {
     setStatus(msg);
@@ -56,17 +57,30 @@ export function App() {
 
   // Whether to offer the biometric button must be re-checked every time the unlock
   // screen appears (initial load AND after each lock) — not once at boot — or the
-  // button goes stale the moment the user enables/disables Face ID in-session.
+  // button goes stale the moment the user enables/disables Face ID in-session. When
+  // it IS enrolled, auto-launch Face ID / Touch ID once on entry (with a graceful
+  // fallback: if the platform blocks a gesture-less prompt, the passphrase form and
+  // a manual retry button are already there).
   useEffect(() => {
-    if (phase !== 'unlock') return;
+    if (phase !== 'unlock') {
+      autoBioTriedRef.current = false; // re-arm for the next time the screen appears
+      return;
+    }
     let alive = true;
     void (async () => {
       const [avail, enrolled] = await Promise.all([biometricAvailable(), biometricEnrolled()]);
-      if (alive) setCanBiometric(avail && enrolled);
+      if (!alive) return;
+      const can = avail && enrolled;
+      setCanBiometric(can);
+      if (can && !autoBioTriedRef.current) {
+        autoBioTriedRef.current = true;
+        void unlockBiometric();
+      }
     })();
     return () => {
       alive = false;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase]);
 
   function beginLockoutCountdown(ms: number) {
@@ -106,7 +120,9 @@ export function App() {
   }
 
   async function unlockBiometric() {
-    if (lockState === 'locked' || busy) return;
+    // Not gated on lockState==='locked': the biometric factor isn't lockout-gated
+    // (see unlockWithBiometric). Only re-entrancy is guarded.
+    if (busy) return;
     setBusy(true);
     setLockState('busy');
     say('Warte auf Face ID / Touch ID…');
@@ -199,22 +215,6 @@ export function App() {
 
         {showForm && (
           <div className="lock-form">
-            {phase === 'unlock' && canBiometric && (
-              <>
-                <button
-                  className="btn btn-primary btn-tall"
-                  onClick={() => void unlockBiometric()}
-                  disabled={busy}
-                  // Deliberately NOT gated on lockState==='locked': the biometric
-                  // factor is hardware-rate-limited, not brute-forceable, so a
-                  // legitimate Face ID unlock should work even during a passphrase
-                  // cooldown (and it clears the cooldown on success).
-                >
-                  Mit Face ID / Touch ID entsperren
-                </button>
-                <div className="lock-or">oder Passphrase</div>
-              </>
-            )}
             <div className="field-lbl">Passphrase</div>
             <div className={`pass-field ${lockState === 'deny' ? 'deny' : ''}`}>
               <span className="glyph">
@@ -240,12 +240,25 @@ export function App() {
               </button>
             </div>
             <button
-              className={`btn btn-tall ${phase === 'unlock' && canBiometric ? '' : 'btn-primary'}`}
+              className="btn btn-primary btn-tall"
               onClick={() => void submit()}
               disabled={busy || lockState === 'locked'}
             >
               {phase === 'create' ? 'Tresor erstellen' : 'Tresor entsperren'}
             </button>
+            {phase === 'unlock' && canBiometric && (
+              // Face ID auto-launches on entering this screen; this is the manual
+              // retry if the user cancelled it. Ghost style so it stays on-scheme
+              // and reads as secondary to the passphrase. Not lockout-gated — the
+              // biometric factor is hardware-rate-limited, not brute-forceable.
+              <button
+                className="btn btn-ghost btn-tall"
+                onClick={() => void unlockBiometric()}
+                disabled={busy}
+              >
+                Mit Face ID / Touch ID entsperren
+              </button>
+            )}
             {lockState === 'locked' ? (
               <div className="lock-status err">Gesperrt — noch {seconds}s (zu viele Fehlversuche).</div>
             ) : (

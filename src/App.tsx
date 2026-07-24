@@ -241,7 +241,7 @@ export function App() {
   return (
     <>
       <div className="lock">
-        <img className="lock-logo" src="/scytale-icon.svg" alt="SCYTALE" />
+        <img className="lock-logo" src="/pwa-512.png" alt="SCYTALE" />
         <div className="lock-brand">SCYTALE</div>
         <p className="lock-sub">Ende-zu-Ende verschlüsselt · client-side</p>
 

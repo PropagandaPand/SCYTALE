@@ -27,14 +27,20 @@ function mulberry(seed: string): () => number {
 
 export function Identicon({ seed }: { seed: string }) {
   const r = mulberry('idn-' + seed);
+  // Colour comes from a SEPARATE hash stream ('hue-' + seed) so the pattern bits
+  // (mulberry above) are untouched — existing contacts keep their exact shape and
+  // only gain a deterministic per-seed colour. Fixed S/L keeps every avatar
+  // legible on both the light and dark neutral tile; only the hue varies.
+  const hue = fnv('hue-' + seed) % 360;
+  const fill = `hsl(${hue} 58% 52%)`;
   const rects: ReactElement[] = [];
   const N = 5;
   for (let y = 0; y < N; y++) {
     for (let x = 0; x < 3; x++) {
       if (r() > 0.5) {
-        rects.push(<rect key={`${x}-${y}`} x={x * 20} y={y * 20} width={20} height={20} fill="currentColor" />);
+        rects.push(<rect key={`${x}-${y}`} x={x * 20} y={y * 20} width={20} height={20} fill={fill} />);
         if (x < 2) {
-          rects.push(<rect key={`m${x}-${y}`} x={(4 - x) * 20} y={y * 20} width={20} height={20} fill="currentColor" />);
+          rects.push(<rect key={`m${x}-${y}`} x={(4 - x) * 20} y={y * 20} width={20} height={20} fill={fill} />);
         }
       }
     }

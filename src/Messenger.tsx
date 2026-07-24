@@ -134,7 +134,7 @@ import { BiometricEnroll } from './BiometricEnroll';
 import { biometricAvailable, biometricEnrolled, disableBiometricUnlock } from './lib/vaultService';
 import { Attachment, LightboxImg } from './Attachment';
 import {
-  IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach, IconMic, IconTrash, IconDots, IconGroup, IconReply, IconForward,
+  IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach, IconMic, IconTrash, IconDots, IconGroup, IconReply, IconForward, IconCopy,
   IconBell, IconDevices, IconArchive, IconChevron,
   IconSticker,
 } from './icons';
@@ -353,7 +353,7 @@ export function Messenger({ dek, onLock }: Props) {
   const [renameInput, setRenameInput] = useState('');
   const [scanning, setScanning] = useState(false);
   const [chatMenu, setChatMenu] = useState(false);
-  const [msgMenu, setMsgMenu] = useState<{ roomId: string; m: ChatMessage } | null>(null); // long-press action sheet
+  const [msgMenu, setMsgMenu] = useState<{ roomId: string; m: ChatMessage; x: number; y: number } | null>(null); // long-press popover, anchored at (x,y)
   const [forwardMsg, setForwardMsg] = useState<ChatMessage | null>(null); // message being forwarded → pick a contact
   // True once this account has more than one linked device (from the own device
   // list). Drives the "groups don't sync to your other devices yet" note (3e).
@@ -485,11 +485,12 @@ export function Messenger({ dek, onLock }: Props) {
       longPressRef.current = null;
     }
   }
-  // Hold a message → the action sheet (reply / forward / delete). Not for a tombstone.
-  function openMsgMenu(m: ChatMessage) {
+  // Hold a message → the floating action popover (reply / copy / forward / delete),
+  // anchored at the press point. Not for a tombstone.
+  function openMsgMenu(m: ChatMessage, x: number, y: number) {
     const roomId = activeRoomRef.current;
     if (!roomId || m.recalled) return;
-    setMsgMenu({ roomId, m });
+    setMsgMenu({ roomId, m, x, y });
   }
   // Delete from the menu: MY message → recall it for everyone; a received one → remove
   // it just from this device. Both drop any attachment blob (recall does so via
@@ -512,9 +513,13 @@ export function Messenger({ dek, onLock }: Props) {
     // Don't touch transition/transform yet — wait until the drag commits to the
     // horizontal axis, so a tap or a vertical scroll leaves the bubble untouched.
     swipeReplyRef.current = { mid: m.mid, x: e.clientX, y: e.clientY, el: e.currentTarget, lock: null, dx: 0 };
-    // Press-and-hold → the message action sheet (unless it's already a tombstone).
+    // Press-and-hold → the message action popover (unless it's already a tombstone).
     clearLongPress();
-    if (!m.recalled) longPressRef.current = window.setTimeout(() => openMsgMenu(m), 500);
+    if (!m.recalled) {
+      const px = e.clientX;
+      const py = e.clientY;
+      longPressRef.current = window.setTimeout(() => openMsgMenu(m, px, py), 500);
+    }
   }
   function onBubblePointerMove(e: React.PointerEvent<HTMLDivElement>) {
     const st = swipeReplyRef.current;
@@ -3195,48 +3200,63 @@ export function Messenger({ dek, onLock }: Props) {
   // Full-screen image viewer (avatars, later chat images). Tap anywhere closes.
   const lightbox = zoomImg ? <LightboxImg blob={zoomImg} onClose={() => setZoomImg(null)} /> : null;
 
-  // Long-press action sheet on a message: reply / forward / delete.
-  const msgMenuEl = msgMenu ? (
-    <div className="sheet-scrim" onClick={() => setMsgMenu(null)}>
-      <div className="msg-sheet" onClick={(e) => e.stopPropagation()}>
-        <button
-          className="msg-sheet-row"
-          onClick={() => {
-            setReplyTo(quoteFrom(msgMenu.m));
-            setMsgMenu(null);
-          }}
-        >
-          <IconReply />
-          <span>Antworten</span>
-        </button>
-        {(msgMenu.m.text || msgMenu.m.file) && (
-          <button
-            className="msg-sheet-row"
-            onClick={() => {
-              setForwardMsg(msgMenu.m);
-              setMsgMenu(null);
-            }}
-          >
-            <IconForward />
-            <span>Weiterleiten</span>
-          </button>
-        )}
-        <button
-          className="msg-sheet-row danger"
-          onClick={() => {
-            const mm = msgMenu;
-            setMsgMenu(null);
-            void deleteFromMenu(mm.roomId, mm.m);
-          }}
-        >
-          <IconTrash />
-          <span>Löschen</span>
-        </button>
-      </div>
-    </div>
-  ) : null;
+  // Long-press action popover, floating next to the pressed message.
+  const msgMenuEl = msgMenu
+    ? (() => {
+        const m = msgMenu.m;
+        const isText = !!m.text && !m.file;
+        const hasContent = !!(m.text || m.file);
+        const rows = 1 + (isText ? 1 : 0) + (hasContent ? 1 : 0) + 1;
+        const W = 210;
+        const H = rows * 44 + 10;
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        const left = Math.min(Math.max(8, msgMenu.x - W / 2), vw - W - 8);
+        const top = msgMenu.y + 8 + H < vh ? msgMenu.y + 8 : Math.max(8, msgMenu.y - H - 8);
+        const close = () => setMsgMenu(null);
+        return (
+          <div className="msg-scrim" onClick={close} onContextMenu={(e) => e.preventDefault()}>
+            <div className="msg-pop" style={{ left, top, width: W }} onClick={(e) => e.stopPropagation()}>
+              <button className="msg-pop-row" onClick={() => { setReplyTo(quoteFrom(m)); close(); }}>
+                <IconReply />
+                <span>Antworten</span>
+              </button>
+              {isText && (
+                <button
+                  className="msg-pop-row"
+                  onClick={() => {
+                    void navigator.clipboard?.writeText(m.text ?? '');
+                    close();
+                  }}
+                >
+                  <IconCopy />
+                  <span>Kopieren</span>
+                </button>
+              )}
+              {hasContent && (
+                <button className="msg-pop-row" onClick={() => { setForwardMsg(m); close(); }}>
+                  <IconForward />
+                  <span>Weiterleiten</span>
+                </button>
+              )}
+              <button
+                className="msg-pop-row danger"
+                onClick={() => {
+                  const mm = msgMenu;
+                  close();
+                  void deleteFromMenu(mm.roomId, mm.m);
+                }}
+              >
+                <IconTrash />
+                <span>Löschen</span>
+              </button>
+            </div>
+          </div>
+        );
+      })()
+    : null;
 
-  // Forward picker: choose a 1:1 contact to forward the held message to.
+  // Forward picker: choose a 1:1 contact (avatar/identicon + name) to forward to.
   const forwardEl = forwardMsg ? (
     <div className="sheet-scrim" onClick={() => setForwardMsg(null)}>
       <div className="fwd-sheet" onClick={(e) => e.stopPropagation()}>
@@ -3246,7 +3266,16 @@ export function Messenger({ dek, onLock }: Props) {
             .filter((c) => !c.hidden && !c.staleIdentity)
             .map((c) => (
               <button key={c.roomId} className="fwd-row" onClick={() => void forwardTo(c, forwardMsg)}>
-                {c.nickname || c.peerName || 'Kontakt'}
+                <div className="avatar-wrap">
+                  {c.peerAvatarB64 ? (
+                    <img className="avatar-img" src={avatarSrc(c.peerAvatarB64)} alt="" />
+                  ) : (
+                    <div className="avatar">
+                      <Identicon seed={c.roomId} />
+                    </div>
+                  )}
+                </div>
+                <span className="fwd-name">{displayName(c)}</span>
               </button>
             ))}
         </div>
@@ -3771,6 +3800,7 @@ export function Messenger({ dek, onLock }: Props) {
               onPointerMove={onBubblePointerMove}
               onPointerUp={() => endBubbleSwipe(m)}
               onPointerCancel={() => endBubbleSwipe(m)}
+              onContextMenu={(e) => e.preventDefault()}
             >
               {m.recalled ? (
                 <span className="recalled">Nachricht zurückgerufen</span>
@@ -3893,6 +3923,7 @@ export function Messenger({ dek, onLock }: Props) {
               onPointerMove={onBubblePointerMove}
               onPointerUp={() => endBubbleSwipe(m)}
               onPointerCancel={() => endBubbleSwipe(m)}
+              onContextMenu={(e) => e.preventDefault()}
             >
               {!m.mine && m.sender && <div className="bubble-sender">{m.sender}</div>}
               {m.recalled ? (

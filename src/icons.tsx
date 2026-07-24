@@ -276,3 +276,12 @@ export function IconForward({ size = 18 }: { size?: number }) {
     </svg>
   );
 }
+
+export function IconCopy({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden="true">
+      <rect x="6" y="6" width="9" height="10" rx="2" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M12 6V4a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h1" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  );
+}

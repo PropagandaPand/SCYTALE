@@ -2370,6 +2370,18 @@ select {
   position: relative;
   transition: transform 0.18s var(--ease-out);
   touch-action: pan-y; /* keep vertical scroll; deliver horizontal drags to JS (no cancel) */
+  /* Long-press opens OUR menu — suppress the browser's text selection and iOS's
+     image/callout menu so a hold doesn't select text or pop the native share sheet. */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.bubble img,
+.bubble video {
+  -webkit-touch-callout: none;
+  -webkit-user-drag: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 /* Reply cue that fades + scales in beside the bubble as it is dragged right.
    A masked SVG in the app's line-icon style, tinted with --accent. Driven entirely
@@ -2395,7 +2407,54 @@ select {
   opacity: 0.6;
 }
 
-/* ── Message action sheet (long-press) + forward picker ───────────────── */
+/* ── Floating message action popover (long-press) ────────────────────── */
+.msg-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+}
+.msg-pop {
+  position: fixed;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 5px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  animation: pop-in 0.14s var(--ease-out);
+}
+@keyframes pop-in {
+  from {
+    transform: scale(0.92);
+    opacity: 0;
+  }
+}
+.msg-pop-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 10px 12px;
+  background: none;
+  border: 0;
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 14.5px;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: 8px;
+  text-align: left;
+}
+.msg-pop-row:active {
+  background: var(--bg);
+}
+.msg-pop-row.danger {
+  color: var(--danger);
+}
+.msg-pop-row svg {
+  flex: none;
+}
+
+/* ── Forward picker (bottom sheet, contact rows) ─────────────────────── */
 .sheet-scrim {
   position: fixed;
   inset: 0;
@@ -2406,10 +2465,12 @@ select {
   justify-content: center;
   animation: scyfade 0.15s ease;
 }
-.msg-sheet,
 .fwd-sheet {
   width: 100%;
   max-width: 480px;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
   background: var(--surface);
   border-radius: 16px 16px 0 0;
   padding: 8px;
@@ -2422,18 +2483,21 @@ select {
     opacity: 0;
   }
 }
-.fwd-sheet {
-  max-height: 70vh;
-  display: flex;
-  flex-direction: column;
+.fwd-head {
+  padding: 12px 16px 8px;
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--muted);
 }
-.msg-sheet-row,
+.fwd-list {
+  overflow-y: auto;
+}
 .fwd-row {
   width: 100%;
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 14px 16px;
+  padding: 8px 12px;
   background: none;
   border: 0;
   color: var(--text);
@@ -2444,24 +2508,15 @@ select {
   border-radius: 10px;
   text-align: left;
 }
-.msg-sheet-row:active,
 .fwd-row:active {
   background: var(--bg);
 }
-.msg-sheet-row.danger {
-  color: var(--danger);
-}
-.msg-sheet-row svg {
-  flex: none;
-}
-.fwd-head {
-  padding: 12px 16px 8px;
-  font-weight: 600;
-  font-size: 14px;
-  color: var(--muted);
-}
-.fwd-list {
-  overflow-y: auto;
+.fwd-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .bubble-quote {
   display: flex;

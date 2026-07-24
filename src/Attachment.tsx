@@ -100,13 +100,13 @@ export function Attachment({
   }
 
   if (isSticker(file)) {
-    return <img className="bubble-sticker" src={url} alt="Sticker" onClick={() => onStickerZoom(file)} />;
+    return <img className="bubble-sticker" src={url} alt="Sticker" draggable={false} onClick={() => onStickerZoom(file)} />;
   }
   if (file.mime.startsWith('video/')) {
     return <video className="bubble-video" src={url} controls playsInline preload="metadata" />;
   }
   if (file.mime.startsWith('image/')) {
-    return <img className="bubble-img" src={url} alt={file.name} onClick={() => onImageZoom(blob)} />;
+    return <img className="bubble-img" src={url} alt={file.name} draggable={false} onClick={() => onImageZoom(blob)} />;
   }
   if (file.mime.startsWith('audio/')) {
     return <AudioPlayer blob={blob} mime={file.mime} />;

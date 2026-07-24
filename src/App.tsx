@@ -21,6 +21,7 @@ type StatusKind = '' | 'ok' | 'err';
 type LockState = 'idle' | 'busy' | 'deny' | 'locked' | 'unlocking' | 'tamper' | 'fatal';
 
 const IDLE_LOCK_MS = 5 * 60 * 1000;
+const BACKGROUND_LOCK_GRACE_MS = 30 * 1000; // lock this long after the app is backgrounded (audit N-4)
 
 export function App() {
   const [phase, setPhase] = useState<Phase>('loading');
@@ -191,6 +192,37 @@ export function App() {
     return () => {
       clearTimeout(timer);
       for (const e of events) window.removeEventListener(e, reset);
+    };
+  }, [phase, lock]);
+
+  // Lock when the app goes to the background (audit N-4): the 5-minute idle timer
+  // alone leaves the vault open if a device is seized while backgrounded. A grace
+  // window covers a brief hide (a file/share picker or Face ID prompt backgrounds
+  // the page) without re-prompting; a longer background — or a full pagehide — locks.
+  useEffect(() => {
+    if (phase !== 'open') return;
+    let grace: number | null = null;
+    const clearGrace = () => {
+      if (grace !== null) {
+        clearTimeout(grace);
+        grace = null;
+      }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        clearGrace();
+        grace = window.setTimeout(lock, BACKGROUND_LOCK_GRACE_MS);
+      } else {
+        clearGrace();
+      }
+    };
+    const onPageHide = () => lock(); // the page is being suspended/unloaded — drop the DEK now
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pagehide', onPageHide);
+    return () => {
+      clearGrace();
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pagehide', onPageHide);
     };
   }, [phase, lock]);
 

@@ -237,6 +237,9 @@ export class RelayRoom extends DurableObject<Env> {
         return;
       }
       case 'ack': {
+        // Only the authenticated inbox owner may delete queued messages. Sending is
+        // intentionally open, but deletion is mailbox ownership.
+        if (!att.owner) return;
         if (typeof m.id === 'number') this.ctx.storage.sql.exec('DELETE FROM q WHERE id = ?', m.id);
         return;
       }

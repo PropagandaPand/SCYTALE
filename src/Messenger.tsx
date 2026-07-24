@@ -55,6 +55,7 @@ import {
   randomMid,
   fanoutDeliveries,
   fanoutChunks,
+  deviceProtocolVersion,
   acceptMasterChange,
   acceptRotation,
   reconnectContact,
@@ -110,6 +111,7 @@ import {
 import {
   putAttachment,
   getAttachmentBlob,
+  getAttachmentMeta,
   newAttachmentId,
   deleteAttachment,
   allAttachmentIds,
@@ -145,7 +147,8 @@ const MAX_ATTACH = 600 * 1024; // inline cap — keeps the WS frame under Cloudf
 // larger files will use offer+pull (7d). CHUNK_BYTES stays well under the relay's
 // per-message cap even after sealing/base64.
 const CHUNK_BYTES = 48 * 1024;
-const AUTOPUSH_CAP = 2 * 1024 * 1024;
+const AUTOPUSH_CAP = 2 * 1024 * 1024; // at/below → chunks auto-pushed to the mailbox
+const MAX_BIG_ATTACH = 25 * 1024 * 1024; // above AUTOPUSH_CAP and up to here → offer + pull
 // RECEIVE caps (sanity bounds; the real flood limit is the relay mailbox byte-cap,
 // which rate-limits what a peer can push before we drain it).
 const RECV_MAX_BYTES = 30 * 1024 * 1024; // largest attachment we'll reassemble
@@ -296,6 +299,7 @@ export function Messenger({ dek, onLock }: Props) {
   // original re-delivers, and an out-of-order recall (arrived before its original)
   // tombstones the original on append.
   const recalledMidsRef = useRef<Set<string>>(new Set());
+  const downloadingRef = useRef<Set<string>>(new Set()); // tids currently being pulled (spinner state)
   const sendRoomRef = useRef<Map<string, string>>(new Map());
   const inboxClientRef = useRef<RelayClient | null>(null);
   const seenIdsRef = useRef<Set<number>>(new Set());
@@ -747,7 +751,15 @@ export function Messenger({ dek, onLock }: Props) {
       // Persist the MESSAGE before clearing the marker (B1): a crash in this window then
       // leaves either the marker (GC protects the chunks) or the persisted, referenced
       // message — never a complete-but-unprotected attachment the orphan sweep deletes.
-      if (!hasMessage(messagesRef.current[contact.roomId] ?? [], c.tid, false)) {
+      const arr = messagesRef.current[contact.roomId] ?? [];
+      const placeholder = arr.find((x) => x.mid === c.tid && !x.mine);
+      if (placeholder) {
+        // A pulled offer: the placeholder is now downloaded → drop its pull marker.
+        const next = arr.map((x) => (x === placeholder ? { ...x, file: { ...x.file!, pull: undefined } } : x));
+        messagesRef.current[contact.roomId] = next;
+        commitMessages();
+        await saveMessages(dek, contact.roomId, next);
+      } else {
         await appendMessage(contact.roomId, {
           mine: false,
           ts: Date.now(),
@@ -758,6 +770,7 @@ export function Messenger({ dek, onLock }: Props) {
           unreadRef.current[contact.roomId] = (unreadRef.current[contact.roomId] ?? 0) + 1;
         }
       }
+      downloadingRef.current.delete(c.tid);
       await clearRecvMarker(c.tid);
     }
   }
@@ -977,6 +990,72 @@ export function Messenger({ dek, onLock }: Props) {
     await saveContact(dek, contact);
     bump();
     return true;
+  }
+
+  // Offer a large (> auto-push cap) attachment for pull. Stores it locally (so I can
+  // serve pulls and see it myself) and sends a tiny 'attoffer' descriptor to the peer;
+  // the recipient shows a download affordance and pulls it on demand. Returns false if
+  // the peer's primary device can't handle offers (too old).
+  async function sendOfferedAttachment(
+    contact: Contact,
+    data: Uint8Array<ArrayBuffer>,
+    name: string,
+    mime: string,
+  ): Promise<boolean> {
+    const id = identityRef.current;
+    if (!id) return false;
+    if (deviceProtocolVersion(contact, contact.peerSignPub) < 3) return false; // peer too old for offers
+    const tid = newAttachmentId();
+    const total = Math.max(1, Math.ceil(data.length / CHUNK_BYTES));
+    await putAttachment(dek, tid, data, name, mime); // keep locally to serve pulls + show to me
+    await fanoutSend(contact, { kind: 'attoffer', tid, name, mime, size: data.length, total }, randomMid());
+    await appendMessage(contact.roomId, {
+      mine: true,
+      ts: Date.now(),
+      mid: randomMid(),
+      file: { name, mime, attId: tid, size: data.length },
+      status: 'sent',
+    });
+    await saveContact(dek, contact);
+    bump();
+    return true;
+  }
+
+  // Serve a pull: stream an offered attachment's chunks to the requesting contact.
+  // GUARD (amplification): only serve a tid I actually offered to THIS contact (a
+  // mine=true message in their room references it) and still hold.
+  async function serveAttachment(contact: Contact, tid: string): Promise<void> {
+    const id = identityRef.current;
+    if (!id || !/^[A-Za-z0-9]{1,40}$/.test(tid)) return;
+    const arr = messagesRef.current[contact.roomId] ?? (await loadMessages(dek, contact.roomId));
+    if (!arr.some((m) => m.mine && m.file?.attId === tid)) return; // not something I offered here
+    const meta = await getAttachmentMeta(dek, tid);
+    const blob = meta ? await getAttachmentBlob(dek, tid) : null;
+    if (!meta || !blob) return;
+    const data = new Uint8Array(await blob.arrayBuffer()) as Uint8Array<ArrayBuffer>;
+    const total = Math.max(1, Math.ceil(data.length / CHUNK_BYTES));
+    const out = await enqueueInbox(async () => {
+      const r = await fanoutChunks(id, contact, { tid, total, size: data.length, name: meta.name, mime: meta.mime }, data, CHUNK_BYTES);
+      await saveContact(dek, contact); // persist ratchet advances BEFORE the wire (Invariant II)
+      return r;
+    });
+    for (const dev of out.perDevice) {
+      const room = await inboxRoom(dev.deviceSignPub);
+      connectDeviceInbox(room);
+      const relay = relaysRef.current.get(room);
+      for (const sealed of dev.sealed) relay?.send(sealed, randomMid());
+    }
+  }
+
+  // Request an offered attachment (recipient side). Fans the request out to the
+  // contact; only the offering device (which holds the file) serves it.
+  async function pullAttachment(roomId: string, m: ChatMessage): Promise<void> {
+    if (!m.file?.pull || !m.file.attId || !m.mid) return;
+    const contact = contactsRef.current.find((c) => c.roomId === roomId);
+    if (!contact) return;
+    downloadingRef.current.add(m.file.attId);
+    bump();
+    await fanoutSend(contact, { kind: 'attreq', tid: m.file.attId }, randomMid());
   }
 
   // The hidden "self" contact: peerMaster == MY master, peerDeviceList == my own
@@ -1987,6 +2066,30 @@ export function Messenger({ dek, onLock }: Props) {
       } else if (content.kind === 'recall') {
         // The peer recalls one of THEIR messages → tombstone their copy (mine=false).
         await retractMessage(contact.roomId, content.targetMid, false);
+      } else if (content.kind === 'attoffer') {
+        // A large attachment offered for pull → append a download-affordance placeholder.
+        if (
+          !contact.hidden &&
+          /^[A-Za-z0-9]{1,40}$/.test(content.tid) &&
+          content.total >= 1 &&
+          content.total <= RECV_MAX_CHUNKS &&
+          content.size >= 0 &&
+          content.size <= RECV_MAX_BYTES &&
+          !hasMessage(messagesRef.current[contact.roomId] ?? [], content.tid, false)
+        ) {
+          await appendMessage(contact.roomId, {
+            mine: false,
+            ts: Date.now(),
+            mid: content.tid,
+            file: { name: content.name, mime: content.mime, size: content.size, attId: content.tid, pull: { total: content.total } },
+          });
+          if (!(viewRef.current === 'chat' && activeRoomRef.current === contact.roomId)) {
+            unreadRef.current[contact.roomId] = (unreadRef.current[contact.roomId] ?? 0) + 1;
+          }
+        }
+      } else if (content.kind === 'attreq') {
+        // The peer pulls an attachment I offered → stream its chunks (guarded).
+        await serveAttachment(contact, content.tid);
       } else if (mid && hasMessage(messagesRef.current[contact.roomId] ?? [], mid, false)) {
         // DEDUP on the E2E mid, WITHIN the received direction (mine=false): one peer
         // message can reach this device via direct fan-out AND (with receive-sync) a
@@ -2756,14 +2859,16 @@ export function Messenger({ dek, onLock }: Props) {
           if (!sent) setError('Empfänger kann große Anhänge noch nicht empfangen — bitte App aktualisieren lassen.');
           return;
         }
-        const kb = Math.round(data.length / 1024);
-        const cap = Math.round(AUTOPUSH_CAP / (1024 * 1024));
+        if (target && data.length <= MAX_BIG_ATTACH) {
+          const offered = await sendOfferedAttachment(target, data, name, mime);
+          if (!offered) setError('Empfänger kann große Anhänge noch nicht empfangen — bitte App aktualisieren lassen.');
+          return;
+        }
+        const cap = Math.round(MAX_BIG_ATTACH / (1024 * 1024));
         setError(
           activeGroup
             ? `In Gruppen gehen aktuell nur Anhänge bis ~${Math.round(MAX_ATTACH / 1024)} KB.`
-            : mime.startsWith('video/')
-              ? `Video zu groß (${Math.round(kb / 1024)} MB). Aktuell gehen Anhänge bis ~${cap} MB; größere kommen mit dem Abruf-Modus.`
-              : `Zu groß (${kb} KB) — aktuell gehen Anhänge bis ~${cap} MB.`,
+            : `Datei zu groß (${Math.round(data.length / (1024 * 1024))} MB) — maximal ~${cap} MB.`,
         );
         return;
       }
@@ -3818,12 +3923,28 @@ export function Messenger({ dek, onLock }: Props) {
                     </div>
                   )}
                   {m.file ? (
-                    <Attachment
-                      dek={dek}
-                      file={m.file}
-                      onImageZoom={(b) => setZoomImg(b)}
-                      onStickerZoom={(f) => setStickerZoom({ mime: f.mime, dataB64: f.dataB64 ?? '' })}
-                    />
+                    m.file.pull ? (
+                      <button
+                        className="pull-chip"
+                        disabled={!!(m.file.attId && downloadingRef.current.has(m.file.attId))}
+                        onClick={() => void pullAttachment(activeContact?.roomId ?? '', m)}
+                      >
+                        <IconArchive />
+                        <span className="pull-name">{m.file.name}</span>
+                        <span className="pull-size">
+                          {m.file.attId && downloadingRef.current.has(m.file.attId)
+                            ? 'lädt…'
+                            : `${(Math.round(((m.file.size ?? 0) / (1024 * 1024)) * 10) / 10)} MB · laden`}
+                        </span>
+                      </button>
+                    ) : (
+                      <Attachment
+                        dek={dek}
+                        file={m.file}
+                        onImageZoom={(b) => setZoomImg(b)}
+                        onStickerZoom={(f) => setStickerZoom({ mime: f.mime, dataB64: f.dataB64 ?? '' })}
+                      />
+                    )
                   ) : (
                     m.text
                   )}

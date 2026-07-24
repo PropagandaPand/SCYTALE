@@ -538,9 +538,13 @@ Node/npm version.)
 - **Voice-message codec is device-dependent (cross-platform gap, issue #13).** `MediaRecorder` yields whatever
   container/codec the recording browser supports (Chrome: webm/opus; iOS Safari: mp4/aac), and iOS cannot play
   webm/opus — so an Android voice message may not play on iOS. To be fixed with the large-attachment work.
-- **Large attachments are not yet on the wire (issue #9).** Attachments are stored out-of-band in the blob store,
-  but sending is still capped at the ~600 KB inline path; videos and long audio don't transfer yet. The planned
-  hybrid (small = auto-push, large = offer + pull) will require the sender to be online at pull time.
+- **Large attachments — hybrid transfer (issue #9).** Up to ~2 MB is chunked and auto-pushed to the recipient's
+  mailbox (works offline). Above that, up to ~25 MB, the sender sends a tiny *offer* and the recipient pulls on
+  demand (a download affordance), which requires the sender to be online at pull time and streams best when both
+  are (the chunks pass through the mailbox rather than filling it). The pull is guarded against amplification: a
+  device serves a pull only for a tid it actually offered to that contact and still holds. Groups remain
+  inline-only. Progress/cancel UI, per-chunk delivery status, a send window, and self-syncing a large attachment
+  to one's own other devices are follow-ups.
 - **Residual metadata despite sealed sender**: *who* sends and the `conv` pair id are hidden. What remains is what
   addressing a recipient inherently reveals: **which inbox** (recipient pseudonym), **timing** and **size** — plus
   **network correlation** (sender IP → recipient inbox), which crypto does not cover (would need Tor/a mixnet). The

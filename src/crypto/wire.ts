@@ -79,8 +79,9 @@ export async function decodeInitialHeader(o: InitialHeaderWire): Promise<Initial
  *
  *   1 = envelope versioning present (no new content frames)
  *   2 = can RECEIVE & reassemble chunked attachments (frame byte 14)
+ *   3 = can handle large-attachment offer/pull (frame bytes 16/17)
  */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 export type Envelope =
   | { type: 'prekey'; conv: string; x3dh: InitialMessageHeader; message: RatchetMessage; pv?: number }

@@ -41,7 +41,7 @@ const bobContact = await S.makeContactFromHeader(S.asMasterPub(bob.master.public
 await S.receiveEnvelope(bob, bobContact, e1, bobLookup); // Bob learns Alice
 const eB = await S.decodeEnvelope((await S.openPayload(alice, await S.sendMessage(bob, bobContact, 'yo'))).payload);
 await S.receiveEnvelope(alice, aliceContact, eB, noLookup); // Alice learns Bob (pv 2)
-ok('Alice hat Bobs Geräte-pv gelernt (2)', S.deviceProtocolVersion(aliceContact, bob.sign.publicKey) === 2);
+ok('Alice hat Bobs Geräte-pv gelernt (>= 2, chunk-fähig)', S.deviceProtocolVersion(aliceContact, bob.sign.publicKey) === S.PROTOCOL_VERSION && S.PROTOCOL_VERSION >= 2);
 
 // A "large" attachment: 200 KB over 64 KB wire chunks → 4 chunks (last partial).
 const CHUNK = 64 * 1024;

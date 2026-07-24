@@ -815,7 +815,14 @@ export type MessageContent =
   | { kind: 'chunk'; tid: string; idx: number; total: number; size: number; name: string; mime: string; data: Bytes }
   // Recall ("unsend"): retract a previously-sent message, referenced by its E2E mid.
   // Cooperative — the recipient's client tombstones its copy; no guarantee (SECURITY.md).
-  | { kind: 'recall'; targetMid: string };
+  | { kind: 'recall'; targetMid: string }
+  // Large-attachment OFFER (hybrid path, > auto-push cap): announce a file the peer can
+  // pull on demand. No data — just the descriptor; the recipient sees a download
+  // affordance and requests it deliberately (attreq → chunk stream).
+  | { kind: 'attoffer'; tid: string; name: string; mime: string; size: number; total: number }
+  // PULL request for an offered attachment. The sender streams its chunks in reply —
+  // but only for a tid it actually offered to THIS contact (amplification guard).
+  | { kind: 'attreq'; tid: string };
 
 /** A decrypted inbound message plus its sender-stamped E2E dedup id. */
 export interface ReceivedMessage {
@@ -965,6 +972,10 @@ export async function frameContent(c: MessageContent): Promise<Bytes> {
     return out;
   }
   if (c.kind === 'recall') return prefixed(15, utf8.encode(JSON.stringify({ m: c.targetMid })));
+  if (c.kind === 'attoffer') {
+    return prefixed(16, utf8.encode(JSON.stringify({ t: c.tid, n: c.name, m: c.mime, s: c.size, o: c.total })));
+  }
+  if (c.kind === 'attreq') return prefixed(17, utf8.encode(JSON.stringify({ t: c.tid })));
   // ginvite
   return prefixed(4, utf8.encode(JSON.stringify(c.group)));
 }
@@ -1088,6 +1099,14 @@ export async function unframeContent(bytes: Bytes): Promise<MessageContent> {
   if (bytes[0] === 15) {
     const j = JSON.parse(utf8.decode(bytes.slice(1)));
     return { kind: 'recall', targetMid: String(j.m) };
+  }
+  if (bytes[0] === 16) {
+    const j = JSON.parse(utf8.decode(bytes.slice(1)));
+    return { kind: 'attoffer', tid: String(j.t), name: String(j.n), mime: String(j.m), size: Number(j.s), total: Number(j.o) };
+  }
+  if (bytes[0] === 17) {
+    const j = JSON.parse(utf8.decode(bytes.slice(1)));
+    return { kind: 'attreq', tid: String(j.t) };
   }
 
   if (bytes[0] !== 1) throw new Error('Unbekannter Frame-Typ: ' + bytes[0]);

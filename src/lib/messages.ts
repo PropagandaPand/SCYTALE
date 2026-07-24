@@ -20,6 +20,11 @@ export interface FileRef {
   dataB64?: string; // legacy/inline bytes (base64) — still read, and used for stickers
   attId?: string; // reference into the attachment store (src/lib/attachments.ts)
   size?: number; // plaintext byte size (for the reference case)
+  // A large attachment OFFERED but not yet downloaded: the recipient sees a download
+  // affordance and pulls it on demand (`total` = chunk count). The pull request fans
+  // out to the contact; only the offering device (which holds the file) serves it.
+  // Cleared once the bytes are reassembled into the store.
+  pull?: { total: number };
 }
 
 /** A quoted message shown above a reply. Self-contained (a rendered preview + who

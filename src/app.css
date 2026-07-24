@@ -2406,6 +2406,38 @@ select {
   font-style: italic;
   opacity: 0.6;
 }
+.pull-chip {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 12px;
+  background: rgba(127, 127, 127, 0.12);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  cursor: pointer;
+  max-width: 250px;
+}
+.pull-chip:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.pull-chip svg {
+  flex: none;
+}
+.pull-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13.5px;
+}
+.pull-size {
+  font-size: 11px;
+  color: var(--muted);
+  flex: none;
+}
 
 /* ── Floating message action popover (long-press) ────────────────────── */
 .msg-scrim {

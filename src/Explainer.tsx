@@ -15,6 +15,9 @@ import {
   IconShield,
   IconDoubleCheck,
   IconEye,
+  IconGroup,
+  IconSend,
+  IconCamera,
 } from './icons';
 
 // Deterministic pseudo-ciphertext for the "what the server sees" demo. Seeded from
@@ -151,59 +154,108 @@ function StepE2E() {
 
 function StepVault() {
   const [open, setOpen] = useState(false);
-  const tiles = ['Kontakte', 'Nachrichten', 'Bilder', 'Profil'];
+  const items = [
+    { label: 'Kontakte', icon: <IconGroup size={16} /> },
+    { label: 'Nachrichten', icon: <IconSend size={15} /> },
+    { label: 'Bilder', icon: <IconCamera size={15} /> },
+    { label: 'Schlüssel', icon: <IconKey size={15} /> },
+  ];
   return (
     <div className="xpl-step">
-      <span className="xpl-kicker"><IconKey size={12} /> Auf deinem Gerät</span>
+      <span className="xpl-kicker"><IconLock size={12} /> Auf deinem Gerät</span>
       <h2 className="xpl-title">Alles liegt in einem Tresor</h2>
       <p className="xpl-lead">
-        Dein Passwort wird auf dem Gerät zu einem <b>Schlüssel</b> — sogar wir kennen
-        es nicht. Ist der Tresor zu (App gesperrt oder Handy verloren), sieht ein
-        Fremder nur Datensalat. Tipp zum Auf- und Zusperren:
+        Aus deinem Passwort entsteht auf dem Gerät ein Schlüssel — den kennen nicht mal
+        wir. Ist der Tresor zu (App gesperrt oder Handy verloren), findet ein Fremder nur
+        Buchstabensalat. Tipp auf den Schalter:
       </p>
 
       <button className={`xpl-vault${open ? ' open' : ''}`} onClick={() => setOpen((v) => !v)}>
-        <span className="xpl-vault-ic">{open ? <IconKey size={22} /> : <IconLock size={22} />}</span>
-        <span className="xpl-vault-tx">{open ? 'Tresor offen — tippen zum Sperren' : 'Tresor gesperrt — tippen zum Öffnen'}</span>
+        <span className="xpl-vault-ic">{open ? <IconKey size={20} /> : <IconLock size={20} />}</span>
+        <span className="xpl-vault-tx">
+          <span className="xpl-vault-t1">{open ? 'Tresor offen' : 'Tresor gesperrt'}</span>
+          <span className="xpl-vault-t2">{open ? 'Tippen zum Sperren' : 'Tippen zum Öffnen'}</span>
+        </span>
+        <span className={`switch${open ? ' on' : ''}`}><span className="knob" /></span>
       </button>
 
       <div className="xpl-grid">
-        {tiles.map((t, i) => (
-          <div className={`xpl-tile${open ? ' open' : ''}`} key={t} style={{ transitionDelay: `${i * 45}ms` }}>
-            <span className="xpl-tile-scramble">{open ? t : serverGibberish(t + t).slice(0, 10)}</span>
+        {items.map((it, i) => (
+          <div className={`xpl-tile${open ? ' open' : ''}`} key={it.label} style={{ transitionDelay: `${i * 55}ms` }}>
+            <span className="xpl-tile-ic">{open ? it.icon : <IconLock size={13} />}</span>
+            <span className="xpl-tile-tx">{open ? it.label : serverGibberish(it.label + it.label).slice(0, 9)}</span>
           </div>
         ))}
       </div>
 
       <p className="xpl-note">
-        Und Raten hilft kaum: jeder einzelne Rateversuch wird <b>absichtlich zäh</b>
-        gemacht — Millionen pro Sekunde durchzuprobieren ist unmöglich.
+        Und Raten hilft kaum: jeder Rateversuch wird <b>absichtlich langsam</b> gemacht —
+        Millionen pro Sekunde durchprobieren ist unmöglich.
       </p>
     </div>
   );
 }
 
+// A stylised DNA double-helix: two strands (you + your contact) with rungs — each
+// rung is one message's shared key. The whole thing scrolls forward forever and
+// loops seamlessly (sine period == scroll distance), so it reads as an endless
+// chain of key pairs that only ever moves ahead.
+function DnaHelix() {
+  const W = 340;
+  const P = 120; // sine period == the translate distance, so the loop is seamless
+  const amp = 30;
+  const midY = 70;
+  const strandA: string[] = [];
+  const strandB: string[] = [];
+  for (let x = 0; x <= W + P; x += 3) {
+    const y = midY + amp * Math.sin((2 * Math.PI * x) / P);
+    strandA.push(`${x},${y.toFixed(1)}`);
+    strandB.push(`${x},${(2 * midY - y).toFixed(1)}`);
+  }
+  const rungs = [];
+  let i = 0;
+  for (let x = 0; x <= W + P; x += 15) {
+    const s = Math.sin((2 * Math.PI * x) / P);
+    const ya = midY + amp * s;
+    const yb = 2 * midY - ya;
+    const front = s >= 0; // fake depth: the strand nearer the viewer gets the bigger, brighter node
+    rungs.push(
+      <g key={i} className="xpl-rung">
+        <line x1={x} y1={ya} x2={x} y2={yb} />
+        <circle cx={x} cy={ya} r={front ? 4.6 : 3} className="xpl-node a" opacity={front ? 1 : 0.55} />
+        <circle cx={x} cy={yb} r={front ? 3 : 4.6} className="xpl-node b" opacity={front ? 0.55 : 1} />
+      </g>,
+    );
+    i++;
+  }
+  return (
+    <svg className="xpl-helix-svg" viewBox={`0 0 ${W} 140`} role="presentation">
+      <g className="xpl-helix-scroll">
+        <polyline className="xpl-strand a" points={strandA.join(' ')} />
+        <polyline className="xpl-strand b" points={strandB.join(' ')} />
+        {rungs}
+      </g>
+    </svg>
+  );
+}
+
 function StepRatchet() {
-  const [keyNo, setKeyNo] = useState(1);
-  const start = Math.max(1, keyNo - 3);
-  const chips = [];
-  for (let n = start; n <= keyNo; n++) chips.push(n);
+  const [keyNo, setKeyNo] = useState(0);
   return (
     <div className="xpl-step">
       <span className="xpl-kicker"><IconKey size={12} /> Frische Schlüssel</span>
-      <h2 className="xpl-title">Jede Nachricht kriegt einen neuen Schlüssel</h2>
+      <h2 className="xpl-title">Für jede Nachricht ein neuer Schlüssel</h2>
       <p className="xpl-lead">
-        Nach dem Senden wird der Schlüssel <b>sofort weggeworfen</b>. Klaut jemand
-        später einen, bleiben alle anderen Nachrichten sicher. Sende ein paar:
+        Du und dein Kontakt seid wie die zwei Stränge einer DNA. Jede Sprosse dazwischen
+        ist ein Schlüssel für genau <b>eine</b> Nachricht — dann rückt die Kette weiter und
+        erzeugt den nächsten. Sie läuft immer vorwärts, nie zurück.
       </p>
 
-      <div className="xpl-keys">
-        {chips.map((n) => (
-          <div key={n} className={`xpl-keychip${n === keyNo ? ' active' : ' spent'}`}>
-            <span className="xpl-keychip-ic">{n === keyNo ? <IconKey size={16} /> : <IconLock size={14} />}</span>
-            <span className="xpl-keychip-no">#{n}</span>
-          </div>
-        ))}
+      <div className="xpl-helix" aria-hidden="true">
+        <DnaHelix />
+        <span className="xpl-helix-badge" key={keyNo}>
+          <IconKey size={14} /> Schlüssel #{keyNo + 1}
+        </span>
       </div>
 
       <button className="btn btn-ghost xpl-send" onClick={() => setKeyNo((k) => k + 1)}>
@@ -211,8 +263,13 @@ function StepRatchet() {
       </button>
 
       <p className="xpl-note">
-        Schon <b>{keyNo - 1}</b> Schlüssel benutzt und vernichtet. Es geht nur vorwärts —
-        zurück zu einem alten Schlüssel führt kein Weg.
+        Nach dem Senden wird der Schlüssel <b>sofort weggeworfen</b>. Wird später einer
+        gestohlen, bleiben alle anderen Nachrichten — davor und danach — sicher.
+        {keyNo > 0 && (
+          <>
+            {' '}Schon <b>{keyNo}</b> benutzt und vernichtet.
+          </>
+        )}
       </p>
     </div>
   );

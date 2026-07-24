@@ -2657,6 +2657,26 @@ select {
   gap: 12px;
   padding: calc(12px + env(safe-area-inset-top)) 16px 10px;
 }
+/* Without this the button falls back to the browser default box (only .subhead
+   .back is styled), which sat off-centre behind the arrow. */
+.xpl-head .back {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  transition: transform 0.15s var(--ease-out), background 0.2s var(--ease-out);
+}
+.xpl-head .back:active {
+  transform: scale(0.92);
+  background: var(--surface2);
+}
 .xpl-head-spacer {
   width: 34px;
   flex: none;
@@ -2899,6 +2919,23 @@ select {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 18%, var(--elev));
 }
+.xpl-vault-tx {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  text-align: left;
+}
+.xpl-vault-t1 {
+  font-size: 14.5px;
+  font-weight: 600;
+}
+.xpl-vault-t2 {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+}
 .xpl-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -2906,25 +2943,42 @@ select {
   margin-top: 14px;
 }
 .xpl-tile {
-  padding: 16px 12px;
+  padding: 13px 12px;
   border-radius: var(--r-md);
   background: var(--surface2);
   border: 1px solid var(--border);
-  min-height: 52px;
+  min-height: 56px;
   display: flex;
   align-items: center;
-  justify-content: center;
+  gap: 10px;
   transition: background 0.3s var(--ease-out), border-color 0.3s var(--ease-out);
 }
 .xpl-tile.open {
   background: color-mix(in srgb, var(--accent) 9%, var(--surface2));
   border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
 }
-.xpl-tile-scramble {
+.xpl-tile-ic {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border-radius: 9px;
+  color: var(--faint);
+  background: var(--elev);
+  transition: color 0.3s var(--ease-out);
+}
+.xpl-tile.open .xpl-tile-ic {
+  color: var(--accent);
+}
+.xpl-tile-tx {
   font-size: 14px;
   color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.xpl-tile:not(.open) .xpl-tile-scramble {
+.xpl-tile:not(.open) .xpl-tile-tx {
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--faint);
@@ -2932,24 +2986,7 @@ select {
   user-select: none;
 }
 
-/* Ratchet step */
-.xpl-keys {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  min-height: 70px;
-  margin-bottom: 14px;
-}
-.xpl-keychip {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  padding: 11px 13px;
-  border-radius: var(--r-md);
-  border: 1px solid var(--border);
-  animation: xpl-pop 0.26s var(--ease-out) both;
-}
+/* Ratchet step — DNA double-helix */
 @keyframes xpl-pop {
   from {
     opacity: 0;
@@ -2960,23 +2997,64 @@ select {
     transform: none;
   }
 }
-.xpl-keychip-no {
-  font-size: 11px;
-  font-family: var(--font-mono);
+.xpl-helix {
+  position: relative;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, var(--surface2), var(--surface));
+  overflow: hidden;
+  margin-bottom: 14px;
 }
-.xpl-keychip.active {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 15%, var(--surface2));
+.xpl-helix-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.xpl-helix-scroll {
+  animation: xpl-scroll 5.5s linear infinite;
+}
+@keyframes xpl-scroll {
+  to {
+    transform: translateX(-120px);
+  }
+}
+.xpl-strand {
+  fill: none;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+}
+.xpl-strand.a {
+  stroke: var(--accent);
+}
+.xpl-strand.b {
+  stroke: color-mix(in srgb, var(--accent) 42%, var(--muted));
+}
+.xpl-rung line {
+  stroke: var(--border-strong);
+  stroke-width: 1.4;
+}
+.xpl-node.a {
+  fill: var(--accent);
+}
+.xpl-node.b {
+  fill: color-mix(in srgb, var(--accent) 45%, var(--muted));
+}
+.xpl-helix-badge {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 99px;
+  font-size: 12.5px;
+  font-weight: 600;
   color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
-}
-.xpl-keychip.spent {
-  color: var(--faint);
-  background: var(--surface2);
-  opacity: 0.7;
-}
-.xpl-keychip.spent .xpl-keychip-no {
-  text-decoration: line-through;
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  animation: xpl-pop 0.32s var(--ease-out) both;
 }
 .xpl-send,
 .xpl-compare {
@@ -3128,7 +3206,8 @@ select {
 @media (prefers-reduced-motion: reduce) {
   .xpl-card,
   .xpl-hero,
-  .xpl-keychip,
+  .xpl-helix-scroll,
+  .xpl-helix-badge,
   .xpl-li,
   .xpl-verified {
     animation: none;

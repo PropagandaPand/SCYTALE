@@ -2640,3 +2640,495 @@ select {
   line-height: 1;
   cursor: pointer;
 }
+
+/* ── Encryption explainer (Profile → "So funktioniert der Schutz") ──────────── */
+.xpl {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+}
+.xpl-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: calc(12px + env(safe-area-inset-top)) 16px 10px;
+}
+.xpl-head-spacer {
+  width: 34px;
+  flex: none;
+}
+.xpl-dots {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 7px;
+}
+.xpl-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 99px;
+  background: var(--border-strong);
+  cursor: pointer;
+  transition: width 0.24s var(--ease-out), background 0.24s var(--ease-out);
+}
+.xpl-dot.done {
+  background: color-mix(in srgb, var(--accent) 55%, var(--border-strong));
+}
+.xpl-dot.on {
+  width: 20px;
+  background: var(--accent);
+}
+.xpl-stage {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.xpl-card {
+  max-width: 460px;
+  margin: 0 auto;
+  padding: 8px 22px 28px;
+  animation: xpl-rise 0.28s var(--ease-out) both;
+}
+@keyframes xpl-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.xpl-step {
+  display: flex;
+  flex-direction: column;
+}
+.xpl-center {
+  align-items: center;
+  text-align: center;
+}
+.xpl-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+.xpl-title {
+  font-size: 23px;
+  font-weight: 700;
+  line-height: 1.2;
+  margin: 0 0 10px;
+  letter-spacing: -0.01em;
+}
+.xpl-lead {
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.5;
+  margin: 0 0 18px;
+}
+.xpl-note {
+  color: var(--faint);
+  font-size: 13.5px;
+  line-height: 1.5;
+  margin: 18px 0 0;
+}
+.xpl-note b {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+/* Intro */
+.xpl-hero {
+  width: 96px;
+  height: 96px;
+  border-radius: 28px;
+  display: grid;
+  place-items: center;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface2));
+  margin: 12px 0 20px;
+  animation: xpl-breathe 3.2s ease-in-out infinite;
+}
+@keyframes xpl-breathe {
+  0%, 100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.05);
+  }
+}
+.xpl-chips {
+  list-style: none;
+  padding: 0;
+  margin: 18px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+}
+.xpl-chips li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 15px;
+  border-radius: var(--r-md);
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 14.5px;
+  text-align: left;
+}
+.xpl-chips li svg {
+  color: var(--accent);
+  flex: none;
+}
+
+/* E2E step */
+.xpl-input-lbl {
+  font-size: 12px;
+  color: var(--faint);
+  margin-bottom: 6px;
+}
+.xpl-input {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 15px;
+  font-family: var(--font-sans);
+  margin-bottom: 14px;
+}
+.xpl-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.xpl-panel {
+  border-radius: var(--r-md);
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+}
+.xpl-panel-h {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 9px;
+  color: var(--muted);
+}
+.xpl-panel.ok {
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
+}
+.xpl-panel.ok .xpl-panel-h {
+  color: var(--accent);
+}
+.xpl-panel.bad .xpl-panel-h {
+  color: var(--danger);
+}
+.xpl-bubble {
+  display: inline-block;
+  background: var(--mine);
+  color: var(--mine-ink);
+  padding: 8px 13px;
+  border-radius: var(--r-bub);
+  font-size: 15px;
+  max-width: 100%;
+  word-break: break-word;
+}
+.xpl-cipher {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--faint);
+  word-break: break-all;
+  user-select: none;
+}
+.xpl-dim {
+  color: var(--faint);
+}
+
+/* Vault step */
+.xpl-vault {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 15px 16px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-strong);
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 14.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.16s var(--ease-out), border-color 0.24s var(--ease-out), background 0.24s var(--ease-out);
+}
+.xpl-vault:active {
+  transform: scale(0.98);
+}
+.xpl-vault.open {
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface2));
+}
+.xpl-vault-ic {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  flex: none;
+  color: var(--muted);
+  background: var(--elev);
+  transition: color 0.24s var(--ease-out), background 0.24s var(--ease-out);
+}
+.xpl-vault.open .xpl-vault-ic {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, var(--elev));
+}
+.xpl-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 14px;
+}
+.xpl-tile {
+  padding: 16px 12px;
+  border-radius: var(--r-md);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.3s var(--ease-out), border-color 0.3s var(--ease-out);
+}
+.xpl-tile.open {
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface2));
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+}
+.xpl-tile-scramble {
+  font-size: 14px;
+  color: var(--text);
+}
+.xpl-tile:not(.open) .xpl-tile-scramble {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--faint);
+  letter-spacing: 0.04em;
+  user-select: none;
+}
+
+/* Ratchet step */
+.xpl-keys {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  min-height: 70px;
+  margin-bottom: 14px;
+}
+.xpl-keychip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 11px 13px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  animation: xpl-pop 0.26s var(--ease-out) both;
+}
+@keyframes xpl-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.9) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.xpl-keychip-no {
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+.xpl-keychip.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 15%, var(--surface2));
+  color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.xpl-keychip.spent {
+  color: var(--faint);
+  background: var(--surface2);
+  opacity: 0.7;
+}
+.xpl-keychip.spent .xpl-keychip-no {
+  text-decoration: line-through;
+}
+.xpl-send,
+.xpl-compare {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Metadata step */
+.xpl-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.xpl-col {
+  border-radius: var(--r-md);
+  padding: 14px 14px 6px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+}
+.xpl-col-h {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+.xpl-col.bad {
+  border-color: color-mix(in srgb, var(--danger) 26%, var(--border));
+}
+.xpl-col.bad .xpl-col-h {
+  color: var(--danger);
+}
+.xpl-col.ok {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+}
+.xpl-col.ok .xpl-col-h {
+  color: var(--accent);
+}
+.xpl-li {
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--muted);
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+  animation: xpl-slidein 0.34s var(--ease-out) both;
+}
+@keyframes xpl-slidein {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Verify step */
+.xpl-devs {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin: 8px 0 18px;
+  width: 100%;
+}
+.xpl-dev {
+  flex: 1;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  padding: 14px 8px;
+}
+.xpl-dev-lbl {
+  font-size: 12px;
+  color: var(--faint);
+  margin-bottom: 8px;
+}
+.xpl-code {
+  display: flex;
+  justify-content: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.xpl-code span {
+  transition: color 0.3s var(--ease-out), transform 0.3s var(--ease-out);
+}
+.xpl-code.match {
+  color: var(--accent);
+}
+.xpl-devlink {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  background: var(--elev);
+  transition: color 0.3s var(--ease-out), background 0.3s var(--ease-out);
+}
+.xpl-devlink.match {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, var(--elev));
+}
+.xpl-verified {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 14.5px;
+  padding: 10px 16px;
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface2));
+  animation: xpl-pop 0.3s var(--ease-out) both;
+}
+
+/* Footer nav */
+.xpl-nav {
+  display: flex;
+  gap: 12px;
+  padding: 12px 22px calc(14px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+.xpl-back {
+  flex: 0 0 auto;
+  min-width: 96px;
+}
+.xpl-next {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.xpl-next-ic {
+  display: inline-flex;
+}
+@media (prefers-reduced-motion: reduce) {
+  .xpl-card,
+  .xpl-hero,
+  .xpl-keychip,
+  .xpl-li,
+  .xpl-verified {
+    animation: none;
+  }
+}

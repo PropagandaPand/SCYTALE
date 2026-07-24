@@ -285,3 +285,32 @@ export function IconCopy({ size = 18 }: { size?: number }) {
     </svg>
   );
 }
+
+export function IconKey({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden="true">
+      <circle cx="6" cy="6" r="3.4" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      <path d="m8.4 8.4 6 6M12.6 12.6l1.4-1.4M14.4 14.4l1.2-1.2" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+export function IconServer({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden="true">
+      <rect x="2.5" y="3" width="13" height="5" rx="1.6" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      <rect x="2.5" y="10" width="13" height="5" rx="1.6" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      <circle cx="5.4" cy="5.5" r="0.9" fill="currentColor" />
+      <circle cx="5.4" cy="12.5" r="0.9" fill="currentColor" />
+    </svg>
+  );
+}
+
+export function IconGraduation({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden="true">
+      <path d="M9 3 1.5 6.3 9 9.6l7.5-3.3L9 3Z" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+      <path d="M4.5 8v3.4c0 1 2 2.1 4.5 2.1s4.5-1.1 4.5-2.1V8" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}

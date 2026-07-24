@@ -135,12 +135,13 @@ import { QrScanner } from './QrScanner';
 import { CropModal } from './CropModal';
 import { BackupModal } from './BackupModal';
 import { BiometricEnroll } from './BiometricEnroll';
+import { Explainer } from './Explainer';
 import { biometricAvailable, biometricEnrolled, disableBiometricUnlock } from './lib/vaultService';
 import { Attachment, LightboxImg } from './Attachment';
 import {
   IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach, IconMic, IconTrash, IconDots, IconGroup, IconReply, IconForward, IconCopy,
   IconBell, IconDevices, IconArchive, IconChevron,
-  IconSticker,
+  IconSticker, IconGraduation,
 } from './icons';
 
 const MAX_ATTACH = 600 * 1024; // inline cap — keeps the WS frame under Cloudflare's ~1 MiB limit
@@ -260,12 +261,13 @@ interface Props {
   onLock: () => void;
 }
 
-type View = 'list' | 'chat' | 'add' | 'verify' | 'contact' | 'profile' | 'newgroup' | 'gmanage';
+type View = 'list' | 'chat' | 'add' | 'verify' | 'contact' | 'profile' | 'newgroup' | 'gmanage' | 'learn';
 
 // Navigation tree, so the hardware/gesture Back button steps UP one level inside
 // the app instead of leaving the (standalone) PWA — on Android, leaving meant the
 // vault re-locked and the user had to unlock again. list(0) → chat/add/profile/
-// newgroup(1) → contact/verify/gmanage(2, all reached from an open chat).
+// newgroup(1) → contact/verify/gmanage(2, reached from an open chat) / learn(2,
+// reached from profile).
 function viewDepth(v: View): number {
   switch (v) {
     case 'list':
@@ -273,12 +275,14 @@ function viewDepth(v: View): number {
     case 'contact':
     case 'verify':
     case 'gmanage':
+    case 'learn':
       return 2;
     default:
       return 1;
   }
 }
 function parentView(v: View): View {
+  if (v === 'learn') return 'profile';
   return v === 'contact' || v === 'verify' || v === 'gmanage' ? 'chat' : 'list';
 }
 
@@ -4503,6 +4507,10 @@ export function Messenger({ dek, onLock }: Props) {
   }
 
   // ── Profile ───────────────────────────────────────────────────────
+  if (view === 'learn') {
+    return <Explainer onClose={() => setView('profile')} />;
+  }
+
   if (view === 'profile') {
     return (
       <div className="subview">
@@ -4556,6 +4564,15 @@ export function Messenger({ dek, onLock }: Props) {
                 </span>
               </button>
             )}
+
+            <button className="setting-row" onClick={() => setView('learn')}>
+              <span className="setting-ic"><IconGraduation /></span>
+              <span className="setting-tx">
+                <span className="setting-title">So funktioniert der Schutz</span>
+                <span className="setting-sub">In 5 Schritten erklärt — ohne Fachchinesisch</span>
+              </span>
+              <span className="setting-go"><IconChevron /></span>
+            </button>
 
             <button
               className="setting-row"

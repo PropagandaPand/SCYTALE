@@ -120,7 +120,7 @@ import {
   allRecvMarkerIds,
 } from './lib/attachments';
 import { pushSupported, enablePush, disablePush, currentSubscription } from './lib/push';
-import { loadMessages, saveMessages, clearMessages, allMessageRoomIds, aggregateDelivery, hasMessage, type ChatMessage, type DeviceDelivery, type FileRef, type Quote } from './lib/messages';
+import { loadMessages, saveMessages, clearMessages, allMessageRoomIds, aggregateDelivery, hasMessage, loadRecalledMids, saveRecalledMids, type ChatMessage, type DeviceDelivery, type FileRef, type Quote } from './lib/messages';
 import { RelayClient, type RelayStatus } from './lib/relay';
 import { makeQr } from './lib/qr';
 import { bytesToB64, b64ToBytes } from './lib/bytes';
@@ -291,6 +291,10 @@ export function Messenger({ dek, onLock }: Props) {
   const contactsRef = useRef<Contact[]>([]);
   const messagesRef = useRef<Record<string, ChatMessage[]>>({});
   const unreadRef = useRef<Record<string, number>>({});
+  // mids that were recalled — persisted, so a recalled message can't reappear when its
+  // original re-delivers, and an out-of-order recall (arrived before its original)
+  // tombstones the original on append.
+  const recalledMidsRef = useRef<Set<string>>(new Set());
   const sendRoomRef = useRef<Map<string, string>>(new Map());
   const inboxClientRef = useRef<RelayClient | null>(null);
   const seenIdsRef = useRef<Set<number>>(new Set());
@@ -380,6 +384,7 @@ export function Messenger({ dek, onLock }: Props) {
     lock: 'h' | 'v' | null; // committed drag axis; decided once, then never re-checked
     dx: number; // last horizontal travel, so a cancelled-but-far-enough drag still fires
   } | null>(null);
+  const longPressRef = useRef<number | null>(null); // hold-to-recall timer on own bubbles
   const [backupMode, setBackupMode] = useState<'export' | 'import' | null>(null);
   const [bioSupported, setBioSupported] = useState(false); // platform authenticator present
   const [bioOn, setBioOn] = useState(false); // biometric unlock enrolled for this vault
@@ -471,11 +476,35 @@ export function Messenger({ dek, onLock }: Props) {
     el.style.transform = '';
     el.style.setProperty('--reply-progress', '0');
   }
+  function clearLongPress() {
+    if (longPressRef.current !== null) {
+      clearTimeout(longPressRef.current);
+      longPressRef.current = null;
+    }
+  }
+  // Hold a message I sent → offer to recall it. 1:1 only; a group message (no matching
+  // 1:1 contact) or one already recalled is ignored.
+  function promptRecall(m: ChatMessage) {
+    const roomId = activeRoomRef.current;
+    if (!roomId || !m.mine || !m.mid || m.recalled) return;
+    if (!contactsRef.current.find((c) => c.roomId === roomId)) return; // 1:1 only for now
+    if (
+      confirm(
+        'Nachricht für alle zurückrufen?\n\nSie wird auf beiden Seiten durch „zurückgerufen" ersetzt. ' +
+          'Keine Garantie — was der Empfänger schon gesehen oder gespeichert hat, lässt sich nicht zurückholen.',
+      )
+    ) {
+      void recallMessage(roomId, m);
+    }
+  }
   function onBubblePointerDown(e: React.PointerEvent<HTMLDivElement>, m: ChatMessage) {
     if (!m.mid) return; // nothing to link a reply to
     // Don't touch transition/transform yet — wait until the drag commits to the
     // horizontal axis, so a tap or a vertical scroll leaves the bubble untouched.
     swipeReplyRef.current = { mid: m.mid, x: e.clientX, y: e.clientY, el: e.currentTarget, lock: null, dx: 0 };
+    // Press-and-hold on my OWN, not-yet-recalled message → recall affordance.
+    clearLongPress();
+    if (m.mine && !m.recalled) longPressRef.current = window.setTimeout(() => promptRecall(m), 500);
   }
   function onBubblePointerMove(e: React.PointerEvent<HTMLDivElement>) {
     const st = swipeReplyRef.current;
@@ -484,6 +513,7 @@ export function Messenger({ dek, onLock }: Props) {
     const dy = e.clientY - st.y;
     const ax = Math.abs(dx);
     const ay = Math.abs(dy);
+    if (ax > 6 || ay > 6) clearLongPress(); // any real movement → it's a drag, not a hold
     // Decide the axis ONCE, then never re-check it — so a vertical wobble mid-drag
     // can't abort a horizontal reply gesture. Bias toward horizontal: vertical only
     // wins if it CLEARLY dominates (SWIPE_BIAS×), otherwise a mostly-sideways drag
@@ -518,6 +548,7 @@ export function Messenger({ dek, onLock }: Props) {
   // the event's coordinates) means a drag the browser CANCELS after it passed the
   // trigger still opens the reply, instead of being silently lost.
   function endBubbleSwipe(m: ChatMessage) {
+    clearLongPress(); // finger lifted before the hold fired → it was a tap/swipe
     const st = swipeReplyRef.current;
     if (!st) return;
     const fire = st.lock === 'h' && st.dx > REPLY_TRIGGER;
@@ -561,9 +592,52 @@ export function Messenger({ dek, onLock }: Props) {
       const persisted = await loadMessages(dek, roomId);
       if (messagesRef.current[roomId] === undefined) messagesRef.current[roomId] = persisted;
     }
-    messagesRef.current[roomId] = [...(messagesRef.current[roomId] ?? []), msg];
+    // Recall that arrived BEFORE its original: tombstone on append (any attachment
+    // blob becomes an orphan with no reference and is GC'd).
+    const toAppend =
+      msg.mid && recalledMidsRef.current.has(msg.mid)
+        ? { ...msg, recalled: true, text: undefined, file: undefined, reply: undefined }
+        : msg;
+    messagesRef.current[roomId] = [...(messagesRef.current[roomId] ?? []), toAppend];
     commitMessages();
     await saveMessages(dek, roomId, messagesRef.current[roomId]);
+  }
+
+  // Tombstone a message (by mid + direction) as recalled: drop its text/file/reply and
+  // delete any attachment blob. If it isn't here yet (out-of-order recall), remember
+  // the mid so appendMessage tombstones it on arrival. Persisted + idempotent.
+  async function retractMessage(roomId: string, targetMid: string, mine: boolean): Promise<void> {
+    if (messagesRef.current[roomId] === undefined) {
+      messagesRef.current[roomId] = await loadMessages(dek, roomId);
+    }
+    const arr = messagesRef.current[roomId] ?? [];
+    const next = arr.map((m) => {
+      if (m.mid === targetMid && m.mine === mine && !m.recalled) {
+        if (m.file?.attId) void deleteAttachment(m.file.attId);
+        return { ...m, recalled: true, text: undefined, file: undefined, reply: undefined };
+      }
+      return m;
+    });
+    messagesRef.current[roomId] = next;
+    if (!recalledMidsRef.current.has(targetMid)) {
+      recalledMidsRef.current.add(targetMid);
+      await saveRecalledMids(dek, [...recalledMidsRef.current]);
+    }
+    commitMessages();
+    await saveMessages(dek, roomId, next);
+  }
+
+  // Recall ("unsend") one of MY OWN messages: tombstone it locally, then ask the peer's
+  // devices to retract their copy and mirror the recall to my own other devices. 1:1
+  // only for now (groups are a follow-up). Cooperative — no guarantee (SECURITY.md).
+  async function recallMessage(roomId: string, m: ChatMessage): Promise<void> {
+    if (!m.mid || !m.mine || m.recalled) return;
+    const contact = contactsRef.current.find((c) => c.roomId === roomId);
+    if (!contact) return; // group message: not supported yet
+    await retractMessage(roomId, m.mid, true);
+    await fanoutSend(contact, { kind: 'recall', targetMid: m.mid }, randomMid());
+    void syncToOwnDevices(contact.peerMasterPub, 'sent', m.mid, m.ts, { kind: 'recall', targetMid: m.mid });
+    bump();
   }
 
   // Receive one chunk of a large attachment (Stage 7b). A wire chunk is sealed and
@@ -1808,6 +1882,10 @@ export function Messenger({ dek, onLock }: Props) {
         // mid against the peer's own fan-out copy that may also reach this device.
         const displayRoom = await computeMasterRoomId(myMaster, asMasterPub(content.targetPeerMaster));
         const inner = content.inner;
+        if (inner.kind === 'recall') {
+          // My own recall, mirrored from another of my devices → tombstone my copy here.
+          await retractMessage(displayRoom, inner.targetMid, content.origin === 'sent');
+        } else {
         // Dedup within the SAME direction only (mid, mine). A self-synced SENT copy
         // (mine=true) must not be suppressed by a peer message that REFLECTS its mid,
         // and vice versa — the peer knows this mid (it decrypted its own fan-out copy),
@@ -1824,6 +1902,7 @@ export function Messenger({ dek, onLock }: Props) {
           if (content.origin !== 'sent' && !(viewRef.current === 'chat' && activeRoomRef.current === displayRoom)) {
             unreadRef.current[displayRoom] = (unreadRef.current[displayRoom] ?? 0) + 1;
           }
+        }
         }
       } else if (content.kind === 'bootreq') {
         // A linked device of MINE pulls the account snapshot. receiveEnvelope already
@@ -1851,6 +1930,9 @@ export function Messenger({ dek, onLock }: Props) {
         // A piece of a large attachment: store it, and on the last chunk append the
         // reassembled attachment. Terminal — never a bubble, never self-synced.
         await receiveChunk(contact, content);
+      } else if (content.kind === 'recall') {
+        // The peer recalls one of THEIR messages → tombstone their copy (mine=false).
+        await retractMessage(contact.roomId, content.targetMid, false);
       } else if (mid && hasMessage(messagesRef.current[contact.roomId] ?? [], mid, false)) {
         // DEDUP on the E2E mid, WITHIN the received direction (mine=false): one peer
         // message can reach this device via direct fan-out AND (with receive-sync) a
@@ -1998,6 +2080,7 @@ export function Messenger({ dek, onLock }: Props) {
         const gs = await loadGroups(dek);
         groupsRef.current = gs;
         for (const g of gs) messagesRef.current[g.id] = await loadMessages(dek, g.id);
+        recalledMidsRef.current = new Set(await loadRecalledMids(dek));
         commitMessages();
         bump();
         await sweepOrphanAttachments(); // race-free: still inside the boot task
@@ -3581,26 +3664,32 @@ export function Messenger({ dek, onLock }: Props) {
               onPointerUp={() => endBubbleSwipe(m)}
               onPointerCancel={() => endBubbleSwipe(m)}
             >
-              {m.reply && (
-                <div
-                  className="bubble-quote"
-                  role="button"
-                  title="Zur Nachricht springen"
-                  onClick={() => scrollToQuoted(m.reply?.mid)}
-                >
-                  {(m.reply.mine || m.reply.sender) && <span className="bq-who">{m.reply.mine ? 'Du' : m.reply.sender}</span>}
-                  <span className="bq-text">{m.reply.text || '📎 Anhang'}</span>
-                </div>
-              )}
-              {m.file ? (
-<Attachment
-                  dek={dek}
-                  file={m.file}
-                  onImageZoom={(b) => setZoomImg(b)}
-                  onStickerZoom={(f) => setStickerZoom({ mime: f.mime, dataB64: f.dataB64 ?? '' })}
-                />
+              {m.recalled ? (
+                <span className="recalled">🚫 Nachricht zurückgerufen</span>
               ) : (
-                m.text
+                <>
+                  {m.reply && (
+                    <div
+                      className="bubble-quote"
+                      role="button"
+                      title="Zur Nachricht springen"
+                      onClick={() => scrollToQuoted(m.reply?.mid)}
+                    >
+                      {(m.reply.mine || m.reply.sender) && <span className="bq-who">{m.reply.mine ? 'Du' : m.reply.sender}</span>}
+                      <span className="bq-text">{m.reply.text || '📎 Anhang'}</span>
+                    </div>
+                  )}
+                  {m.file ? (
+                    <Attachment
+                      dek={dek}
+                      file={m.file}
+                      onImageZoom={(b) => setZoomImg(b)}
+                      onStickerZoom={(f) => setStickerZoom({ mime: f.mime, dataB64: f.dataB64 ?? '' })}
+                    />
+                  ) : (
+                    m.text
+                  )}
+                </>
               )}
               <span className="meta">
                 {fmtClock(m.ts)}
@@ -3696,26 +3785,32 @@ export function Messenger({ dek, onLock }: Props) {
               onPointerCancel={() => endBubbleSwipe(m)}
             >
               {!m.mine && m.sender && <div className="bubble-sender">{m.sender}</div>}
-              {m.reply && (
-                <div
-                  className="bubble-quote"
-                  role="button"
-                  title="Zur Nachricht springen"
-                  onClick={() => scrollToQuoted(m.reply?.mid)}
-                >
-                  {(m.reply.mine || m.reply.sender) && <span className="bq-who">{m.reply.mine ? 'Du' : m.reply.sender}</span>}
-                  <span className="bq-text">{m.reply.text || '📎 Anhang'}</span>
-                </div>
-              )}
-              {m.file ? (
-<Attachment
-                  dek={dek}
-                  file={m.file}
-                  onImageZoom={(b) => setZoomImg(b)}
-                  onStickerZoom={(f) => setStickerZoom({ mime: f.mime, dataB64: f.dataB64 ?? '' })}
-                />
+              {m.recalled ? (
+                <span className="recalled">🚫 Nachricht zurückgerufen</span>
               ) : (
-                m.text
+                <>
+                  {m.reply && (
+                    <div
+                      className="bubble-quote"
+                      role="button"
+                      title="Zur Nachricht springen"
+                      onClick={() => scrollToQuoted(m.reply?.mid)}
+                    >
+                      {(m.reply.mine || m.reply.sender) && <span className="bq-who">{m.reply.mine ? 'Du' : m.reply.sender}</span>}
+                      <span className="bq-text">{m.reply.text || '📎 Anhang'}</span>
+                    </div>
+                  )}
+                  {m.file ? (
+                    <Attachment
+                      dek={dek}
+                      file={m.file}
+                      onImageZoom={(b) => setZoomImg(b)}
+                      onStickerZoom={(f) => setStickerZoom({ mime: f.mime, dataB64: f.dataB64 ?? '' })}
+                    />
+                  ) : (
+                    m.text
+                  )}
+                </>
               )}
               <span className="meta">
                 {fmtClock(m.ts)}

@@ -812,7 +812,10 @@ export type MessageContent =
   // carries the full transfer descriptor (tid/total/size/name/mime) so it is
   // self-describing and order-independent. Gated on the peer device's pv (>= 2): a
   // stale device is never sent a byte-14 frame, which it would throw on and lose.
-  | { kind: 'chunk'; tid: string; idx: number; total: number; size: number; name: string; mime: string; data: Bytes };
+  | { kind: 'chunk'; tid: string; idx: number; total: number; size: number; name: string; mime: string; data: Bytes }
+  // Recall ("unsend"): retract a previously-sent message, referenced by its E2E mid.
+  // Cooperative — the recipient's client tombstones its copy; no guarantee (SECURITY.md).
+  | { kind: 'recall'; targetMid: string };
 
 /** A decrypted inbound message plus its sender-stamped E2E dedup id. */
 export interface ReceivedMessage {
@@ -961,6 +964,7 @@ export async function frameContent(c: MessageContent): Promise<Bytes> {
     out.set(c.data, 5 + header.length);
     return out;
   }
+  if (c.kind === 'recall') return prefixed(15, utf8.encode(JSON.stringify({ m: c.targetMid })));
   // ginvite
   return prefixed(4, utf8.encode(JSON.stringify(c.group)));
 }
@@ -1079,6 +1083,11 @@ export async function unframeContent(bytes: Bytes): Promise<MessageContent> {
       mime: String(j.m),
       data: bytes.slice(5 + hlen),
     };
+  }
+
+  if (bytes[0] === 15) {
+    const j = JSON.parse(utf8.decode(bytes.slice(1)));
+    return { kind: 'recall', targetMid: String(j.m) };
   }
 
   if (bytes[0] !== 1) throw new Error('Unbekannter Frame-Typ: ' + bytes[0]);

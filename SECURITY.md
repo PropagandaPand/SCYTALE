@@ -528,6 +528,13 @@ Node/npm version.)
   log-structured store may retain the prior header (with the old wrapped DEK) in uncompacted logs, and the OS
   passkey persists until the user deletes it (inert without `header.prf`). Durable removal would require rotating
   the DEK (re-encrypting every record) — not implemented.
+- **Message recall is cooperative, not a guarantee.** Recalling ("unsending") a message asks the
+  recipient's client to tombstone its copy (shown as "recalled" on both sides, its text/attachment
+  dropped and the blob deleted); an out-of-order recall pre-empts the original on arrival, and a
+  persisted registry stops a recalled message reappearing on re-delivery. But it cannot undo what was
+  already read or screenshotted, does nothing against a modified client, and cannot pull the message
+  from the relay mailbox while the recipient is offline (it is delivered, then retracted). The same
+  property as every messenger's "delete for everyone" — a courtesy, never a confidentiality control.
 - **Voice-message codec is device-dependent (cross-platform gap, issue #13).** `MediaRecorder` yields whatever
   container/codec the recording browser supports (Chrome: webm/opus; iOS Safari: mp4/aac), and iOS cannot play
   webm/opus — so an Android voice message may not play on iOS. To be fixed with the large-attachment work.

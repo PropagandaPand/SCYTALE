@@ -39,6 +39,10 @@ export interface ChatMessage {
   file?: FileRef;
   reply?: Quote; // this message is a reply to another; shown as a quote above it
   mid?: string; // stable E2E/bubble id (Stage 3d: shared across fan-out + self-sync copies)
+  // The message was recalled ("unsent") by its sender — shown as a tombstone on BOTH
+  // sides, its text/file dropped. Cooperative, not a guarantee (see SECURITY.md): it
+  // only asks the recipient's client to retract; it can't undo what was already read.
+  recalled?: boolean;
   // Delivery to the relay (not read-receipt): pending until the DO confirms the
   // SQLite insert, then 'sent'; 'failed' on nack (mailbox full) or ack timeout.
   // Undefined on old/received messages → rendered as delivered.
@@ -123,4 +127,25 @@ export async function clearMessages(roomId: string): Promise<void> {
  *  the orphan sweep, so no still-referenced attachment is ever collected. */
 export async function allMessageRoomIds(): Promise<string[]> {
   return (await listRecordKeys(recordKey(''))).map((k) => k.slice(recordKey('').length));
+}
+
+// Recall registry: mids that were recalled but whose ORIGINAL had not arrived yet
+// (out-of-order, or a re-delivery after the original was tombstoned+dropped). Persisted
+// so a recalled message can't reappear after a reload when its original re-delivers.
+// Globally unique mids, so one flat set suffices.
+const recalledKey = 'recalled-mids';
+const recalledAad = utf8.encode('scytale:recalled-mids:v1');
+
+export async function loadRecalledMids(dek: CryptoKey): Promise<string[]> {
+  const rec = await loadRecord(recalledKey);
+  if (!rec) return [];
+  try {
+    return JSON.parse(utf8.decode(await open(dek, rec, recalledAad))) as string[];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveRecalledMids(dek: CryptoKey, mids: string[]): Promise<void> {
+  await saveRecord(recalledKey, await seal(dek, utf8.encode(JSON.stringify(mids)), recalledAad));
 }

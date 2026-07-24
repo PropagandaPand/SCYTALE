@@ -2390,6 +2390,10 @@ select {
   transition: opacity 0.15s ease;
   pointer-events: none;
 }
+.recalled {
+  font-style: italic;
+  opacity: 0.6;
+}
 .bubble-quote {
   display: flex;
   flex-direction: column;

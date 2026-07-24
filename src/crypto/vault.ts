@@ -133,6 +133,21 @@ export async function deriveHeaderKek(passphrase: string, header: VaultHeader): 
   return importKek(kekBytes);
 }
 
+/** Verify a KEK against the header WITHOUT producing an extractable key — validates
+ *  a passphrase before biometric enrollment so the extractable DEK is minted only at
+ *  the last moment (see vaultService, audit N-2). Throws if the KEK is wrong. */
+export async function verifyKek(kek: CryptoKey, header: VaultHeader): Promise<void> {
+  await crypto.subtle.unwrapKey(
+    'raw',
+    header.wrappedDek,
+    kek,
+    { name: 'AES-GCM', iv: header.wrapIv },
+    { name: 'AES-GCM', length: 256 },
+    false, // non-extractable — discarded immediately; this is a validity check only
+    ['encrypt', 'decrypt'],
+  );
+}
+
 /** Unwrap the DEK as an EXTRACTABLE key — used transiently at biometric enrollment
  *  so the DEK can be re-wrapped under the PRF KEK. Throws if the KEK is wrong. */
 export async function unwrapDekExtractable(kek: CryptoKey, header: VaultHeader): Promise<CryptoKey> {

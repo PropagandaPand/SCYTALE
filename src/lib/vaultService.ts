@@ -15,6 +15,7 @@ import {
   unlockVault,
   deriveHeaderKek,
   unwrapDekExtractable,
+  verifyKek,
   wrapDekUnder,
   unwrapDekWithPrf,
   WrongPassphraseError,
@@ -149,13 +150,12 @@ export async function enableBiometricUnlock(passphrase: string): Promise<void> {
   const suffix = await recoverBindingSuffix(header);
   const candidate = header.deviceWrap ? augment(passphrase, suffix) : passphrase;
 
-  // One Argon2 run: derive the KEK, then unwrap the DEK EXTRACTABLE. A wrong
-  // passphrase makes the unwrap fail → count it against the lockout and surface it,
-  // with no biometric prompt wasted on a bad passphrase.
+  // One Argon2 run: derive the KEK, then VALIDATE the passphrase without producing an
+  // extractable key (audit N-2). A wrong passphrase → count it against the lockout and
+  // surface it, with no biometric prompt wasted on a bad passphrase.
   const passKek = await deriveHeaderKek(candidate, header);
-  let extractableDek: CryptoKey;
   try {
-    extractableDek = await unwrapDekExtractable(passKek, header);
+    await verifyKek(passKek, header);
   } catch {
     const info = await registerFailure();
     if (info.remainingMs > 0) throw new LockedOutError(info.remainingMs);
@@ -163,14 +163,17 @@ export async function enableBiometricUnlock(passphrase: string): Promise<void> {
   }
   await clearFailures();
 
-  // Now bring in the authenticator: register the credential, evaluate PRF, derive
-  // the KEK (salted with the device secret → device-bound), and add a second wrap of
-  // the DEK. The DEK itself is unchanged.
+  // Do the authenticator rounds and derive the PRF KEK FIRST (two interactive WebAuthn
+  // prompts, ~seconds each). Only THEN mint the extractable DEK, immediately before the
+  // wrap — so the exportable key exists for one synchronous step, not across the prompts
+  // (audit N-2: an XSS hooking exportKey would otherwise have a multi-second window).
   const bindingSalt = prfBindingSaltBytes(suffix);
   const { credentialId, prfSalt } = await createBiometricCredential();
   const prfSecret = await evaluatePrf(credentialId, prfSalt);
   const prfKek = await derivePrfKek(prfSecret, bindingSalt);
   prfSecret.fill(0); // best-effort scrub of the raw PRF secret
+
+  const extractableDek = await unwrapDekExtractable(passKek, header);
   const { wrapIv, wrappedDek } = await wrapDekUnder(prfKek, extractableDek);
 
   header.prf = { credentialId, salt: prfSalt, wrapIv, wrappedDek };

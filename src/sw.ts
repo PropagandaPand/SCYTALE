@@ -3,16 +3,16 @@
  * dependency-free so the app shell — our first line of defence against a
  * malicious code push — stays fully auditable. Two jobs:
  *
- *   1. Precache the app shell for offline use, and keep it CURRENT:
- *        - navigations → network-first (fresh index.html when online), so a
- *          deploy is picked up on the next online launch even if the SW itself
- *          hasn't updated yet — this is what stops iOS PWAs stranding on an old
- *          build. Hashed JS/CSS stay cache-first (immutable).
- *      NOTE: network-first HTML means the server controls the shell on every
- *      online launch. That's fine while we run `autoUpdate` (the server already
- *      pushes code silently in the testing phase). Before release — together
- *      with switching back to `prompt` — reconsider cache-first here so there's
- *      no silent code swap on a security tool.
+ *   1. Precache the app shell and serve it CACHE-FIRST. The shell is our first
+ *      line of defence against a malicious code push, so the code a user runs
+ *      must change ONLY when they explicitly accept an update — the server must
+ *      not be able to silently swap the shell on a live launch. Navigations and
+ *      hashed JS/CSS therefore both come from the precache. A new deploy produces
+ *      a new service worker that WAITS: ReloadPrompt forces registration.update()
+ *      on a timer and on every foreground (so even a backgrounded iOS PWA notices)
+ *      and surfaces "Neue Version" — tapping it posts SKIP_WAITING, the new SW
+ *      activates, and its precache (fresh index.html + new hashed assets) takes
+ *      over. Staleness is bounded by that prompt, not by a silent code swap.
  *   2. Wake on a CONTENT-FREE Web Push and show a generic "Neue Nachricht".
  *
  * The push payload never carries message content: the vault is passphrase-
@@ -89,19 +89,18 @@ sw.addEventListener('activate', (event) => {
   );
 });
 
-// Serve the freshest index.html the network can give us, but never hang: race
-// the fetch against a timeout and fall back to the cached shell. Caching HTML
-// cache-first is the "invisible update" trap that strands iOS PWAs on an old
-// build — network-first here means a new deploy is live the next time the app
-// opens online, regardless of when the service worker itself updates.
-async function freshShell(cache: Cache): Promise<Response> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 3500);
+// Serve the app shell CACHE-FIRST: the running code changes only when the user
+// accepts an update (which activates a new SW → a new precache). The server
+// cannot swap the shell out from under a live session on a security tool. The
+// network is touched only on a COLD cache — the very first launch, where the
+// install couldn't reach the network — so we still bootstrap offline capability.
+async function cachedShell(cache: Cache): Promise<Response> {
+  const cached = await cache.match('/index.html');
+  if (cached) return cached;
   try {
-    // Fetch '/' (200), NOT '/index.html' (which 307-redirects — a redirected
-    // response can't be cached and would throw on cache.put).
-    const fresh = await fetch('/', { cache: 'no-store', signal: ctrl.signal });
-    clearTimeout(timer);
+    // Cold cache only. Fetch '/' (200), NOT '/index.html' (which 307-redirects —
+    // a redirected response can't be cached and would throw on cache.put).
+    const fresh = await fetch('/', { cache: 'no-store' });
     if (fresh.ok) {
       try {
         await cache.put('/index.html', fresh.clone());
@@ -111,7 +110,7 @@ async function freshShell(cache: Cache): Promise<Response> {
       return fresh;
     }
   } catch {
-    clearTimeout(timer);
+    /* offline with an empty cache — nothing we can serve */
   }
   return (await cache.match('/index.html')) ?? Response.error();
 }
@@ -123,9 +122,9 @@ sw.addEventListener('fetch', (event) => {
   if (url.origin !== sw.location.origin) return; // never touch cross-origin
   if (url.pathname.startsWith('/api/')) return; // relay: always live network
 
-  // Navigations → network-first (with timeout + offline fallback).
+  // Navigations → cache-first (a new shell arrives only via an accepted update).
   if (req.mode === 'navigate') {
-    event.respondWith(caches.open(PRECACHE).then(freshShell));
+    event.respondWith(caches.open(PRECACHE).then(cachedShell));
     return;
   }
 

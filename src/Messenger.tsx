@@ -262,6 +262,26 @@ interface Props {
 
 type View = 'list' | 'chat' | 'add' | 'verify' | 'contact' | 'profile' | 'newgroup' | 'gmanage';
 
+// Navigation tree, so the hardware/gesture Back button steps UP one level inside
+// the app instead of leaving the (standalone) PWA — on Android, leaving meant the
+// vault re-locked and the user had to unlock again. list(0) → chat/add/profile/
+// newgroup(1) → contact/verify/gmanage(2, all reached from an open chat).
+function viewDepth(v: View): number {
+  switch (v) {
+    case 'list':
+      return 0;
+    case 'contact':
+    case 'verify':
+    case 'gmanage':
+      return 2;
+    default:
+      return 1;
+  }
+}
+function parentView(v: View): View {
+  return v === 'contact' || v === 'verify' || v === 'gmanage' ? 'chat' : 'list';
+}
+
 const shortFp = (fp: string) => (fp ? fp.split(' ').slice(0, 3).join(' ') + ' …' : '…');
 const displayName = (c: Contact) =>
   c.nickname?.trim() || c.peerName?.trim() || shortFp(c.peerFingerprint);
@@ -436,6 +456,44 @@ export function Messenger({ dek, onLock }: Props) {
   useEffect(() => {
     activeGroupRef.current = activeGroup;
   }, [activeGroup]);
+
+  // ── Hardware/gesture Back = go up one level, don't leave the PWA ──────────
+  // We keep the browser history depth in step with the view depth: descending a
+  // level pushes one guard entry; an in-app back button (which lowers `view`)
+  // rewinds it programmatically. A real Back press then pops one guard, and the
+  // popstate handler moves the view up a level instead of the PWA exiting (which
+  // on Android dropped the DEK and forced a re-unlock). At the list there are no
+  // guards left, so Back does its default thing (leave the app).
+  const histDepthRef = useRef(0);
+  const suppressPopRef = useRef(false);
+  useEffect(() => {
+    const target = viewDepth(view);
+    const cur = histDepthRef.current;
+    if (target > cur) {
+      for (let i = cur; i < target; i++) history.pushState({ scyDepth: i + 1 }, '');
+      histDepthRef.current = target;
+    } else if (target < cur) {
+      // View rose via an in-app control — consume the surplus guards, but tell the
+      // popstate handler to ignore the resulting event (the view is already right).
+      suppressPopRef.current = true;
+      histDepthRef.current = target;
+      history.go(target - cur); // negative → pops (cur - target) entries
+    }
+  }, [view]);
+  useEffect(() => {
+    const onPop = () => {
+      if (suppressPopRef.current) {
+        suppressPopRef.current = false; // our own history.go() rewind — not a user Back
+        return;
+      }
+      const v = viewRef.current;
+      if (v === 'list') return; // top level → let the browser handle it (exit)
+      histDepthRef.current = Math.max(0, histDepthRef.current - 1);
+      setView(parentView(v)); // step up one level; the guard was already popped
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
 
   const commitMessages = () => setMessages({ ...messagesRef.current });
 

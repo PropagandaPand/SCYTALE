@@ -3056,6 +3056,62 @@ select {
   border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
   animation: xpl-pop 0.32s var(--ease-out) both;
 }
+/* A key being created: born at the generation point, then drifts down the chain
+   and fades (used + discarded). One-shot per tap; removed on animationend. */
+.xpl-spark {
+  animation: xpl-spark-fly 1.15s var(--ease-out) forwards;
+}
+@keyframes xpl-spark-fly {
+  0% {
+    transform: translateX(0);
+    opacity: 0;
+  }
+  12% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(-164px);
+    opacity: 0;
+  }
+}
+.xpl-spark-core {
+  fill: var(--accent);
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: xpl-spark-core 1.15s var(--ease-out) forwards;
+}
+@keyframes xpl-spark-core {
+  0% {
+    transform: scale(0.4);
+  }
+  30% {
+    transform: scale(1.25);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+.xpl-spark-ring {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2.5;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: xpl-spark-ring 1.15s var(--ease-out) forwards;
+}
+@keyframes xpl-spark-ring {
+  0% {
+    transform: scale(0.4);
+    opacity: 0.9;
+  }
+  60% {
+    opacity: 0.4;
+  }
+  100% {
+    transform: scale(3.6);
+    opacity: 0;
+  }
+}
 .xpl-send,
 .xpl-compare {
   align-self: flex-start;

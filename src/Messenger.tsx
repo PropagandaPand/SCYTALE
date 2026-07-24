@@ -4569,7 +4569,7 @@ export function Messenger({ dek, onLock }: Props) {
               <span className="setting-ic"><IconGraduation /></span>
               <span className="setting-tx">
                 <span className="setting-title">So funktioniert der Schutz</span>
-                <span className="setting-sub">In 5 Schritten erklärt — ohne Fachchinesisch</span>
+                <span className="setting-sub">In 5 Schritten einfach erklärt</span>
               </span>
               <span className="setting-go"><IconChevron /></span>
             </button>

@@ -5,7 +5,7 @@
  * something the reader can poke at. Six short steps, each with its own little
  * animation or interaction. Pure client-side, no data leaves the component.
  */
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import {
   IconBack,
   IconChevron,
@@ -197,10 +197,11 @@ function StepVault() {
 }
 
 // A stylised DNA double-helix: two strands (you + your contact) with rungs — each
-// rung is one message's shared key. The whole thing scrolls forward forever and
-// loops seamlessly (sine period == scroll distance), so it reads as an endless
-// chain of key pairs that only ever moves ahead.
-function DnaHelix() {
+// rung is one message's shared key. It scrolls forward forever and loops seamlessly
+// (sine period == scroll distance). Creating a key emits a bright SPARK at the
+// generation point that bursts (birth) and drifts left down the chain, then fades
+// (used and discarded) — so the reader SEES the DNA react to each key, not just run.
+function DnaHelix({ sparks, onSparkEnd }: { sparks: number[]; onSparkEnd: (id: number) => void }) {
   const W = 340;
   const P = 120; // sine period == the translate distance, so the loop is seamless
   const amp = 30;
@@ -235,30 +236,45 @@ function DnaHelix() {
         <polyline className="xpl-strand b" points={strandB.join(' ')} />
         {rungs}
       </g>
+      <g className="xpl-spark-layer">
+        {sparks.map((id) => (
+          <g className="xpl-spark" key={id} onAnimationEnd={() => onSparkEnd(id)}>
+            <circle className="xpl-spark-ring" cx={236} cy={midY} r={6} />
+            <circle className="xpl-spark-core" cx={236} cy={midY} r={5} />
+          </g>
+        ))}
+      </g>
     </svg>
   );
 }
 
 function StepRatchet() {
   const [keyNo, setKeyNo] = useState(0);
+  const [sparks, setSparks] = useState<number[]>([]);
+  const sparkId = useRef(0);
+  const send = () => {
+    setKeyNo((k) => k + 1);
+    const id = ++sparkId.current;
+    setSparks((s) => [...s, id].slice(-8)); // cap, in case an animationend is ever missed
+  };
   return (
     <div className="xpl-step">
       <span className="xpl-kicker"><IconKey size={12} /> Frische Schlüssel</span>
       <h2 className="xpl-title">Für jede Nachricht ein neuer Schlüssel</h2>
       <p className="xpl-lead">
         Du und dein Kontakt seid wie die zwei Stränge einer DNA. Jede Sprosse dazwischen
-        ist ein Schlüssel für genau <b>eine</b> Nachricht — dann rückt die Kette weiter und
-        erzeugt den nächsten. Sie läuft immer vorwärts, nie zurück.
+        ist ein Schlüssel für genau <b>eine</b> Nachricht. Tipp auf „senden“ und sieh zu,
+        wie ein neuer entsteht — die Kette läuft immer vorwärts, nie zurück.
       </p>
 
       <div className="xpl-helix" aria-hidden="true">
-        <DnaHelix />
+        <DnaHelix sparks={sparks} onSparkEnd={(id) => setSparks((s) => s.filter((x) => x !== id))} />
         <span className="xpl-helix-badge" key={keyNo}>
           <IconKey size={14} /> Schlüssel #{keyNo + 1}
         </span>
       </div>
 
-      <button className="btn btn-ghost xpl-send" onClick={() => setKeyNo((k) => k + 1)}>
+      <button className="btn btn-ghost xpl-send" onClick={send}>
         <IconDoubleCheck size={13} /> Nächste Nachricht senden
       </button>
 

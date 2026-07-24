@@ -467,10 +467,10 @@ both arrive.
 
 `worker/index.ts`, `src/sw.ts`, `vite.config.ts`
 
-- **CSP `default-src 'self'`**: no external scripts/styles/fonts/connections — even a successful XSS cannot ship
-  a key to a foreign server. `script-src 'self' 'wasm-unsafe-eval'` (WASM only: libsodium/hash-wasm);
-  `style-src 'self' 'unsafe-inline'`. The **one deliberate opening** is `connect-src 'self' https://gateway.umami.is`
-  for the pinned, same-origin analytics beacon (see *Known limits*) — data-out only, never code-in.
+- **CSP `default-src 'self'`**: no external scripts/styles/fonts/**connections** — even a successful XSS can neither
+  inject code into the key-holding context nor exfiltrate to a foreign host. `script-src 'self' 'wasm-unsafe-eval'`
+  (WASM only: libsodium/hash-wasm); `style-src 'self' 'unsafe-inline'`; `connect-src 'self'` is total — there is no
+  third-party analytics or any other outbound destination; the app talks only to its own relay.
 - **Further headers**: HSTS (2 y, incl. subdomains), `nosniff`, `Referrer-Policy: no-referrer`,
   `X-Frame-Options: DENY` / `frame-ancestors 'none'`, COOP+CORP `same-origin`, a restrictive `Permissions-Policy`
   (camera/microphone same-origin only, geo/payment/USB off).
@@ -514,12 +514,6 @@ Node/npm version.)
 
 ## Known limits
 
-- **Analytics (third party):** the app loads a cookieless **umami** tracker for opt-in usage stats. Its script is
-  *pinned and served same-origin*, so it can never execute injected code in the key-holding context (`script-src`
-  stays `'self'`), and it sees no message content — but its anonymous page-view beacon goes to `gateway.umami.is`
-  (allowed in `connect-src`), which therefore learns visitor **IP + timing**, including on the lock screen before
-  unlock. A deliberate, bounded relaxation of the otherwise strict "no external destinations" stance; data-out
-  only, not code-in.
 - **Biometrics is more compellable than a passphrase.** Face ID / Touch ID can be coerced (a face/finger) more
   easily than a memorized passphrase. It is opt-in for exactly this reason — anyone who wants the stronger posture
   simply keeps using the passphrase. There is intentionally no cold-start passphrase requirement and no panic

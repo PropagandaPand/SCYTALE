@@ -9,16 +9,12 @@
  */
 import { RelayRoom, type Env } from './relay';
 
-// Content-Security-Policy: lock the app to its own origin. NO external SCRIPTS,
-// styles, fonts or images — so even a successful XSS can't INJECT code into the
-// key-holding context. 'wasm-unsafe-eval' is the narrow allowance WebAssembly
-// (libsodium, hash-wasm) needs.
-//
-// The one deliberate opening is connect-src → gateway.umami.is: the analytics
-// script is served SAME-ORIGIN (public/stats.js), so it cannot be swapped for
-// injected code; only its anonymous, cookieless count beacon leaves. This is a
-// data-out channel, not a code-in one — a real but bounded relaxation of the
-// "no network destinations" goal, made for opt-in usage stats.
+// Content-Security-Policy: lock the app to its own origin. NO external scripts,
+// styles, fonts, images OR network destinations — so even a successful XSS can
+// neither INJECT code into the key-holding context nor exfiltrate to a foreign
+// host. 'wasm-unsafe-eval' is the narrow allowance WebAssembly (libsodium,
+// hash-wasm) needs. `connect-src 'self'` is total: the app talks only to its own
+// relay (there is no third-party analytics or any other outbound destination).
 const CSP = [
   "default-src 'self'",
   "base-uri 'self'",
@@ -29,7 +25,7 @@ const CSP = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data:",
   "font-src 'self'",
-  "connect-src 'self' https://gateway.umami.is",
+  "connect-src 'self'",
   "worker-src 'self'",
   "manifest-src 'self'",
 ].join('; ');

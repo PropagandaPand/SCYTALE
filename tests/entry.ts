@@ -15,3 +15,4 @@ export { findSignedPreKey, consumeOneTimePreKey, currentBundle, ownSpkPublic } f
 export { aggregateDelivery, hasMessage } from '../src/lib/messages';
 export { derivePrfKek } from '../src/lib/biometric';
 export { isGroupMember, decideInvite } from '../src/lib/groups';
+export { encSection, decSection, backupMetaAad, backupAttAad } from '../src/lib/backupSections';

@@ -26,6 +26,7 @@ import {
   type Argon2Params,
   type Bytes,
 } from '../crypto';
+import { encSection, decSection, backupMetaAad, backupAttAad } from './backupSections';
 import { serializeContact, deserializeContact, type GroupInvite } from './session';
 import { loadOrCreateIdentity, saveIdentity } from './identity';
 import { loadOrCreatePreKeys, savePreKeys, serializePreKeys, deserializePreKeys } from './prekeys';
@@ -44,14 +45,17 @@ import { loadRetiredMasters, saveRetiredMasters } from './denylist';
 //   inline and ≤600 KB; unusable once attachments are large (one giant encrypt +
 //   base64 = OOM).
 //
-// v2 (current): a length-prefixed BINARY container assembled as a Blob, so nothing
-//   is ever held as one giant array or base64 string and each section is encrypted
-//   on its own:
+// v2/v3 (current): a length-prefixed BINARY container assembled as a Blob, so
+//   nothing is ever held as one giant array or base64 string and each section is
+//   encrypted on its own:
 //     [u32 headerLen][header JSON][meta ciphertext][att0 ciphertext][att1]…
-//   header = {v:2, argon2, salt, meta:{iv,len}, atts:[{id, iv, len}]}. The metadata
+//   header = {v, argon2, salt, meta:{iv,len}, atts:[{id, iv, len}]}. The metadata
 //   blob carries the identity/contacts/messages plus a name/mime map for the
 //   attachments; each attachment's bytes are a separate section. A v1 file starts
-//   with '{' (0x7b); a v2 file starts with a 4-byte length whose first byte is 0.
+//   with '{' (0x7b); a binary file starts with a 4-byte length whose first byte is 0.
+//   v3 differs from v2 only by binding each section to its role via GCM AAD (meta
+//   vs att:<id>) so ciphertexts cannot be spliced between roles/ids (audit N-3);
+//   v2 files (no AAD) still import — the reader passes no aad for them.
 
 interface V1Container {
   v: 1;
@@ -69,18 +73,8 @@ async function deriveExportKey(passphrase: string, salt: Bytes, params: Argon2Pa
   return key;
 }
 
-async function encSection(key: CryptoKey, plain: Bytes): Promise<{ iv: Bytes; ct: Bytes }> {
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plain));
-  return { iv, ct };
-}
-
-async function decSection(key: CryptoKey, iv: Bytes, ct: Bytes): Promise<Bytes> {
-  return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct));
-}
-
-interface V2Header {
-  v: 2;
+interface BinaryHeader {
+  v: 2 | 3; // v3 = v2 layout + per-section AAD role binding (audit N-3)
   argon2: Argon2Params;
   salt: string;
   meta: { iv: string; len: number };
@@ -192,23 +186,25 @@ export async function exportBackup(dek: CryptoKey, exportPassphrase: string): Pr
     }
   }
 
-  const metaSec = await encSection(key, await gather(dek, attMeta));
+  const metaSec = await encSection(key, await gather(dek, attMeta), backupMetaAad());
 
   // Each section is wrapped in its own Blob immediately, so its ciphertext array can
   // be released and the browser may back the growing file with disk — peak memory is
   // ~one attachment (its plaintext + ciphertext while it encrypts), not the whole set.
-  const atts: V2Header['atts'] = [];
+  // Each attachment section is AAD-bound to its own id so its ciphertext cannot be
+  // spliced under a different id on import (audit N-3).
+  const atts: BinaryHeader['atts'] = [];
   const bodyParts: BlobPart[] = [new Blob([metaSec.ct])];
   for (const id of ids) {
     const blob = await getAttachmentBlob(dek, id);
     if (!blob) continue; // incomplete/GC'd between listing and reading — skip
-    const sec = await encSection(key, new Uint8Array(await blob.arrayBuffer()));
+    const sec = await encSection(key, new Uint8Array(await blob.arrayBuffer()), backupAttAad(id));
     atts.push({ id, iv: await b64encode(sec.iv), len: sec.ct.length });
     bodyParts.push(new Blob([sec.ct]));
   }
 
-  const header: V2Header = {
-    v: 2,
+  const header: BinaryHeader = {
+    v: 3,
     argon2: DEFAULT_ARGON2,
     salt: await b64encode(salt),
     meta: { iv: await b64encode(metaSec.iv), len: metaSec.ct.length },
@@ -262,13 +258,15 @@ export async function importBackup(dek: CryptoKey, exportPassphrase: string, fil
   // v2 binary container.
   if (head.length < 4) throw new Error(CORRUPT);
   const headerLen = new DataView(head.buffer, head.byteOffset, head.byteLength).getUint32(0);
-  let header: V2Header;
+  let header: BinaryHeader;
   try {
-    header = JSON.parse(utf8.decode(await sliceBytes(file, 4, 4 + headerLen))) as V2Header;
+    header = JSON.parse(utf8.decode(await sliceBytes(file, 4, 4 + headerLen))) as BinaryHeader;
   } catch {
     throw new Error(CORRUPT);
   }
-  if (header.v !== 2) throw new Error('Unbekanntes Backup-Format.');
+  if (header.v !== 2 && header.v !== 3) throw new Error('Unbekanntes Backup-Format.');
+  // v3 binds each section to its role via AAD; v2 files were written without it.
+  const bindAad = header.v === 3;
   let off = 4 + headerLen;
   const key = await deriveExportKey(exportPassphrase, await b64decode(header.salt), header.argon2);
 
@@ -278,7 +276,9 @@ export async function importBackup(dek: CryptoKey, exportPassphrase: string, fil
   off += header.meta.len;
   let blob: BackupBlob;
   try {
-    blob = JSON.parse(utf8.decode(await decSection(key, await b64decode(header.meta.iv), metaCt))) as BackupBlob;
+    blob = JSON.parse(
+      utf8.decode(await decSection(key, await b64decode(header.meta.iv), metaCt, bindAad ? backupMetaAad() : undefined)),
+    ) as BackupBlob;
   } catch {
     throw new Error(WRONG_PASS);
   }
@@ -291,7 +291,12 @@ export async function importBackup(dek: CryptoKey, exportPassphrase: string, fil
     const start = off;
     off += a.len;
     try {
-      const bytes = await decSection(key, await b64decode(a.iv), await sliceBytes(file, start, start + a.len));
+      const bytes = await decSection(
+        key,
+        await b64decode(a.iv),
+        await sliceBytes(file, start, start + a.len),
+        bindAad ? backupAttAad(a.id) : undefined,
+      );
       const nm = blob.attMeta?.[a.id];
       await putAttachment(dek, a.id, bytes, nm?.name ?? 'anhang', nm?.mime ?? 'application/octet-stream');
     } catch {

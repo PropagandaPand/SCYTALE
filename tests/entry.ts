@@ -14,3 +14,4 @@ export * from '../src/lib/session';
 export { findSignedPreKey, consumeOneTimePreKey, currentBundle, ownSpkPublic } from '../src/lib/prekeys';
 export { aggregateDelivery, hasMessage } from '../src/lib/messages';
 export { derivePrfKek } from '../src/lib/biometric';
+export { isGroupMember, decideInvite } from '../src/lib/groups';

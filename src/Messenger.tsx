@@ -86,6 +86,8 @@ import {
   saveGroup,
   loadGroups,
   removeGroup,
+  isGroupMember,
+  decideInvite,
   type Group,
   type GroupMember,
 } from './lib/groups';
@@ -1968,11 +1970,11 @@ export function Messenger({ dek, onLock }: Props) {
         contact.peerName = content.name;
         contact.peerAvatarB64 = content.avatar ? bytesToB64(content.avatar) : undefined;
       } else if (content.kind === 'ginvite') {
-        await applyGroupInvite(content.group);
+        await applyGroupInvite(content.group, contact);
       } else if (content.kind === 'group') {
         await applyGroupMessage(content.groupId, content.senderName, content.inner, contact);
       } else if (content.kind === 'gremove') {
-        await deleteGroupAction(content.groupId);
+        await applyGroupRemove(content.groupId, contact);
       } else if (content.kind === 'gleave') {
         await applyGroupLeave(content.groupId, contact);
       } else if (content.kind === 'devlist') {
@@ -2660,8 +2662,22 @@ export function Messenger({ dek, onLock }: Props) {
     }
   }
 
-  async function applyGroupInvite(invite: GroupInvite) {
-    const g = await fromInvite(invite);
+  // AUTHORIZATION (audit F-02): a group roster is applied ONLY from an authorized
+  // sender. For an existing group the authenticated `sender` must be a CURRENT
+  // local member — otherwise a removed member (who still holds a pairwise session
+  // and knows the group id) could resurrect themselves, or a stranger could
+  // overwrite/rename the roster. A brand-new group is trust-on-first-invite. The
+  // decision — and the merge that preserves local-only state — lives in the pure,
+  // unit-tested decideInvite().
+  async function applyGroupInvite(invite: GroupInvite, sender: Contact) {
+    const incoming = await fromInvite(invite);
+    const existing = groupsRef.current.find((x) => x.id === incoming.id);
+    const decision = decideInvite(existing, incoming, sender.peerDhPub);
+    if (decision.verdict === 'reject') {
+      console.warn('[group] ginvite verworfen —', decision.reason);
+      return;
+    }
+    const g = decision.group;
     const had = messagesRef.current[g.id];
     groupsRef.current = [g, ...groupsRef.current.filter((x) => x.id !== g.id)];
     messagesRef.current[g.id] = had ?? [];
@@ -2685,6 +2701,20 @@ export function Messenger({ dek, onLock }: Props) {
       }
     }
     bump();
+  }
+
+  // A `gremove` ("you were removed") deletes the whole group locally — so it must
+  // be authorized just like a roster change: only a CURRENT member may remove you.
+  // An unknown group, or a sender who is not a member (a stranger who learned the
+  // group id, or an already-removed member), is ignored — otherwise anyone could
+  // wipe a victim's group, history and attachments (audit F-02).
+  async function applyGroupRemove(groupId: string, sender: Contact) {
+    const g = groupsRef.current.find((x) => x.id === groupId);
+    if (!g || !isGroupMember(g, sender.peerDhPub)) {
+      console.warn('[group] gremove von Nicht-Mitglied/unbekannter Gruppe verworfen.');
+      return;
+    }
+    await deleteGroupAction(groupId);
   }
 
   async function updateGroup(group: Group, sync: boolean) {

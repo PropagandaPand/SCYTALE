@@ -5,7 +5,7 @@
  * something the reader can poke at. Six short steps, each with its own little
  * animation or interaction. Pure client-side, no data leaves the component.
  */
-import { useState, useRef } from 'react';
+import { useState } from 'react';
 import {
   IconBack,
   IconChevron,
@@ -196,94 +196,82 @@ function StepVault() {
   );
 }
 
-// A stylised DNA double-helix: two strands (you + your contact) with rungs — each
-// rung is one message's shared key. It scrolls forward forever and loops seamlessly
-// (sine period == scroll distance). Creating a key emits a bright SPARK at the
-// generation point that bursts (birth) and drifts left down the chain, then fades
-// (used and discarded) — so the reader SEES the DNA react to each key, not just run.
-function DnaHelix({ sparks, onSparkEnd }: { sparks: number[]; onSparkEnd: (id: number) => void }) {
-  const W = 340;
-  const P = 120; // sine period == the translate distance, so the loop is seamless
-  const amp = 30;
+// A stylised DNA double-helix whose RUNGS ARE THE KEYS. One rung is "live" (the key
+// in use, glowing); rungs behind it are spent (extinguished, dimmed) and rungs ahead
+// are not yet used (faint). Sending a message advances the live rung one step: the
+// old key extinguishes and the whole chain slides left by one rung, so used keys
+// drift away and a fresh one lights up — the ratchet, walked one notch at a time.
+function DnaHelix({ sent }: { sent: number }) {
+  const P = 120; // sine period
+  const amp = 28;
   const midY = 70;
+  const PITCH = 30; // rung spacing along the axis
+  const I_MIN = -6; // a few already-spent rungs to the left so the chain reads as ongoing
+  const I_MAX = 44;
+  const ANCHOR = 145; // screen x the live rung is pinned to; the track slides under it
+  const yOf = (x: number) => midY + amp * Math.sin((2 * Math.PI * x) / P);
+
   const strandA: string[] = [];
   const strandB: string[] = [];
-  for (let x = 0; x <= W + P; x += 3) {
-    const y = midY + amp * Math.sin((2 * Math.PI * x) / P);
-    strandA.push(`${x},${y.toFixed(1)}`);
-    strandB.push(`${x},${(2 * midY - y).toFixed(1)}`);
+  for (let x = I_MIN * PITCH - 40; x <= I_MAX * PITCH + 40; x += 4) {
+    strandA.push(`${x},${yOf(x).toFixed(1)}`);
+    strandB.push(`${x},${(2 * midY - yOf(x)).toFixed(1)}`);
   }
+  const clamped = Math.min(sent, I_MAX - 6); // keep the live rung within generated content
   const rungs = [];
-  let i = 0;
-  for (let x = 0; x <= W + P; x += 15) {
-    const s = Math.sin((2 * Math.PI * x) / P);
-    const ya = midY + amp * s;
+  for (let i = I_MIN; i <= I_MAX; i++) {
+    const x = i * PITCH;
+    const ya = yOf(x);
     const yb = 2 * midY - ya;
-    const front = s >= 0; // fake depth: the strand nearer the viewer gets the bigger, brighter node
+    const state = i < clamped ? 'spent' : i === clamped ? 'live' : 'future';
     rungs.push(
-      <g key={i} className="xpl-rung">
+      <g key={i} className={`xpl-rung ${state}`}>
         <line x1={x} y1={ya} x2={x} y2={yb} />
-        <circle cx={x} cy={ya} r={front ? 4.6 : 3} className="xpl-node a" opacity={front ? 1 : 0.55} />
-        <circle cx={x} cy={yb} r={front ? 3 : 4.6} className="xpl-node b" opacity={front ? 0.55 : 1} />
+        <circle cx={x} cy={ya} r="5" />
+        <circle cx={x} cy={yb} r="5" />
       </g>,
     );
-    i++;
   }
   return (
-    <svg className="xpl-helix-svg" viewBox={`0 0 ${W} 140`} role="presentation">
-      <g className="xpl-helix-scroll">
+    <svg className="xpl-helix-svg" viewBox="0 0 340 140" role="presentation">
+      <g className="xpl-helix-track" style={{ transform: `translateX(${ANCHOR - clamped * PITCH}px)` }}>
         <polyline className="xpl-strand a" points={strandA.join(' ')} />
         <polyline className="xpl-strand b" points={strandB.join(' ')} />
         {rungs}
-      </g>
-      <g className="xpl-spark-layer">
-        {sparks.map((id) => (
-          <g className="xpl-spark" key={id} onAnimationEnd={() => onSparkEnd(id)}>
-            <circle className="xpl-spark-ring" cx={236} cy={midY} r={6} />
-            <circle className="xpl-spark-core" cx={236} cy={midY} r={5} />
-          </g>
-        ))}
       </g>
     </svg>
   );
 }
 
 function StepRatchet() {
-  const [keyNo, setKeyNo] = useState(0);
-  const [sparks, setSparks] = useState<number[]>([]);
-  const sparkId = useRef(0);
-  const send = () => {
-    setKeyNo((k) => k + 1);
-    const id = ++sparkId.current;
-    setSparks((s) => [...s, id].slice(-8)); // cap, in case an animationend is ever missed
-  };
+  const [sent, setSent] = useState(0);
   return (
     <div className="xpl-step">
       <span className="xpl-kicker"><IconKey size={12} /> Frische Schlüssel</span>
       <h2 className="xpl-title">Für jede Nachricht ein neuer Schlüssel</h2>
       <p className="xpl-lead">
         Du und dein Kontakt seid wie die zwei Stränge einer DNA. Jede Sprosse dazwischen
-        ist ein Schlüssel für genau <b>eine</b> Nachricht. Tipp auf „senden“ und sieh zu,
-        wie ein neuer entsteht — die Kette läuft immer vorwärts, nie zurück.
+        ist ein Schlüssel für genau <b>eine</b> Nachricht. Tipp auf „senden“: der aktuelle
+        Schlüssel wird benutzt, <b>erlischt</b> und die Kette rückt eine Sprosse weiter.
       </p>
 
       <div className="xpl-helix" aria-hidden="true">
-        <DnaHelix sparks={sparks} onSparkEnd={(id) => setSparks((s) => s.filter((x) => x !== id))} />
-        <span className="xpl-helix-badge" key={keyNo}>
-          <IconKey size={14} /> Schlüssel #{keyNo + 1}
+        <DnaHelix sent={sent} />
+        <span className="xpl-helix-badge" key={sent}>
+          <IconKey size={14} /> Schlüssel #{sent + 1}
         </span>
       </div>
 
-      <button className="btn btn-ghost xpl-send" onClick={send}>
+      <button className="btn btn-ghost xpl-send" onClick={() => setSent((s) => s + 1)}>
         <IconDoubleCheck size={13} /> Nächste Nachricht senden
       </button>
 
       <p className="xpl-note">
-        Nach dem Senden wird der Schlüssel <b>sofort weggeworfen</b>. Wird später einer
-        gestohlen, bleiben alle anderen Nachrichten — davor und danach — sicher.
-        {keyNo > 0 && (
+        Erloschene Schlüssel sind für immer weg — deshalb bleiben alte Nachrichten sicher,
+        selbst wenn später einer gestohlen wird. Und zurück zu einem alten führt kein Weg.
+        {sent > 0 && (
           <>
-            {' '}Schon <b>{keyNo}</b> benutzt und vernichtet.
+            {' '}Schon <b>{sent}</b> abgefahren und erloschen.
           </>
         )}
       </p>

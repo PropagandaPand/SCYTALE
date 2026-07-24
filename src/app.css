@@ -3010,34 +3010,63 @@ select {
   width: 100%;
   height: auto;
 }
-.xpl-helix-scroll {
-  animation: xpl-scroll 5.5s linear infinite;
+/* The track slides left one rung-pitch each time a key is sent. */
+.xpl-helix-track {
+  transition: transform 0.5s var(--ease-out);
 }
-@keyframes xpl-scroll {
-  to {
-    transform: translateX(-120px);
-  }
-}
+/* Strands = the two people; a quiet backbone so the rungs (the keys) lead. */
 .xpl-strand {
   fill: none;
-  stroke-width: 2.4;
+  stroke-width: 2.2;
   stroke-linecap: round;
+  opacity: 0.4;
 }
 .xpl-strand.a {
   stroke: var(--accent);
 }
 .xpl-strand.b {
-  stroke: color-mix(in srgb, var(--accent) 42%, var(--muted));
+  stroke: color-mix(in srgb, var(--accent) 45%, var(--muted));
 }
+/* A rung IS a key. Three states, cross-faded so a used key visibly extinguishes. */
 .xpl-rung line {
+  stroke-width: 1.6;
+  transition: stroke 0.5s var(--ease-out), opacity 0.5s var(--ease-out);
+}
+.xpl-rung circle {
+  transition: fill 0.5s var(--ease-out), opacity 0.5s var(--ease-out);
+}
+.xpl-rung.future line {
   stroke: var(--border-strong);
-  stroke-width: 1.4;
+  opacity: 0.6;
 }
-.xpl-node.a {
+.xpl-rung.future circle {
+  fill: color-mix(in srgb, var(--accent) 40%, var(--muted));
+  opacity: 0.55;
+}
+.xpl-rung.spent line {
+  stroke: var(--faint);
+  opacity: 0.35;
+}
+.xpl-rung.spent circle {
+  fill: var(--faint);
+  opacity: 0.3;
+}
+.xpl-rung.live line {
+  stroke: var(--accent);
+  opacity: 0.9;
+}
+.xpl-rung.live circle {
   fill: var(--accent);
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--accent) 80%, transparent));
+  animation: xpl-live-pulse 1.6s ease-in-out infinite;
 }
-.xpl-node.b {
-  fill: color-mix(in srgb, var(--accent) 45%, var(--muted));
+@keyframes xpl-live-pulse {
+  0%, 100% {
+    opacity: 0.85;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 .xpl-helix-badge {
   position: absolute;
@@ -3055,62 +3084,6 @@ select {
   background: color-mix(in srgb, var(--accent) 16%, var(--surface));
   border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
   animation: xpl-pop 0.32s var(--ease-out) both;
-}
-/* A key being created: born at the generation point, then drifts down the chain
-   and fades (used + discarded). One-shot per tap; removed on animationend. */
-.xpl-spark {
-  animation: xpl-spark-fly 1.15s var(--ease-out) forwards;
-}
-@keyframes xpl-spark-fly {
-  0% {
-    transform: translateX(0);
-    opacity: 0;
-  }
-  12% {
-    opacity: 1;
-  }
-  100% {
-    transform: translateX(-164px);
-    opacity: 0;
-  }
-}
-.xpl-spark-core {
-  fill: var(--accent);
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: xpl-spark-core 1.15s var(--ease-out) forwards;
-}
-@keyframes xpl-spark-core {
-  0% {
-    transform: scale(0.4);
-  }
-  30% {
-    transform: scale(1.25);
-  }
-  100% {
-    transform: scale(1);
-  }
-}
-.xpl-spark-ring {
-  fill: none;
-  stroke: var(--accent);
-  stroke-width: 2.5;
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: xpl-spark-ring 1.15s var(--ease-out) forwards;
-}
-@keyframes xpl-spark-ring {
-  0% {
-    transform: scale(0.4);
-    opacity: 0.9;
-  }
-  60% {
-    opacity: 0.4;
-  }
-  100% {
-    transform: scale(3.6);
-    opacity: 0;
-  }
 }
 .xpl-send,
 .xpl-compare {
@@ -3262,10 +3235,15 @@ select {
 @media (prefers-reduced-motion: reduce) {
   .xpl-card,
   .xpl-hero,
-  .xpl-helix-scroll,
+  .xpl-rung.live circle,
   .xpl-helix-badge,
   .xpl-li,
   .xpl-verified {
     animation: none;
+  }
+  .xpl-helix-track,
+  .xpl-rung line,
+  .xpl-rung circle {
+    transition: none;
   }
 }

@@ -149,6 +149,7 @@ const MAX_ATTACH = 600 * 1024; // inline cap — keeps the WS frame under Cloudf
 const CHUNK_BYTES = 48 * 1024;
 const AUTOPUSH_CAP = 2 * 1024 * 1024; // at/below → chunks auto-pushed to the mailbox
 const MAX_BIG_ATTACH = 25 * 1024 * 1024; // above AUTOPUSH_CAP and up to here → offer + pull
+const SERVE_COOLDOWN_MS = 30_000; // min gap between serving the SAME offered attachment to a contact (anti-amplification)
 // RECEIVE caps (sanity bounds; the real flood limit is the relay mailbox byte-cap,
 // which rate-limits what a peer can push before we drain it).
 const RECV_MAX_BYTES = 30 * 1024 * 1024; // largest attachment we'll reassemble
@@ -300,6 +301,7 @@ export function Messenger({ dek, onLock }: Props) {
   // tombstones the original on append.
   const recalledMidsRef = useRef<Set<string>>(new Set());
   const downloadingRef = useRef<Set<string>>(new Set()); // tids currently being pulled (spinner state)
+  const servedRef = useRef<Map<string, number>>(new Map()); // (roomId:tid) → last serve time, to rate-limit re-serves
   const sendRoomRef = useRef<Map<string, string>>(new Map());
   const inboxClientRef = useRef<RelayClient | null>(null);
   const seenIdsRef = useRef<Set<number>>(new Set());
@@ -715,9 +717,11 @@ export function Messenger({ dek, onLock }: Props) {
     if (!Number.isSafeInteger(c.idx) || c.idx < 0 || c.idx >= c.total) return;
     if (!Number.isSafeInteger(c.size) || c.size < 0 || c.size > RECV_MAX_BYTES) return;
     if (c.data.length > RECV_MAX_CHUNK_BYTES) return;
-    // Already fully received (re-delivery after completion, or a crash-resume that
-    // already finished) → nothing to do.
-    if (hasMessage(messagesRef.current[contact.roomId] ?? [], c.tid, false)) return;
+    // Already fully received (re-delivery after completion) → nothing to do. A pending
+    // OFFER PLACEHOLDER (mid=tid, mine=false, file.pull set) is NOT "received" — the
+    // pull's chunks must flow through, so skip only a COMPLETED (non-pull) message.
+    const prior = (messagesRef.current[contact.roomId] ?? []).find((x) => x.mid === c.tid && !x.mine);
+    if (prior && !prior.file?.pull) return;
 
     // First chunk of this transfer: register it (bounds concurrency, protects it from
     // the orphan GC, enables resume). Later chunks trust the FIRST descriptor, so a
@@ -754,8 +758,12 @@ export function Messenger({ dek, onLock }: Props) {
       const arr = messagesRef.current[contact.roomId] ?? [];
       const placeholder = arr.find((x) => x.mid === c.tid && !x.mine);
       if (placeholder) {
-        // A pulled offer: the placeholder is now downloaded → drop its pull marker.
-        const next = arr.map((x) => (x === placeholder ? { ...x, file: { ...x.file!, pull: undefined } } : x));
+        // A pulled offer: the placeholder is now downloaded. Reconcile its descriptor
+        // to the RECEIVED bytes' meta (the offer's name/mime/size were only a claim),
+        // and drop the pull marker so it renders as a normal attachment.
+        const next = arr.map((x) =>
+          x === placeholder ? { ...x, file: { name: marker.name, mime: marker.mime, size: marker.size, attId: c.tid } } : x,
+        );
         messagesRef.current[contact.roomId] = next;
         commitMessages();
         await saveMessages(dek, contact.roomId, next);
@@ -921,11 +929,11 @@ export function Messenger({ dek, onLock }: Props) {
   // own inbox, all sharing one `mid`. The advanced per-device sessions are persisted
   // BEFORE anything hits the wire, on the send serialization chain (Invariant I/II
   // per session). Returns the per-device delivery rows for the local bubble.
-  async function fanoutSend(contact: Contact, content: MessageContent, mid: string): Promise<DeviceDelivery[]> {
+  async function fanoutSend(contact: Contact, content: MessageContent, mid: string, minPv = 0): Promise<DeviceDelivery[]> {
     const id = identityRef.current;
     if (!id) return [];
     const { deliveries, unreachable } = await enqueueInbox(async () => {
-      const r = await fanoutDeliveries(id, contact, content, mid);
+      const r = await fanoutDeliveries(id, contact, content, mid, undefined, undefined, minPv);
       await saveContact(dek, contact); // persist advanced sessions before the wire
       return r;
     });
@@ -1004,11 +1012,15 @@ export function Messenger({ dek, onLock }: Props) {
   ): Promise<boolean> {
     const id = identityRef.current;
     if (!id) return false;
-    if (deviceProtocolVersion(contact, contact.peerSignPub) < 3) return false; // peer too old for offers
+    // Capable if ANY authorised device handles offers (not just the primary), and the
+    // offer is sent ONLY to those (pv>=3) — a below-version device is never handed the
+    // byte-16 frame it would throw on and lose.
+    const devs = contact.peerDeviceList?.devices.map((d) => d.signPub) ?? [contact.peerSignPub];
+    if (!devs.some((sp) => deviceProtocolVersion(contact, sp) >= 3)) return false;
     const tid = newAttachmentId();
     const total = Math.max(1, Math.ceil(data.length / CHUNK_BYTES));
     await putAttachment(dek, tid, data, name, mime); // keep locally to serve pulls + show to me
-    await fanoutSend(contact, { kind: 'attoffer', tid, name, mime, size: data.length, total }, randomMid());
+    await fanoutSend(contact, { kind: 'attoffer', tid, name, mime, size: data.length, total }, randomMid(), 3);
     await appendMessage(contact.roomId, {
       mine: true,
       ts: Date.now(),
@@ -1029,6 +1041,12 @@ export function Messenger({ dek, onLock }: Props) {
     if (!id || !/^[A-Za-z0-9]{1,40}$/.test(tid)) return;
     const arr = messagesRef.current[contact.roomId] ?? (await loadMessages(dek, contact.roomId));
     if (!arr.some((m) => m.mine && m.file?.attId === tid)) return; // not something I offered here
+    // Anti-amplification: a ~30 B attreq triggers up to a 25 MB stream, so rate-limit
+    // repeated pulls of the SAME tid from the SAME contact (a legit re-pull still works
+    // after the cooldown; a spam-replay can't make me re-upload on every request).
+    const key = contact.roomId + ':' + tid;
+    if (Date.now() - (servedRef.current.get(key) ?? 0) < SERVE_COOLDOWN_MS) return;
+    servedRef.current.set(key, Date.now());
     const meta = await getAttachmentMeta(dek, tid);
     const blob = meta ? await getAttachmentBlob(dek, tid) : null;
     if (!meta || !blob) return;
@@ -1051,11 +1069,18 @@ export function Messenger({ dek, onLock }: Props) {
   // contact; only the offering device (which holds the file) serves it.
   async function pullAttachment(roomId: string, m: ChatMessage): Promise<void> {
     if (!m.file?.pull || !m.file.attId || !m.mid) return;
+    const tid = m.file.attId;
+    if (downloadingRef.current.has(tid)) return; // already pulling (also guards a double-tap)
     const contact = contactsRef.current.find((c) => c.roomId === roomId);
     if (!contact) return;
-    downloadingRef.current.add(m.file.attId);
+    downloadingRef.current.add(tid);
     bump();
-    await fanoutSend(contact, { kind: 'attreq', tid: m.file.attId }, randomMid());
+    // Clear the spinner if nothing arrives (sender offline / interrupted) so the chip is
+    // tappable again; a completed pull clears it earlier in receiveChunk.
+    window.setTimeout(() => {
+      if (downloadingRef.current.delete(tid)) bump();
+    }, 60_000);
+    await fanoutSend(contact, { kind: 'attreq', tid }, randomMid());
   }
 
   // The hidden "self" contact: peerMaster == MY master, peerDeviceList == my own

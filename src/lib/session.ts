@@ -1195,11 +1195,18 @@ export async function fanoutDeliveries(
   mid: string,
   exclude?: Bytes,
   only?: Bytes,
+  minPv = 0,
 ): Promise<{ deliveries: FanoutDelivery[]; unreachable: Bytes[] }> {
   if (contact.staleIdentity) throw new StaleIdentityError();
   const deliveries: FanoutDelivery[] = [];
   const unreachable: Bytes[] = [];
   for (const t of authorisedTargets(contact, exclude, only)) {
+    // Protocol gate: never send a device a frame its version can't parse (it would
+    // throw-and-drop it, silently). A below-version device is `unreachable`, not sent.
+    if (minPv > 0 && deviceProtocolVersion(contact, t.signPub) < minPv) {
+      unreachable.push(t.signPub);
+      continue;
+    }
     try {
       deliveries.push({ deviceSignPub: t.signPub, sealed: await encryptForDevice(me, contact, t, content, mid) });
     } catch {

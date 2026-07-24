@@ -3111,10 +3111,12 @@ select {
 }
 .xpl-back {
   flex: 0 0 auto;
+  width: auto; /* override .btn width:100% — otherwise it eats the row and shoves "Weiter" off-screen */
   min-width: 96px;
 }
 .xpl-next {
   flex: 1;
+  width: auto; /* same: let flex size it, not .btn's 100% */
   display: inline-flex;
   align-items: center;
   justify-content: center;

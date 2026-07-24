@@ -109,6 +109,7 @@ import {
 } from './lib/bootstrap';
 import {
   putAttachment,
+  getAttachmentBlob,
   newAttachmentId,
   deleteAttachment,
   allAttachmentIds,
@@ -133,7 +134,7 @@ import { BiometricEnroll } from './BiometricEnroll';
 import { biometricAvailable, biometricEnrolled, disableBiometricUnlock } from './lib/vaultService';
 import { Attachment, LightboxImg } from './Attachment';
 import {
-  IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach, IconMic, IconTrash, IconDots, IconGroup,
+  IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach, IconMic, IconTrash, IconDots, IconGroup, IconReply, IconForward,
   IconBell, IconDevices, IconArchive, IconChevron,
   IconSticker,
 } from './icons';
@@ -352,6 +353,8 @@ export function Messenger({ dek, onLock }: Props) {
   const [renameInput, setRenameInput] = useState('');
   const [scanning, setScanning] = useState(false);
   const [chatMenu, setChatMenu] = useState(false);
+  const [msgMenu, setMsgMenu] = useState<{ roomId: string; m: ChatMessage } | null>(null); // long-press action sheet
+  const [forwardMsg, setForwardMsg] = useState<ChatMessage | null>(null); // message being forwarded → pick a contact
   // True once this account has more than one linked device (from the own device
   // list). Drives the "groups don't sync to your other devices yet" note (3e).
   const [multiDevice, setMultiDevice] = useState(false);
@@ -482,29 +485,36 @@ export function Messenger({ dek, onLock }: Props) {
       longPressRef.current = null;
     }
   }
-  // Hold a message I sent → offer to recall it. 1:1 only; a group message (no matching
-  // 1:1 contact) or one already recalled is ignored.
-  function promptRecall(m: ChatMessage) {
+  // Hold a message → the action sheet (reply / forward / delete). Not for a tombstone.
+  function openMsgMenu(m: ChatMessage) {
     const roomId = activeRoomRef.current;
-    if (!roomId || !m.mine || !m.mid || m.recalled) return;
-    if (!contactsRef.current.find((c) => c.roomId === roomId)) return; // 1:1 only for now
-    if (
-      confirm(
-        'Nachricht für alle zurückrufen?\n\nSie wird auf beiden Seiten durch „zurückgerufen" ersetzt. ' +
-          'Keine Garantie — was der Empfänger schon gesehen oder gespeichert hat, lässt sich nicht zurückholen.',
-      )
-    ) {
-      void recallMessage(roomId, m);
+    if (!roomId || m.recalled) return;
+    setMsgMenu({ roomId, m });
+  }
+  // Delete from the menu: MY message → recall it for everyone; a received one → remove
+  // it just from this device. Both drop any attachment blob (recall does so via
+  // retractMessage; local delete does it here).
+  async function deleteFromMenu(roomId: string, m: ChatMessage): Promise<void> {
+    if (m.mine) {
+      await recallMessage(roomId, m);
+      return;
     }
+    if (messagesRef.current[roomId] === undefined) messagesRef.current[roomId] = await loadMessages(dek, roomId);
+    const arr = messagesRef.current[roomId] ?? [];
+    const next = arr.filter((x) => x !== m);
+    if (m.file?.attId) void deleteAttachment(m.file.attId);
+    messagesRef.current[roomId] = next;
+    commitMessages();
+    await saveMessages(dek, roomId, next);
   }
   function onBubblePointerDown(e: React.PointerEvent<HTMLDivElement>, m: ChatMessage) {
     if (!m.mid) return; // nothing to link a reply to
     // Don't touch transition/transform yet — wait until the drag commits to the
     // horizontal axis, so a tap or a vertical scroll leaves the bubble untouched.
     swipeReplyRef.current = { mid: m.mid, x: e.clientX, y: e.clientY, el: e.currentTarget, lock: null, dx: 0 };
-    // Press-and-hold on my OWN, not-yet-recalled message → recall affordance.
+    // Press-and-hold → the message action sheet (unless it's already a tombstone).
     clearLongPress();
-    if (m.mine && !m.recalled) longPressRef.current = window.setTimeout(() => promptRecall(m), 500);
+    if (!m.recalled) longPressRef.current = window.setTimeout(() => openMsgMenu(m), 500);
   }
   function onBubblePointerMove(e: React.PointerEvent<HTMLDivElement>) {
     const st = swipeReplyRef.current;
@@ -630,6 +640,45 @@ export function Messenger({ dek, onLock }: Props) {
   // Recall ("unsend") one of MY OWN messages: tombstone it locally, then ask the peer's
   // devices to retract their copy and mirror the recall to my own other devices. 1:1
   // only for now (groups are a follow-up). Cooperative — no guarantee (SECURITY.md).
+  // Forward a message's content to another 1:1 contact — re-sends it as a fresh
+  // message (new mid), so it stands on its own. Text and files (re-read from the
+  // attachment store or inline bytes); a tombstone/pure-reply has nothing to forward.
+  async function forwardTo(contact: Contact, m: ChatMessage): Promise<void> {
+    setForwardMsg(null);
+    try {
+      if (m.file) {
+        const blob = m.file.dataB64
+          ? new Blob([b64ToBytes(m.file.dataB64)], { type: m.file.mime })
+          : m.file.attId
+            ? await getAttachmentBlob(dek, m.file.attId)
+            : null;
+        if (!blob) return setError('Anhang nicht mehr verfügbar.');
+        const data = new Uint8Array(await blob.arrayBuffer()) as Uint8Array<ArrayBuffer>;
+        const { name, mime } = m.file;
+        if (data.length > MAX_ATTACH) {
+          if (data.length > AUTOPUSH_CAP) return setError('Datei zu groß zum Weiterleiten.');
+          await sendChunkedAttachment(contact, data, name, mime);
+          return;
+        }
+        const mid = randomMid();
+        const deliveries = await fanoutSend(contact, { kind: 'file', name, mime, data }, mid);
+        void syncToOwnDevices(contact.peerMasterPub, 'sent', mid, Date.now(), { kind: 'file', name, mime, data });
+        await appendMessage(contact.roomId, { mine: true, ts: Date.now(), mid, file: await fileRefFor(name, mime, data), deliveries });
+      } else if (typeof m.text === 'string' && m.text.length > 0) {
+        const mid = randomMid();
+        const deliveries = await fanoutSend(contact, { kind: 'text', text: m.text }, mid);
+        void syncToOwnDevices(contact.peerMasterPub, 'sent', mid, Date.now(), { kind: 'text', text: m.text });
+        await appendMessage(contact.roomId, { mine: true, ts: Date.now(), mid, text: m.text, deliveries });
+      } else {
+        return;
+      }
+      await saveContact(dek, contact);
+      bump();
+    } catch (e) {
+      setError('Weiterleiten fehlgeschlagen: ' + (e as Error).message);
+    }
+  }
+
   async function recallMessage(roomId: string, m: ChatMessage): Promise<void> {
     if (!m.mid || !m.mine || m.recalled) return;
     const contact = contactsRef.current.find((c) => c.roomId === roomId);
@@ -3146,6 +3195,65 @@ export function Messenger({ dek, onLock }: Props) {
   // Full-screen image viewer (avatars, later chat images). Tap anywhere closes.
   const lightbox = zoomImg ? <LightboxImg blob={zoomImg} onClose={() => setZoomImg(null)} /> : null;
 
+  // Long-press action sheet on a message: reply / forward / delete.
+  const msgMenuEl = msgMenu ? (
+    <div className="sheet-scrim" onClick={() => setMsgMenu(null)}>
+      <div className="msg-sheet" onClick={(e) => e.stopPropagation()}>
+        <button
+          className="msg-sheet-row"
+          onClick={() => {
+            setReplyTo(quoteFrom(msgMenu.m));
+            setMsgMenu(null);
+          }}
+        >
+          <IconReply />
+          <span>Antworten</span>
+        </button>
+        {(msgMenu.m.text || msgMenu.m.file) && (
+          <button
+            className="msg-sheet-row"
+            onClick={() => {
+              setForwardMsg(msgMenu.m);
+              setMsgMenu(null);
+            }}
+          >
+            <IconForward />
+            <span>Weiterleiten</span>
+          </button>
+        )}
+        <button
+          className="msg-sheet-row danger"
+          onClick={() => {
+            const mm = msgMenu;
+            setMsgMenu(null);
+            void deleteFromMenu(mm.roomId, mm.m);
+          }}
+        >
+          <IconTrash />
+          <span>Löschen</span>
+        </button>
+      </div>
+    </div>
+  ) : null;
+
+  // Forward picker: choose a 1:1 contact to forward the held message to.
+  const forwardEl = forwardMsg ? (
+    <div className="sheet-scrim" onClick={() => setForwardMsg(null)}>
+      <div className="fwd-sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="fwd-head">Weiterleiten an</div>
+        <div className="fwd-list">
+          {contactsRef.current
+            .filter((c) => !c.hidden && !c.staleIdentity)
+            .map((c) => (
+              <button key={c.roomId} className="fwd-row" onClick={() => void forwardTo(c, forwardMsg)}>
+                {c.nickname || c.peerName || 'Kontakt'}
+              </button>
+            ))}
+        </div>
+      </div>
+    </div>
+  ) : null;
+
   // Tapping a sticker in a chat opens it large, with the option to keep it. The
   // action button must stop propagation — the backdrop closes on click.
   const stickerViewEl = stickerZoom ? (
@@ -3665,7 +3773,7 @@ export function Messenger({ dek, onLock }: Props) {
               onPointerCancel={() => endBubbleSwipe(m)}
             >
               {m.recalled ? (
-                <span className="recalled">🚫 Nachricht zurückgerufen</span>
+                <span className="recalled">Nachricht zurückgerufen</span>
               ) : (
                 <>
                   {m.reply && (
@@ -3704,6 +3812,8 @@ export function Messenger({ dek, onLock }: Props) {
         {stickerCropEl}
         {stickerPanelEl}
         {composerEl}
+        {msgMenuEl}
+        {forwardEl}
         {lightbox}
         {stickerViewEl}
       </div>
@@ -3786,7 +3896,7 @@ export function Messenger({ dek, onLock }: Props) {
             >
               {!m.mine && m.sender && <div className="bubble-sender">{m.sender}</div>}
               {m.recalled ? (
-                <span className="recalled">🚫 Nachricht zurückgerufen</span>
+                <span className="recalled">Nachricht zurückgerufen</span>
               ) : (
                 <>
                   {m.reply && (
@@ -3823,6 +3933,8 @@ export function Messenger({ dek, onLock }: Props) {
         {stickerCropEl}
         {stickerPanelEl}
         {composerEl}
+        {msgMenuEl}
+        {forwardEl}
       </div>
     );
   }

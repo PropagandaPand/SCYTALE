@@ -260,3 +260,19 @@ export function IconEyeOff({ size = 16 }: { size?: number }) {
     </svg>
   );
 }
+
+export function IconReply({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden="true">
+      <path d="M7 4 3 8l4 4M3 8h7a4 4 0 0 1 4 4v2" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+export function IconForward({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden="true">
+      <path d="M11 4l4 4-4 4M15 8H8a4 4 0 0 0-4 4v2" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}

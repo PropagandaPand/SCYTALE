@@ -59,6 +59,18 @@ profile and kept in IndexedDB (raw bytes never JS-readable). It encrypts a rando
 *bindingSecret* that is mixed into the passphrase **before** Argon2id → an exfiltrated vault
 is **worthless without this device**, even with the correct passphrase.
 
+> **Caveat — device binding assumes OS full-disk encryption (audit N-5).** "Non-extractable"
+> is a **JavaScript-runtime visibility** property, not at-rest encryption of the key bytes. On
+> Chromium/Firefox the raw bytes of an IndexedDB `CryptoKey` live in the browser profile on
+> disk, protected only by OS file permissions / OS full-disk encryption. Device binding is a
+> strong barrier against the **XSS / logical exfiltration** vector it was designed for (no
+> `CryptoKey` can be read out from JavaScript). But on a **seized device without OS-FDE**, a
+> forensic examiner can read the device-key bytes straight from the profile (LevelDB), decrypt
+> `deviceWrap.ciphertext` → `bindingSecret`, and the binding contributes nothing — residual
+> protection then collapses to **passphrase + Argon2id** alone. Enable full-disk encryption
+> (it is on by default on modern iOS/Android and available on every desktop OS) for the
+> at-rest guarantee to hold against physical seizure.
+
 **Biometric unlock (Face ID / Touch ID) — opt-in.** A convenience door onto the *same* vault,
 never a weaker copy of the key on disk. It is a **second wrap of the same random DEK** under a
 KEK derived from a **WebAuthn PRF** secret:
@@ -441,6 +453,15 @@ both arrive.
 - **Owner auth via Ed25519 challenge-response**: the DO sends a nonce, the owner signs, the DO checks
   `hash(signPub)==inbox` **and** the signature. Only the owner drains their queue — not everyone who merely has
   the code.
+  > **Caveat — owner auth reveals the raw signing key + live presence to the operator (audit N-8).** Proving
+  > ownership sends `{signPub, sig}` in the clear over the (TLS-terminated) socket, so Cloudflare learns
+  > **{owner IP ↔ raw Ed25519 signPub ↔ inbox}** and, over the auth socket's lifecycle, the owner's **real-time
+  > online/offline presence**. The `roomId` is `hash(signPub)` (one-way), but auth discloses the actual public
+  > key: an operator who already holds a target's public contact code / bundle (which contains `identitySignPub`)
+  > can link that signPub to a named identity, and the owner IP deanonymizes it. **Sealed sender is unaffected**
+  > — this concerns the *recipient/owner* draining their own mailbox, and proving mailbox ownership inherently
+  > reveals the key (Signal exposes the pubkey on ownership proof too). Mitigation is presence-minimizing drain
+  > patterns; today, treat inbox ownership as visible to the operator.
 - **Store-and-forward with an honest delivery receipt**: a SQLite queue. Both need **not** be online at once.
   Each send carries a `mid`; the DO replies after the insert with `{t:'sent', mid}`. The sender shows the tick
   **only after this ack** — pending (faint tick) until then. No ack within ~10 s **or** a `nack` (queue full) →
@@ -490,6 +511,14 @@ both arrive.
 - **Push notifications are content-free**: a wake signal only, no sender/text. The SW holds no keys and cannot
   decrypt. VAPID/ES256-signed; subscriptions are registrable only over the **authenticated** owner socket; expired
   endpoints (404/410) are deleted; `pushsubscriptionchange` re-registers.
+  > **Caveat — the relay stores an inbox ↔ device-push-token binding (audit N-7).** Push is opt-in and the
+  > wake-ups are content-free, but the Durable-Object `subs` table stores the FCM/APNs/Mozilla **endpoint** — a
+  > stable per-device token — bound to the inbox room. So Cloudflare's DO storage holds **{inbox ↔ device push
+  > token}**: a subpoena **to Cloudflare alone** yields that binding, and turning `endpoint → device/account`
+  > then requires Apple/Google. Separately, the VAPID `sub` (the app's own domain) tells the **push provider**
+  > "this device uses SCYTALE" plus delivery timing. This is the price of background wake-ups; users who want no
+  > such binding can simply leave push off (the app still receives on next open). A future hardening is to store
+  > the endpoint hashed/encrypted at the relay.
 
 ---
 

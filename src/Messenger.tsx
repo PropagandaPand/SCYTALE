@@ -2432,10 +2432,12 @@ export function Messenger({ dek, onLock }: Props) {
   }, []);
 
   // Pin the message list to the bottom (newest message) on open and on new messages.
-  // A single post-paint scroll isn't enough: inline images/videos load AFTER it and
-  // grow the list, which used to strand a freshly-opened chat in the middle. So we
-  // scroll now, on the next frame, and again as each still-loading media element
-  // becomes ready. useLayoutEffect avoids a visible jump.
+  // A single scroll-to-bottom isn't enough: attachments decrypt ASYNCHRONOUSLY and
+  // swap a placeholder for an <img>/<video> only later, growing the list after the
+  // scroll and stranding a freshly-opened chat in the middle. A ResizeObserver on the
+  // rows catches every height change whenever and however it happens; we keep re-
+  // pinning to the bottom until the user deliberately scrolls up. useLayoutEffect
+  // does the first scroll before paint, so there's no visible jump.
   useLayoutEffect(() => {
     if (view !== 'chat') return;
     const el = document.getElementById('msgs');
@@ -2443,23 +2445,23 @@ export function Messenger({ dek, onLock }: Props) {
     const toBottom = () => {
       el.scrollTop = el.scrollHeight;
     };
+    const atBottom = () => el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    let pin = true; // stay glued to the bottom until the user scrolls away from it
     toBottom();
+    const onScroll = () => {
+      pin = atBottom();
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    const ro = new ResizeObserver(() => {
+      if (pin) toBottom();
+    });
+    ro.observe(el);
+    for (const child of Array.from(el.children)) ro.observe(child);
     const raf = requestAnimationFrame(toBottom);
-    const media = Array.from(el.querySelectorAll('img, video')) as (HTMLImageElement | HTMLVideoElement)[];
-    const onReady = () => toBottom();
-    for (const m of media) {
-      const ready = m instanceof HTMLImageElement ? m.complete : m.readyState >= 1;
-      if (!ready) {
-        m.addEventListener('load', onReady);
-        m.addEventListener('loadeddata', onReady);
-      }
-    }
     return () => {
+      el.removeEventListener('scroll', onScroll);
+      ro.disconnect();
       cancelAnimationFrame(raf);
-      for (const m of media) {
-        m.removeEventListener('load', onReady);
-        m.removeEventListener('loadeddata', onReady);
-      }
     };
   }, [messages, activeRoom, activeGroup, view]);
 
@@ -4094,7 +4096,7 @@ export function Messenger({ dek, onLock }: Props) {
             <div
               key={`${m.ts}-${i}`}
               data-mid={m.mid}
-              className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file && isSticker(m.file) ? ' is-sticker' : m.file && (m.file.mime.startsWith('image/') || m.file.mime.startsWith('video/')) ? ' has-file' : ''}${!m.file && !m.reply && !m.recalled && bigEmojiLevel(m.text) ? ` emoji-big emoji-${bigEmojiLevel(m.text)}` : ''}`}
+              className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file && isSticker(m.file) ? ' is-sticker' : m.file && (m.file.mime.startsWith('image/') || m.file.mime.startsWith('video/')) ? ' has-file' : ''}${(() => { const e = !m.file && !m.recalled ? bigEmojiLevel(m.text) : 0; return e ? ` emoji-${e}${m.reply ? '' : ' emoji-big'}` : ''; })()}`}
               onPointerDown={(e) => onBubblePointerDown(e, m)}
               onPointerMove={onBubblePointerMove}
               onPointerUp={() => endBubbleSwipe(m)}
@@ -4233,7 +4235,7 @@ export function Messenger({ dek, onLock }: Props) {
             <div
               key={`${m.ts}-${i}`}
               data-mid={m.mid}
-              className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file && isSticker(m.file) ? ' is-sticker' : m.file && (m.file.mime.startsWith('image/') || m.file.mime.startsWith('video/')) ? ' has-file' : ''}${!m.file && !m.reply && !m.recalled && bigEmojiLevel(m.text) ? ` emoji-big emoji-${bigEmojiLevel(m.text)}` : ''}`}
+              className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file && isSticker(m.file) ? ' is-sticker' : m.file && (m.file.mime.startsWith('image/') || m.file.mime.startsWith('video/')) ? ' has-file' : ''}${(() => { const e = !m.file && !m.recalled ? bigEmojiLevel(m.text) : 0; return e ? ` emoji-${e}${m.reply ? '' : ' emoji-big'}` : ''; })()}`}
               onPointerDown={(e) => onBubblePointerDown(e, m)}
               onPointerMove={onBubblePointerMove}
               onPointerUp={() => endBubbleSwipe(m)}

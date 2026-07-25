@@ -82,6 +82,15 @@ export class RelayRoom extends DurableObject<Env> {
     } catch {
       /* column already present */
     }
+    // `silent` frames (profile/devlist/sync/recall/… — anything that is NOT a
+    // user-visible message) are queued and delivered like any other, but never
+    // trigger a wake-up push. Fixes phantom "Neue Nachricht" notifications with no
+    // actual message behind them. Old rows default to 0 (treated as a message).
+    try {
+      this.ctx.storage.sql.exec('ALTER TABLE q ADD COLUMN silent INTEGER DEFAULT 0');
+    } catch {
+      /* column already present */
+    }
     // Push subscriptions for this inbox's owner (only ever written after auth).
     this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS subs (endpoint TEXT PRIMARY KEY, sub TEXT)');
   }
@@ -110,7 +119,12 @@ export class RelayRoom extends DurableObject<Env> {
    *  push — but only if the owner is still offline and something is waiting. */
   async alarm(): Promise<void> {
     this.sweepExpired();
-    const pending = this.ctx.storage.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM q').one().n;
+    // Only a pending NON-silent (user-visible) message justifies a wake-up — so a
+    // burst of pure control frames, or a mailbox that now holds only silent frames,
+    // never buzzes the owner (audit: phantom push with no message behind it).
+    const pending = this.ctx.storage.sql
+      .exec<{ n: number }>('SELECT COUNT(*) AS n FROM q WHERE silent = 0')
+      .one().n;
     if (pending > 0 && !this.ownerOnline()) await this.notifyOwner();
   }
 
@@ -208,8 +222,11 @@ export class RelayRoom extends DurableObject<Env> {
           }
           return;
         }
+        // A frame the sender marked as not user-visible (profile/devlist/sync/…) is
+        // stored + delivered normally but must NOT arm a push (see scheduleWake/alarm).
+        const silent = m.silent === true ? 1 : 0;
         const inserted = this.ctx.storage.sql
-          .exec<{ id: number }>('INSERT INTO q (body, ts) VALUES (?, ?) RETURNING id', m.b64, Date.now())
+          .exec<{ id: number }>('INSERT INTO q (body, ts, silent) VALUES (?, ?, ?) RETURNING id', m.b64, Date.now(), silent)
           .one();
         // Positive delivery ack: the message is durably in the mailbox. The sender
         // only shows a checkmark once this arrives — a lost socket between send()
@@ -233,7 +250,8 @@ export class RelayRoom extends DurableObject<Env> {
         }
         // Owner offline => arm the coalescing alarm instead of pushing per message,
         // so a burst (e.g. a fan-out or many small frames) yields ONE wake, not many.
-        if (!ownerOnline) this.ctx.waitUntil(this.scheduleWake());
+        // Silent frames never arm a push — they wake nobody.
+        if (!ownerOnline && !silent) this.ctx.waitUntil(this.scheduleWake());
         return;
       }
       case 'ack': {

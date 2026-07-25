@@ -286,6 +286,31 @@ function parentView(v: View): View {
   return v === 'contact' || v === 'verify' || v === 'gmanage' ? 'chat' : 'list';
 }
 
+// Frames that are NOT a user-visible message: they must be delivered but must never
+// trigger a wake-up push, or the owner gets a "Neue Nachricht" with nothing behind
+// it (profile refresh, device-list gossip, self-sync of your own message, a recall
+// tombstone, a pull request, roster changes, …). The relay can't see inside the
+// seal, so the sender tags these; text/file/group/reply/chunk/attoffer still push.
+function isSilentFrame(kind: MessageContent['kind']): boolean {
+  switch (kind) {
+    case 'profile':
+    case 'devlist':
+    case 'rotation':
+    case 'sync':
+    case 'bootstrap':
+    case 'listack':
+    case 'bootreq':
+    case 'recall':
+    case 'attreq':
+    case 'ginvite':
+    case 'gremove':
+    case 'gleave':
+      return true;
+    default:
+      return false;
+  }
+}
+
 const shortFp = (fp: string) => (fp ? fp.split(' ').slice(0, 3).join(' ') + ' …' : '…');
 const displayName = (c: Contact) =>
   c.nickname?.trim() || c.peerName?.trim() || shortFp(c.peerFingerprint);
@@ -908,7 +933,7 @@ export function Messenger({ dek, onLock }: Props) {
       relaysRef.current.set(room, client);
       client.connect();
     }
-    client.send(sealed);
+    client.send(sealed, undefined, true); // linking control frame to our own device — never a push
   }
 
   // Delivery tracking. A 1:1 message is 'pending' until the relay acks the insert
@@ -1001,12 +1026,13 @@ export function Messenger({ dek, onLock }: Props) {
       await saveContact(dek, contact); // persist advanced sessions before the wire
       return r;
     });
+    const silent = isSilentFrame(content.kind); // recall/attreq don't push; text/file/reply/attoffer do
     const rows: DeviceDelivery[] = [];
     for (const d of deliveries) {
       const deliveryId = randomMid();
       const room = await inboxRoom(d.deviceSignPub);
       connectDeviceInbox(room);
-      relaysRef.current.get(room)?.send(d.sealed, deliveryId);
+      relaysRef.current.get(room)?.send(d.sealed, deliveryId, silent);
       startAckTimer(deliveryId);
       rows.push({ device: bytesToB64(d.deviceSignPub), deliveryId, status: 'pending' });
     }
@@ -1125,7 +1151,9 @@ export function Messenger({ dek, onLock }: Props) {
       const room = await inboxRoom(dev.deviceSignPub);
       connectDeviceInbox(room);
       const relay = relaysRef.current.get(room);
-      for (const sealed of dev.sealed) relay?.send(sealed, randomMid());
+      // Serving a pull the peer explicitly requested — they already saw the offer and
+      // are downloading, so the chunks must not fire a fresh push.
+      for (const sealed of dev.sealed) relay?.send(sealed, randomMid(), true);
     }
   }
 
@@ -1202,7 +1230,7 @@ export function Messenger({ dek, onLock }: Props) {
     for (const d of deliveries) {
       const room = await inboxRoom(d.deviceSignPub);
       connectDeviceInbox(room);
-      relaysRef.current.get(room)?.send(d.sealed, randomMid());
+      relaysRef.current.get(room)?.send(d.sealed, randomMid(), true); // self-sync: never notify yourself
     }
   }
 
@@ -1211,12 +1239,13 @@ export function Messenger({ dek, onLock }: Props) {
   // metadata-only entries (~250 B each), so a snapshot stays well under MAX_ATTACH
   // — no splitting needed at this stage (history, which does need it, is deferred).
 
-  /** Send every delivery of a fan-out to its device inbox. */
+  /** Send every delivery of a fan-out to its device inbox. Only ever used for the
+   *  link snapshot / bootstrap frames — all silent, so none arms a phantom push. */
   async function dispatchDeliveries(deliveries: { deviceSignPub: Bytes; sealed: Bytes }[]) {
     for (const d of deliveries) {
       const room = await inboxRoom(d.deviceSignPub);
       connectDeviceInbox(room);
-      relaysRef.current.get(room)?.send(d.sealed, randomMid());
+      relaysRef.current.get(room)?.send(d.sealed, randomMid(), true);
     }
   }
 
@@ -1379,7 +1408,7 @@ export function Messenger({ dek, onLock }: Props) {
         });
         await dispatchDeliveries(deliveries);
       } else {
-        await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendListAck(id, contact, epoch, version)));
+        await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendListAck(id, contact, epoch, version)), undefined, true);
       }
     } catch {
       /* best effort — they re-offer and we ack again */
@@ -1419,7 +1448,7 @@ export function Messenger({ dek, onLock }: Props) {
       tries: sameList ? tries + 1 : 0, // a NEW list restarts the schedule
     });
     try {
-      await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendDeviceList(id, contact, list)));
+      await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendDeviceList(id, contact, list)), undefined, true);
     } catch {
       /* unreachable right now — the next trigger retries */
     }
@@ -1819,7 +1848,7 @@ export function Messenger({ dek, onLock }: Props) {
     for (const c of contactsRef.current) {
       if (c.hidden || c.staleIdentity || !hasSession(c)) continue;
       try {
-        await sendEnvelopeTo(c, await encryptAndPersist(c, () => sendDeviceList(id, c, list)));
+        await sendEnvelopeTo(c, await encryptAndPersist(c, () => sendDeviceList(id, c, list)), undefined, true);
       } catch {
         /* unreachable contact — best effort, they learn it next time */
       }
@@ -1838,7 +1867,7 @@ export function Messenger({ dek, onLock }: Props) {
         for (const d of deliveries) {
           const room = await inboxRoom(d.deviceSignPub);
           connectDeviceInbox(room);
-          relaysRef.current.get(room)?.send(d.sealed, randomMid());
+          relaysRef.current.get(room)?.send(d.sealed, randomMid(), true); // devlist gossip to own devices — silent
         }
       } catch {
         /* best effort */
@@ -2505,13 +2534,16 @@ export function Messenger({ dek, onLock }: Props) {
   }
 
   // ── Groups ────────────────────────────────────────────────────────
-  async function sendEnvelopeTo(contact: Contact, envelope: Bytes, mid?: string) {
+  // `silent` suppresses the wake-up push for control frames (listack/devlist/roster
+  // changes). Defaults to false because this helper ALSO carries real messages
+  // (group chat messages, the device-linking notice) that must still push.
+  async function sendEnvelopeTo(contact: Contact, envelope: Bytes, mid?: string, silent = false) {
     let room = sendRoomRef.current.get(contact.roomId);
     if (!room) {
       await connectSend(contact);
       room = sendRoomRef.current.get(contact.roomId);
     }
-    (room ? relaysRef.current.get(room) : undefined)?.send(envelope, mid);
+    (room ? relaysRef.current.get(room) : undefined)?.send(envelope, mid, silent);
   }
 
   // A hidden pairwise contact for a group member, so we can fan messages to them.
@@ -2602,7 +2634,7 @@ export function Messenger({ dek, onLock }: Props) {
       const roster = [me, ...group.members.filter((x) => !eqBytes(x.dhPub, m.dhPub))];
       const invite: GroupInvite = await toInvite({ ...group, members: roster });
       try {
-        await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendGroupInvite(id, contact, invite)));
+        await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendGroupInvite(id, contact, invite)), undefined, true);
       } catch {
         /* retry when they come online */
       }
@@ -2805,7 +2837,7 @@ export function Messenger({ dek, onLock }: Props) {
     const removed = await ensureMemberContact(member);
     if (removed) {
       try {
-        await sendEnvelopeTo(removed, await encryptAndPersist(removed, () => sendGroupRemove(id, removed, group.id)));
+        await sendEnvelopeTo(removed, await encryptAndPersist(removed, () => sendGroupRemove(id, removed, group.id)), undefined, true);
       } catch {
         /* they'll just stop receiving; roster already dropped them */
       }
@@ -2819,7 +2851,7 @@ export function Messenger({ dek, onLock }: Props) {
         const c = await ensureMemberContact(m);
         if (c) {
           try {
-            await sendEnvelopeTo(c, await encryptAndPersist(c, () => sendGroupLeave(id, c, group.id)));
+            await sendEnvelopeTo(c, await encryptAndPersist(c, () => sendGroupLeave(id, c, group.id)), undefined, true);
           } catch {
             /* best effort */
           }
@@ -3189,7 +3221,7 @@ export function Messenger({ dek, onLock }: Props) {
         await connectSend(contact);
         room = sendRoomRef.current.get(contact.roomId);
       }
-      (room ? relaysRef.current.get(room) : undefined)?.send(envelope);
+      (room ? relaysRef.current.get(room) : undefined)?.send(envelope, undefined, true); // profile refresh — silent
       profileSentRef.current.add(contact.roomId);
       await saveContact(dek, contact);
     } catch {

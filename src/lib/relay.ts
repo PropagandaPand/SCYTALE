@@ -150,9 +150,12 @@ export class RelayClient {
 
   /** Sender: push a ciphertext to this (peer's) inbox. Queued until the socket
    *  is open, so a message sent right after connect() isn't silently dropped.
-   *  `mid` (optional) lets a relay nack be matched back to this message. */
-  send(bytes: Bytes, mid?: string): void {
-    const frame = JSON.stringify({ t: 'send', b64: bytesToB64(bytes), mid });
+   *  `mid` (optional) lets a relay nack be matched back to this message.
+   *  `silent` marks a non-user-visible frame (profile/devlist/sync/recall/…): it is
+   *  delivered normally but must never trigger a wake-up push (no phantom "Neue
+   *  Nachricht"). Backward-compatible — the flag is only sent when true. */
+  send(bytes: Bytes, mid?: string, silent = false): void {
+    const frame = JSON.stringify(silent ? { t: 'send', b64: bytesToB64(bytes), mid, silent: true } : { t: 'send', b64: bytesToB64(bytes), mid });
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(frame);
     else this.outbox.push(frame);
   }

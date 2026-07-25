@@ -12,6 +12,7 @@ import {
   biometricEnrolled,
 } from './lib/vaultService';
 import { cryptoSelfTest } from './lib/selftest';
+import { t, useLang } from './lib/i18n';
 import { Messenger } from './Messenger';
 import { ReloadPrompt } from './ReloadPrompt';
 import { IconLock, IconEye, IconEyeOff } from './icons';
@@ -24,6 +25,7 @@ const IDLE_LOCK_MS = 5 * 60 * 1000;
 const BACKGROUND_LOCK_GRACE_MS = 30 * 1000; // lock this long after the app is backgrounded (audit N-4)
 
 export function App() {
+  useLang(); // re-render this whole tree when the language changes
   const [phase, setPhase] = useState<Phase>('loading');
   const [passphrase, setPassphrase] = useState('');
   const [busy, setBusy] = useState(false);
@@ -46,7 +48,7 @@ export function App() {
     void (async () => {
       if (!(await cryptoSelfTest())) {
         setLockState('fatal');
-        say('CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.', 'err');
+        say(t('CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.'), 'err');
         return;
       }
       setPhase((await hasVault()) ? 'unlock' : 'create');
@@ -126,7 +128,7 @@ export function App() {
     if (busy) return;
     setBusy(true);
     setLockState('busy');
-    say('Warte auf Face ID / Touch ID…');
+    say(t('Warte auf Face ID / Touch ID…'));
     try {
       openWith(await unlockWithBiometric());
     } catch (e) {
@@ -137,7 +139,7 @@ export function App() {
       } else {
         // Show the error, but DON'T use 'deny' — that reddens the passphrase field,
         // and no passphrase was even tried. Keep the form neutral and usable.
-        say('Biometrie fehlgeschlagen — bitte Passphrase nutzen.', 'err');
+        say(t('Biometrie fehlgeschlagen — bitte Passphrase nutzen.'), 'err');
       }
       setLockState('idle');
       setBusy(false);
@@ -146,10 +148,10 @@ export function App() {
 
   async function submit() {
     if (lockState === 'locked' || busy) return;
-    if (phase === 'create' && passphrase.length < 8) return say('Mindestens 8 Zeichen.', 'err');
+    if (phase === 'create' && passphrase.length < 8) return say(t('Mindestens 8 Zeichen.'), 'err');
     setBusy(true);
     setLockState('busy');
-    say(phase === 'create' ? 'Erzeuge Tresor (Argon2id · 256 MiB)…' : 'Entsperre (Argon2id)…');
+    say(phase === 'create' ? t('Erzeuge Tresor (Argon2id · 256 MiB)…') : t('Entsperre (Argon2id)…'));
     try {
       const newDek = phase === 'create' ? await createBoundVault(passphrase) : await unlockBoundVault(passphrase);
       openWith(newDek);
@@ -162,10 +164,10 @@ export function App() {
         say(e.message, 'err');
       } else if (e instanceof WrongPassphraseError) {
         setLockState('deny');
-        say('Falsche Passphrase.', 'err');
+        say(t('Falsche Passphrase.'), 'err');
       } else {
         setLockState('deny');
-        say('Fehler: ' + (e as Error).message, 'err');
+        say(t('Fehler: {msg}', { msg: (e as Error).message }), 'err');
       }
       setBusy(false);
     }
@@ -177,7 +179,7 @@ export function App() {
     setLockState('idle');
     setBusy(false); // a fresh lock screen must always be interactable, whatever
     // state we came from — never leave the unlock button disabled.
-    say('Gesperrt.');
+    say(t('Gesperrt.'));
   }, []);
 
   useEffect(() => {
@@ -243,11 +245,11 @@ export function App() {
       <div className="lock">
         <img className="lock-logo" src="/scytale-icon.svg" alt="SCYTALE" />
         <div className="lock-brand">SCYTALE</div>
-        <p className="lock-sub">Ende-zu-Ende verschlüsselt · client-side</p>
+        <p className="lock-sub">{t('Ende-zu-Ende verschlüsselt · client-side')}</p>
 
         {showForm && (
           <div className="lock-form">
-            <div className="field-lbl">Passphrase</div>
+            <div className="field-lbl">{t('Passphrase')}</div>
             <div className={`pass-field ${lockState === 'deny' ? 'deny' : ''}`}>
               <span className="glyph">
                 <IconLock size={15} />
@@ -265,7 +267,7 @@ export function App() {
                 type="button"
                 className="pass-eye"
                 onClick={() => setShowPass((v) => !v)}
-                aria-label={showPass ? 'Passphrase verbergen' : 'Passphrase anzeigen'}
+                aria-label={showPass ? t('Passphrase verbergen') : t('Passphrase anzeigen')}
                 aria-pressed={showPass}
               >
                 {showPass ? <IconEyeOff size={17} /> : <IconEye size={17} />}
@@ -276,7 +278,7 @@ export function App() {
               onClick={() => void submit()}
               disabled={busy || lockState === 'locked'}
             >
-              {phase === 'create' ? 'Tresor erstellen' : 'Tresor entsperren'}
+              {phase === 'create' ? t('Tresor erstellen') : t('Tresor entsperren')}
             </button>
             {phase === 'unlock' && canBiometric && (
               // Face ID auto-launches on entering this screen; this is the manual
@@ -288,11 +290,11 @@ export function App() {
                 onClick={() => void unlockBiometric()}
                 disabled={busy}
               >
-                Mit Face ID / Touch ID entsperren
+                {t('Mit Face ID / Touch ID entsperren')}
               </button>
             )}
             {lockState === 'locked' ? (
-              <div className="lock-status err">Gesperrt — noch {seconds}s (zu viele Fehlversuche).</div>
+              <div className="lock-status err">{t('Gesperrt — noch {seconds}s (zu viele Fehlversuche).', { seconds })}</div>
             ) : (
               <div className={`lock-status ${statusKind}`} aria-live="polite">{status}</div>
             )}
@@ -303,7 +305,7 @@ export function App() {
 
         <div className="lock-foot">
           <span className="d" />
-          Argon2id · 256 MiB · non-extractable DEK
+          {t('Argon2id · 256 MiB · non-extractable DEK')}
         </div>
       </div>
       <ReloadPrompt />

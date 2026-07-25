@@ -306,6 +306,16 @@ export function IconServer({ size = 16 }: { size?: number }) {
   );
 }
 
+export function IconGlobe({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden="true">
+      <circle cx="9" cy="9" r="7" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      <ellipse cx="9" cy="9" rx="3" ry="7" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M2.2 9h13.6M3 5.5h12M3 12.5h12" fill="none" stroke="currentColor" strokeWidth="1.4" />
+    </svg>
+  );
+}
+
 export function IconGraduation({ size = 16 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden="true">

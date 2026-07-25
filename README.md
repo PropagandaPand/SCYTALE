@@ -148,5 +148,8 @@ out a man-in-the-middle.
 
 ---
 
-*The user-facing app is in German by design (its audience); developer-facing
-content — code, comments, docs, commits — is in English.*
+*The user-facing app is multilingual: it defaults to the system language and can be
+switched in Settings. Twelve languages are curated (de, en, es, fr, it, pt, nl, pl,
+ru, uk, tr, zh); strings are wrapped incrementally, and anything not yet translated
+falls back to the German source. Developer-facing content — code, comments, docs,
+commits — is in English.*

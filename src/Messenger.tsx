@@ -136,12 +136,13 @@ import { CropModal } from './CropModal';
 import { BackupModal } from './BackupModal';
 import { BiometricEnroll } from './BiometricEnroll';
 import { Explainer } from './Explainer';
+import { t, useLang, LANGS, getLang, setLang, type Lang } from './lib/i18n';
 import { biometricAvailable, biometricEnrolled, disableBiometricUnlock } from './lib/vaultService';
 import { Attachment, LightboxImg } from './Attachment';
 import {
   IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach, IconMic, IconTrash, IconDots, IconGroup, IconReply, IconForward, IconCopy,
   IconBell, IconDevices, IconArchive, IconChevron,
-  IconSticker, IconGraduation,
+  IconSticker, IconGraduation, IconGlobe,
 } from './icons';
 
 const MAX_ATTACH = 600 * 1024; // inline cap — keeps the WS frame under Cloudflare's ~1 MiB limit
@@ -358,6 +359,7 @@ const fmtClock = (ts: number) => {
 };
 
 export function Messenger({ dek, onLock }: Props) {
+  useLang(); // re-render on language change
   const identityRef = useRef<IdentityKeys | null>(null);
   const prekeysRef = useRef<PreKeyState | null>(null);
   const lookupRef = useRef<PreKeyLookup | null>(null);
@@ -476,6 +478,7 @@ export function Messenger({ dek, onLock }: Props) {
   const [bioSupported, setBioSupported] = useState(false); // platform authenticator present
   const [bioOn, setBioOn] = useState(false); // biometric unlock enrolled for this vault
   const [bioEnroll, setBioEnroll] = useState(false); // enrollment modal open
+  const [langSheet, setLangSheet] = useState(false); // language picker open
   // ── Device linking ────────────────────────────────────────────────
   // 'menu'  : choose join-as-new vs add-a-device
   // 'qr'    : N shows its QR, waits for the offer
@@ -4614,7 +4617,7 @@ export function Messenger({ dek, onLock }: Props) {
           <button className="back" onClick={() => setView('list')}>
             <IconBack />
           </button>
-          <div className="h">Profil</div>
+          <div className="h">{t('Profil')}</div>
         </div>
         <div className="profile-body">
           <input ref={avatarInputRef} type="file" accept="image/*" hidden onChange={onPickAvatar} />
@@ -4625,7 +4628,7 @@ export function Messenger({ dek, onLock }: Props) {
           {/* Identity: avatar + name + save, one quiet line on what happens to it. */}
           <div className="profile-id">
             <button className="profile-avatar" onClick={() => avatarInputRef.current?.click()}>
-              {myAvatarB64 ? <img src={avatarSrc(myAvatarB64)} alt="Dein Avatar" /> : <span className="ph">＋</span>}
+              {myAvatarB64 ? <img src={avatarSrc(myAvatarB64)} alt={t('Dein Avatar')} /> : <span className="ph">＋</span>}
               <span className="edit-badge">
                 <IconCamera size={14} />
               </span>
@@ -4633,14 +4636,14 @@ export function Messenger({ dek, onLock }: Props) {
             <input
               className="profile-name-input"
               value={profileName}
-              placeholder="Dein Name"
+              placeholder={t('Dein Name')}
               onChange={(e) => setProfileName(e.target.value)}
             />
             <button className="btn btn-primary profile-save" onClick={() => void saveProfileMeta()}>
-              Speichern &amp; teilen
+              {t('Speichern & teilen')}
             </button>
             <p className="profile-id-hint">
-              <IconLock size={11} /> Bild &amp; Name gehen Ende-zu-Ende verschlüsselt an deine Kontakte.
+              <IconLock size={11} /> {t('Bild & Name gehen Ende-zu-Ende verschlüsselt an deine Kontakte.')}
             </p>
           </div>
 
@@ -4652,8 +4655,8 @@ export function Messenger({ dek, onLock }: Props) {
               <button className="setting-row" onClick={() => void togglePush()} disabled={notifBusy}>
                 <span className="setting-ic"><IconBell /></span>
                 <span className="setting-tx">
-                  <span className="setting-title">Benachrichtigungen</span>
-                  <span className="setting-sub">Inhaltloses Wecksignal — nie Absender oder Text</span>
+                  <span className="setting-title">{t('Benachrichtigungen')}</span>
+                  <span className="setting-sub">{t('Inhaltloses Wecksignal — nie Absender oder Text')}</span>
                 </span>
                 <span className={`switch${notifOn ? ' on' : ''}`}>
                   <span className="knob" />
@@ -4664,8 +4667,17 @@ export function Messenger({ dek, onLock }: Props) {
             <button className="setting-row" onClick={() => setView('learn')}>
               <span className="setting-ic"><IconGraduation /></span>
               <span className="setting-tx">
-                <span className="setting-title">So funktioniert der Schutz</span>
-                <span className="setting-sub">In 5 Schritten einfach erklärt</span>
+                <span className="setting-title">{t('So funktioniert der Schutz')}</span>
+                <span className="setting-sub">{t('In 5 Schritten einfach erklärt')}</span>
+              </span>
+              <span className="setting-go"><IconChevron /></span>
+            </button>
+
+            <button className="setting-row" onClick={() => setLangSheet(true)}>
+              <span className="setting-ic"><IconGlobe /></span>
+              <span className="setting-tx">
+                <span className="setting-title">{t('Sprache')}</span>
+                <span className="setting-sub">{LANGS.find((l) => l.code === getLang())?.name ?? getLang()}</span>
               </span>
               <span className="setting-go"><IconChevron /></span>
             </button>
@@ -4679,8 +4691,8 @@ export function Messenger({ dek, onLock }: Props) {
             >
               <span className="setting-ic"><IconDevices /></span>
               <span className="setting-tx">
-                <span className="setting-title">Gerät koppeln</span>
-                <span className="setting-sub">Zweites Gerät per QR + Emoji-Abgleich</span>
+                <span className="setting-title">{t('Gerät koppeln')}</span>
+                <span className="setting-sub">{t('Zweites Gerät per QR + Emoji-Abgleich')}</span>
               </span>
               <span className="setting-go"><IconChevron /></span>
             </button>
@@ -4692,7 +4704,7 @@ export function Messenger({ dek, onLock }: Props) {
                 aria-checked={bioOn}
                 onClick={() => {
                   if (bioOn) {
-                    if (confirm('Face ID / Touch ID entfernen? Der Tresor bleibt per Passphrase entsperrbar.')) {
+                    if (confirm(t('Face ID / Touch ID entfernen? Der Tresor bleibt per Passphrase entsperrbar.'))) {
                       void disableBiometricUnlock()
                         .then(() => setBioOn(false))
                         .catch(() => {}); // header keeps prf → toggle stays on, which is the honest state
@@ -4704,8 +4716,8 @@ export function Messenger({ dek, onLock }: Props) {
               >
                 <span className="setting-ic"><IconLock size={15} /></span>
                 <span className="setting-tx">
-                  <span className="setting-title">Face ID / Touch ID</span>
-                  <span className="setting-sub">Entsperren ohne Passphrase — Schlüssel bleibt gleich</span>
+                  <span className="setting-title">{t('Face ID / Touch ID')}</span>
+                  <span className="setting-sub">{t('Entsperren ohne Passphrase — Schlüssel bleibt gleich')}</span>
                 </span>
                 <span className={`switch${bioOn ? ' on' : ''}`}>
                   <span className="knob" />
@@ -4716,8 +4728,8 @@ export function Messenger({ dek, onLock }: Props) {
             <button className="setting-row" onClick={() => setBackupMode('export')}>
               <span className="setting-ic"><IconArchive /></span>
               <span className="setting-tx">
-                <span className="setting-title">Backup exportieren</span>
-                <span className="setting-sub">Verschlüsselte Datei, eigene Passphrase</span>
+                <span className="setting-title">{t('Backup exportieren')}</span>
+                <span className="setting-sub">{t('Verschlüsselte Datei, eigene Passphrase')}</span>
               </span>
               <span className="setting-go"><IconChevron /></span>
             </button>
@@ -4725,8 +4737,8 @@ export function Messenger({ dek, onLock }: Props) {
             <button className="setting-row" onClick={() => setBackupMode('import')}>
               <span className="setting-ic"><IconArchive /></span>
               <span className="setting-tx">
-                <span className="setting-title">Wiederherstellen</span>
-                <span className="setting-sub">Konto aus einer Backup-Datei laden</span>
+                <span className="setting-title">{t('Wiederherstellen')}</span>
+                <span className="setting-sub">{t('Konto aus einer Backup-Datei laden')}</span>
               </span>
               <span className="setting-go"><IconChevron /></span>
             </button>
@@ -4741,6 +4753,26 @@ export function Messenger({ dek, onLock }: Props) {
               }}
               onClose={() => setBioEnroll(false)}
             />
+          )}
+          {langSheet && (
+            <div className="lang-scrim" onClick={() => setLangSheet(false)}>
+              <div className="lang-sheet" onClick={(e) => e.stopPropagation()}>
+                <div className="lang-sheet-h">{t('Sprache')}</div>
+                {LANGS.map((l) => (
+                  <button
+                    key={l.code}
+                    className={`lang-row${l.code === getLang() ? ' on' : ''}`}
+                    onClick={() => {
+                      setLang(l.code as Lang);
+                      setLangSheet(false);
+                    }}
+                  >
+                    <span className="lang-name">{l.name}</span>
+                    {l.code === getLang() && <IconDoubleCheck size={14} />}
+                  </button>
+                ))}
+              </div>
+            </div>
           )}
         </div>
         {linkOverlay}

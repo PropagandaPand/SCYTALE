@@ -420,7 +420,16 @@ export function Messenger({ dek, onLock }: Props) {
   const [messages, setMessages] = useState<Record<string, ChatMessage[]>>({});
   const [statuses, setStatuses] = useState<Record<string, RelayStatus>>({});
   const [addInput, setAddInput] = useState('');
-  const [msgInput, setMsgInput] = useState('');
+  // The composer input is UNCONTROLLED (its value lives in the DOM via this ref) and
+  // we only track a `hasText` boolean that flips on the empty↔non-empty transition.
+  // So typing no longer re-renders the whole message list on every keystroke — the
+  // main source of the lag in long/group chats. Read/clear go through the ref.
+  const msgInputRef = useRef<HTMLInputElement>(null);
+  const [hasText, setHasText] = useState(false);
+  const clearComposer = () => {
+    if (msgInputRef.current) msgInputRef.current.value = '';
+    setHasText(false);
+  };
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
   const [shared, setShared] = useState(false); // feedback for the share button's copy fallback
@@ -2992,12 +3001,12 @@ export function Messenger({ dek, onLock }: Props) {
 
   async function onSend() {
     setError('');
-    const text = msgInput.trim();
+    const text = (msgInputRef.current?.value ?? '').trim();
     const id = identityRef.current;
     if (!text || !id) return;
     if (activeGroup) {
       const q = replyTo;
-      setMsgInput('');
+      clearComposer();
       setReplyTo(null);
       const content: MessageContent = q ? { kind: 'reply', quote: q, inner: { kind: 'text', text } } : { kind: 'text', text };
       await groupSend(content, { mine: true, text, ts: Date.now(), reply: q ?? undefined });
@@ -3019,7 +3028,7 @@ export function Messenger({ dek, onLock }: Props) {
       // Mirror to my own other devices so they show it in this conversation.
       void syncToOwnDevices(contact.peerMasterPub, 'sent', mid, ts, content);
       await appendMessage(activeRoom, { mine: true, text, ts, mid, deliveries, reply: q ?? undefined });
-      setMsgInput('');
+      clearComposer();
       setReplyTo(null);
       void ensureProfileSent(contact);
       bump();
@@ -3849,13 +3858,14 @@ export function Messenger({ dek, onLock }: Props) {
       </button>
       <div className="composer-pill">
         <input
-          value={msgInput}
+          ref={msgInputRef}
+          defaultValue=""
           placeholder="Verschlüsselte Nachricht…"
-          onChange={(e) => setMsgInput(e.target.value)}
+          onChange={(e) => setHasText(e.target.value.trim().length > 0)}
           onKeyDown={(e) => e.key === 'Enter' && void onSend()}
         />
       </div>
-      {msgInput.trim() ? (
+      {hasText ? (
         <button className="send-btn" onClick={() => void onSend()} aria-label="Senden">
           <IconSend />
         </button>

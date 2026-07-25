@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useRef, useState, type ChangeEvent } from 'react';
+import { useEffect, useLayoutEffect, useReducer, useRef, useState, type ChangeEvent } from 'react';
 import { loadOrCreateIdentity, fingerprintOf } from './lib/identity';
 import {
   loadOrCreatePreKeys,
@@ -312,6 +312,24 @@ function isSilentFrame(kind: MessageContent['kind']): boolean {
 }
 
 const shortFp = (fp: string) => (fp ? fp.split(' ').slice(0, 3).join(' ') + ' …' : '…');
+
+// WhatsApp-style large emoji: a message that is ONLY one or two emoji (no letters or
+// digits) is shown big and without a bubble. Intl.Segmenter counts a ZWJ / skin-tone
+// sequence as a single grapheme, so 👍🏽 or 👨‍👩‍👧 count as one.
+const graphemeSeg =
+  typeof Intl !== 'undefined' && 'Segmenter' in Intl ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+function bigEmojiLevel(text: string | undefined): 0 | 1 | 2 {
+  if (!text || !graphemeSeg) return 0;
+  const t = text.trim();
+  if (!t || /[\p{L}\p{N}]/u.test(t)) return 0; // any letter/number → ordinary text
+  if (!/\p{Extended_Pictographic}/u.test(t)) return 0; // no emoji at all → ordinary
+  let n = 0;
+  for (const g of graphemeSeg.segment(t)) {
+    if (g.segment.trim() === '') continue; // whitespace between emoji doesn't count
+    if (++n > 2) return 0; // three or more → keep normal size
+  }
+  return n === 1 ? 1 : 2;
+}
 const displayName = (c: Contact) =>
   c.nickname?.trim() || c.peerName?.trim() || shortFp(c.peerFingerprint);
 const avatarSrc = (b64: string) => `data:image/jpeg;base64,${b64}`;
@@ -2413,10 +2431,37 @@ export function Messenger({ dek, onLock }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
+  // Pin the message list to the bottom (newest message) on open and on new messages.
+  // A single post-paint scroll isn't enough: inline images/videos load AFTER it and
+  // grow the list, which used to strand a freshly-opened chat in the middle. So we
+  // scroll now, on the next frame, and again as each still-loading media element
+  // becomes ready. useLayoutEffect avoids a visible jump.
+  useLayoutEffect(() => {
+    if (view !== 'chat') return;
     const el = document.getElementById('msgs');
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, activeRoom, view]);
+    if (!el) return;
+    const toBottom = () => {
+      el.scrollTop = el.scrollHeight;
+    };
+    toBottom();
+    const raf = requestAnimationFrame(toBottom);
+    const media = Array.from(el.querySelectorAll('img, video')) as (HTMLImageElement | HTMLVideoElement)[];
+    const onReady = () => toBottom();
+    for (const m of media) {
+      const ready = m instanceof HTMLImageElement ? m.complete : m.readyState >= 1;
+      if (!ready) {
+        m.addEventListener('load', onReady);
+        m.addEventListener('loadeddata', onReady);
+      }
+    }
+    return () => {
+      cancelAnimationFrame(raf);
+      for (const m of media) {
+        m.removeEventListener('load', onReady);
+        m.removeEventListener('loadeddata', onReady);
+      }
+    };
+  }, [messages, activeRoom, activeGroup, view]);
 
   useEffect(() => {
     setRenaming(false);
@@ -4049,7 +4094,7 @@ export function Messenger({ dek, onLock }: Props) {
             <div
               key={`${m.ts}-${i}`}
               data-mid={m.mid}
-              className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file && isSticker(m.file) ? ' is-sticker' : m.file && (m.file.mime.startsWith('image/') || m.file.mime.startsWith('video/')) ? ' has-file' : ''}`}
+              className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file && isSticker(m.file) ? ' is-sticker' : m.file && (m.file.mime.startsWith('image/') || m.file.mime.startsWith('video/')) ? ' has-file' : ''}${!m.file && !m.reply && !m.recalled && bigEmojiLevel(m.text) ? ` emoji-big emoji-${bigEmojiLevel(m.text)}` : ''}`}
               onPointerDown={(e) => onBubblePointerDown(e, m)}
               onPointerMove={onBubblePointerMove}
               onPointerUp={() => endBubbleSwipe(m)}
@@ -4188,7 +4233,7 @@ export function Messenger({ dek, onLock }: Props) {
             <div
               key={`${m.ts}-${i}`}
               data-mid={m.mid}
-              className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file && isSticker(m.file) ? ' is-sticker' : m.file && (m.file.mime.startsWith('image/') || m.file.mime.startsWith('video/')) ? ' has-file' : ''}`}
+              className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file && isSticker(m.file) ? ' is-sticker' : m.file && (m.file.mime.startsWith('image/') || m.file.mime.startsWith('video/')) ? ' has-file' : ''}${!m.file && !m.reply && !m.recalled && bigEmojiLevel(m.text) ? ` emoji-big emoji-${bigEmojiLevel(m.text)}` : ''}`}
               onPointerDown={(e) => onBubblePointerDown(e, m)}
               onPointerMove={onBubblePointerMove}
               onPointerUp={() => endBubbleSwipe(m)}

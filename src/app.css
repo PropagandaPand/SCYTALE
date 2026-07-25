@@ -903,6 +903,35 @@ select {
 .bubble.theirs .meta {
   color: var(--muted);
 }
+/* WhatsApp-style large emoji: 1–2 emoji, no bubble — just the glyphs, timestamp
+   below. Overrides the bubble background/border/padding for both mine and theirs. */
+.bubble.emoji-big {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  line-height: 1.05;
+}
+.bubble.emoji-big.mine {
+  align-items: flex-end;
+}
+.bubble.emoji-big.theirs {
+  align-items: flex-start;
+}
+.bubble.emoji-1 {
+  font-size: 54px;
+}
+.bubble.emoji-2 {
+  font-size: 42px;
+}
+.bubble.emoji-big .meta {
+  margin-left: 0;
+  color: var(--muted);
+  opacity: 0.8;
+}
 .composer {
   display: flex;
   align-items: center;

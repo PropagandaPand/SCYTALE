@@ -2452,11 +2452,14 @@ export function Messenger({ dek, onLock }: Props) {
       pin = atBottom();
     };
     el.addEventListener('scroll', onScroll, { passive: true });
+    // Observe ONLY the content wrapper's height — one target, cheap even with hundreds
+    // of messages — instead of every bubble. Fires whenever content grows (a lazily
+    // decrypted image swaps in, a video sizes up, the keyboard opens), so we can re-pin.
+    const inner = el.querySelector('.msgs-inner') ?? el;
     const ro = new ResizeObserver(() => {
       if (pin) toBottom();
     });
-    ro.observe(el);
-    for (const child of Array.from(el.children)) ro.observe(child);
+    ro.observe(inner);
     const raf = requestAnimationFrame(toBottom);
     return () => {
       el.removeEventListener('scroll', onScroll);
@@ -4086,6 +4089,7 @@ export function Messenger({ dek, onLock }: Props) {
         </div>
 
         <div id="msgs" className="msgs">
+          <div className="msgs-inner">
           <div className="enc-pill">
             <span className="g">
               <IconLock size={10} />
@@ -4152,6 +4156,7 @@ export function Messenger({ dek, onLock }: Props) {
               </span>
             </div>
           ))}
+          </div>
         </div>
 
         {error && <div className="err-note">{error}</div>}
@@ -4220,6 +4225,7 @@ export function Messenger({ dek, onLock }: Props) {
           )}
         </div>
         <div id="msgs" className="msgs">
+          <div className="msgs-inner">
           <div className="enc-pill">
             <span className="g">
               <IconLock size={10} />
@@ -4276,6 +4282,7 @@ export function Messenger({ dek, onLock }: Props) {
               </span>
             </div>
           ))}
+          </div>
         </div>
         {error && <div className="err-note">{error}</div>}
         {stickerCropEl}

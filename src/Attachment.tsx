@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AudioPlayer } from './AudioPlayer';
 import { IconAttach } from './icons';
 import { b64ToBytes } from './lib/bytes';
@@ -60,9 +60,30 @@ export function Attachment({
   onStickerZoom: (file: FileRef) => void;
 }) {
   const [blob, setBlob] = useState<Blob | null>(null);
-  const [state, setState] = useState<'loading' | 'ready' | 'missing'>('loading');
+  const [state, setState] = useState<'idle' | 'loading' | 'ready' | 'missing'>('idle');
+
+  // Lazy decrypt: a long or image-heavy chat (especially a group) used to decrypt
+  // EVERY attachment the moment it opened — the main source of the lag. Only decrypt
+  // once the attachment is near the viewport. Placeholder reserves space so scrolling
+  // stays stable and the visible ones (bottom of the chat) load first.
+  const anchorRef = useRef<HTMLDivElement>(null);
+  const [near, setNear] = useState(false);
+  useEffect(() => {
+    if (near) return;
+    const el = anchorRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) setNear(true);
+      },
+      { rootMargin: '800px' }, // start a bit before it scrolls into view
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [near]);
 
   useEffect(() => {
+    if (!near) return;
     let alive = true;
     setState('loading');
     void (async () => {
@@ -78,7 +99,7 @@ export function Attachment({
     return () => {
       alive = false;
     };
-  }, [dek, file]);
+  }, [near, dek, file]);
 
   // One object URL per resolved blob, revoked when it changes or unmounts.
   const [url, setUrl] = useState('');
@@ -95,8 +116,19 @@ export function Attachment({
   if (state === 'missing') {
     return <div className="file-missing">Anhang auf diesem Gerät nicht verfügbar</div>;
   }
-  if (state === 'loading' || !url || !blob) {
-    return <div className="file-loading" aria-busy="true">Anhang lädt…</div>;
+  if (state !== 'ready' || !url || !blob) {
+    // Reserve some space for still-media so lazy loading doesn't jump the scroll.
+    const media = file.mime.startsWith('image/') || file.mime.startsWith('video/');
+    return (
+      <div
+        ref={anchorRef}
+        className="file-loading"
+        aria-busy={near}
+        style={media ? { minHeight: 160, minWidth: 120 } : undefined}
+      >
+        {state === 'loading' ? 'Anhang lädt…' : ''}
+      </div>
+    );
   }
 
   if (isSticker(file)) {

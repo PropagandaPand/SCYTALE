@@ -841,9 +841,15 @@ select {
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 16px;
+}
+/* One content wrapper so the scroll-to-bottom ResizeObserver watches a single
+   element (its height) instead of every bubble — cheap even in long group chats. */
+.msgs-inner {
   display: flex;
   flex-direction: column;
   gap: 7px;
+  min-height: 100%;
+  justify-content: flex-end;
 }
 .enc-pill {
   align-self: center;
@@ -2386,6 +2392,13 @@ select {
   font-size: 12.5px;
   color: var(--muted);
   padding: 10px 12px;
+}
+.file-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--muted) 9%, transparent);
 }
 .file-missing {
   display: flex;

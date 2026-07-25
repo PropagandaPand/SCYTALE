@@ -3840,7 +3840,7 @@ export function Messenger({ dek, onLock }: Props) {
                 {myAvatarB64 ? (
                   <img className="brand-avatar" src={avatarSrc(myAvatarB64)} alt="Profil" />
                 ) : (
-                  <img src="/pwa-192.png" alt="" />
+                  <img src="/scytale-icon.svg" alt="" />
                 )}
                 <div>
                   <div className="t">

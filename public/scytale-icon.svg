@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="512"
+     height="512"
+     viewBox="0 0 512 512"
+     role="img"
+     aria-labelledby="title desc">
+  <title id="title">SCYTALE logo</title>
+  <desc id="desc">A turquoise ribbon winds around a dark teal horizontal cylinder on a near-black rounded square.</desc>
+
+  <defs>
+    <linearGradient id="frame" x1="70" y1="8" x2="454" y2="504" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#303336"/>
+      <stop offset=".52" stop-color="#111315"/>
+      <stop offset="1" stop-color="#292c2f"/>
+    </linearGradient>
+
+    <linearGradient id="ribbon" x1="196" y1="96" x2="334" y2="418" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#40c3b7"/>
+      <stop offset=".42" stop-color="#39beb1"/>
+      <stop offset="1" stop-color="#36bbae"/>
+    </linearGradient>
+
+    <linearGradient id="underlap" x1="197" y1="199" x2="330" y2="330" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0a3431"/>
+      <stop offset=".56" stop-color="#0b4944"/>
+      <stop offset=".82" stop-color="#14766e"/>
+      <stop offset="1" stop-color="#2faea3"/>
+    </linearGradient>
+
+    <linearGradient id="cylinder" x1="256" y1="232" x2="256" y2="281" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#11625d"/>
+      <stop offset=".42" stop-color="#14625d"/>
+      <stop offset="1" stop-color="#0b403c"/>
+    </linearGradient>
+
+    <linearGradient id="endShade" x1="111" y1="257" x2="401" y2="257" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#031d1b" stop-opacity=".68"/>
+      <stop offset=".045" stop-color="#062c29" stop-opacity=".38"/>
+      <stop offset=".12" stop-color="#0b403c" stop-opacity="0"/>
+      <stop offset=".88" stop-color="#0b403c" stop-opacity="0"/>
+      <stop offset=".955" stop-color="#062c29" stop-opacity=".38"/>
+      <stop offset="1" stop-color="#031d1b" stop-opacity=".68"/>
+    </linearGradient>
+
+    <linearGradient id="wrap" x1="260" y1="228" x2="260" y2="286" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#51cec0"/>
+      <stop offset=".3" stop-color="#4ccabd"/>
+      <stop offset=".72" stop-color="#45c6b8"/>
+      <stop offset="1" stop-color="#35bbae"/>
+    </linearGradient>
+
+    <linearGradient id="wrapSheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#a1eee5" stop-opacity=".22"/>
+      <stop offset=".45" stop-color="#7bddd2" stop-opacity=".05"/>
+      <stop offset="1" stop-color="#057b73" stop-opacity=".16"/>
+    </linearGradient>
+
+    <filter id="grain" x="-3%" y="-3%" width="106%" height="106%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency=".64" numOctaves="2" seed="19" result="noise"/>
+      <feColorMatrix in="noise"
+        values="1 0 0 0 0
+                0 1 0 0 0
+                0 0 1 0 0
+                0 0 0 .055 0"
+        result="faintNoise"/>
+      <feComposite in="faintNoise" in2="SourceAlpha" operator="in" result="clippedNoise"/>
+      <feBlend in="SourceGraphic" in2="clippedNoise" mode="soft-light"/>
+    </filter>
+
+    <clipPath id="iconClip">
+      <rect x=".5" y=".5" width="511" height="511" rx="85.5"/>
+    </clipPath>
+
+    <clipPath id="wrapClip">
+      <path d="
+        M146 229
+        H368
+        C371 229 373 232 374 236
+        L383 280
+        C384 282 382 284 380 284
+        H164
+        C162 284 160 281 159 278
+        L144 238
+        C143 234 144 231 146 229
+        Z"/>
+    </clipPath>
+  </defs>
+
+  <rect width="512" height="512" fill="#070809"/>
+
+  <g clip-path="url(#iconClip)">
+    <rect x=".5" y=".5" width="511" height="511" rx="85.5"
+          fill="none" stroke="url(#frame)" stroke-width="1"/>
+
+    <g filter="url(#grain)">
+      <!-- Lower part of the continuous ribbon. -->
+      <path fill="url(#ribbon)" d="
+        M343 279
+        L343 319
+        C343 343 330 359 301 374
+        C269 390 210 398 146 429
+        L146 378
+        C165 360 195 352 242 342
+        C288 332 329 319 343 279
+        Z"/>
+
+      <!-- Shaded section where the ribbon passes behind the cylinder. -->
+      <path fill="url(#underlap)" d="
+        M193 196
+        C214 216 240 226 278 230
+        C316 233 337 244 343 263
+        L343 316
+        C328 299 300 289 254 282
+        C216 276 187 261 176 241
+        C168 227 177 207 193 196
+        Z"/>
+
+      <!-- Upper part of the continuous ribbon. -->
+      <path fill="url(#ribbon)" d="
+        M377 86
+        L377 136
+        C350 160 304 166 244 180
+        C204 190 181 204 172 226
+        C169 235 169 244 169 253
+        L169 181
+        C171 158 190 142 220 131
+        C254 118 319 110 377 86
+        Z"/>
+
+      <!-- Dark cylindrical core. -->
+      <rect x="111" y="234" width="290" height="46" rx="11.5" ry="23" fill="url(#cylinder)"/>
+      <rect x="111" y="234" width="290" height="46" rx="11.5" ry="23" fill="url(#endShade)"/>
+
+      <!-- Five visible turns of the ribbon around the core. -->
+      <path fill="url(#wrap)" d="
+        M146 229
+        H368
+        C371 229 373 232 374 236
+        L383 280
+        C384 282 382 284 380 284
+        H164
+        C162 284 160 281 159 278
+        L144 238
+        C143 234 144 231 146 229
+        Z"/>
+
+      <!-- Very soft surface sheen retained from the raster originals. -->
+      <path fill="url(#wrapSheen)" opacity=".42" d="
+        M146 230
+        H368
+        C370 230 372 233 373 237
+        L382 280
+        C383 282 381 283 379 283
+        H164
+        C162 283 161 280 160 277
+        L145 238
+        C144 234 144 232 146 230
+        Z"/>
+
+      <!-- Even openings between the turns; the underlying cylinder remains visible. -->
+      <path clip-path="url(#wrapClip)"
+            fill="none"
+            stroke="url(#cylinder)"
+            stroke-width="5"
+            stroke-linecap="square"
+            d="
+              M188 225 L207 288
+              M232 225 L251 288
+              M276 225 L296 288
+              M324 225 L341 288"/>
+    </g>
+  </g>
+</svg>

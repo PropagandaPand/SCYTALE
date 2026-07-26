@@ -3,8 +3,8 @@
  * (AES-256-GCM) before it touches IndexedDB — at rest it's ciphertext, bound
  * per room via AAD. Loaded on unlock so conversations survive lock/reload.
  */
-import { seal, open, utf8 } from '../crypto';
-import { loadRecord, saveRecord, deleteRecord, listRecordKeys } from './db';
+import { seal, open, utf8, type Bytes } from '../crypto';
+import { loadRecord, saveRecord, deleteRecord, listRecordKeys, secureDeleteRecord } from './db';
 
 /**
  * An attachment on a message. ONE write format going forward — a reference
@@ -112,14 +112,58 @@ export function hasMessage(messages: ChatMessage[], mid: string, mine: boolean):
 const aad = (roomId: string) => utf8.encode(`scytale:messages:v1:${roomId}`);
 const recordKey = (roomId: string) => `msgs:${roomId}`;
 
+// ── Per-room key (crypto-erase of a whole chat) ──────────────────────────────
+// A room's message log is one sealed blob. It is sealed under a random per-room key K,
+// stored sealed under the DEK at roomkey:<roomId>. Deleting the chat (or its contact)
+// crypto-erases K — the whole history becomes unrecoverable ciphertext at once. LEGACY
+// rooms (sealed directly under the DEK, no key record) still read via the DEK fallback.
+// NB: deleting a SINGLE message re-seals the room under the SAME live K, so that text is
+// not individually crypto-erased — it dies with K when the chat/contact is deleted. Any
+// ATTACHMENT in a deleted message IS crypto-erased on its own (secureWipeAttachment).
+const roomKeyKey = (roomId: string) => `roomkey:${roomId}`;
+const roomKeyAad = (roomId: string) => utf8.encode(`scytale:room-key:v1:${roomId}`);
+
+function importRoomKey(raw: Bytes): Promise<CryptoKey> {
+  return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
+}
+async function roomKey(dek: CryptoKey, roomId: string): Promise<CryptoKey | null> {
+  const rec = await loadRecord(roomKeyKey(roomId));
+  if (!rec) return null;
+  try {
+    return await importRoomKey(await open(dek, rec, roomKeyAad(roomId)));
+  } catch {
+    return null;
+  }
+}
+async function ensureRoomKey(dek: CryptoKey, roomId: string): Promise<CryptoKey> {
+  const existing = await roomKey(dek, roomId);
+  if (existing) return existing;
+  const raw = crypto.getRandomValues(new Uint8Array(32)) as Uint8Array<ArrayBuffer>;
+  await saveRecord(roomKeyKey(roomId), await seal(dek, raw, roomKeyAad(roomId)));
+  return importRoomKey(raw);
+}
+
+/** Crypto-erase a whole room: destroy the per-room key (the guarantee), then delete the
+ *  message blob. Even a crash between the two leaves the blob unreadable — i.e. gone. */
+export async function cryptoEraseRoom(roomId: string): Promise<void> {
+  await secureDeleteRecord(roomKeyKey(roomId));
+  await deleteRecord(recordKey(roomId));
+}
+
 export async function loadMessages(dek: CryptoKey, roomId: string): Promise<ChatMessage[]> {
   const rec = await loadRecord(recordKey(roomId));
   if (!rec) return [];
-  try {
-    return JSON.parse(utf8.decode(await open(dek, rec, aad(roomId)))) as ChatMessage[];
-  } catch {
-    return [];
+  // Try the room key first, then the DEK (legacy, or a crash between key-write and
+  // blob-write left the blob still sealed under the DEK).
+  const k = await roomKey(dek, roomId);
+  for (const key of k ? [k, dek] : [dek]) {
+    try {
+      return JSON.parse(utf8.decode(await open(key, rec, aad(roomId)))) as ChatMessage[];
+    } catch {
+      /* try the next candidate key */
+    }
   }
+  return [];
 }
 
 export async function saveMessages(
@@ -127,11 +171,12 @@ export async function saveMessages(
   roomId: string,
   messages: ChatMessage[],
 ): Promise<void> {
-  await saveRecord(recordKey(roomId), await seal(dek, utf8.encode(JSON.stringify(messages)), aad(roomId)));
+  const k = await ensureRoomKey(dek, roomId);
+  await saveRecord(recordKey(roomId), await seal(k, utf8.encode(JSON.stringify(messages)), aad(roomId)));
 }
 
 export async function clearMessages(roomId: string): Promise<void> {
-  await deleteRecord(recordKey(roomId));
+  await cryptoEraseRoom(roomId);
 }
 
 /** Every roomId that has a stored message log — including cardless self-sync rooms

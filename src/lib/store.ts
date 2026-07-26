@@ -5,7 +5,8 @@
  */
 import { seal, open, utf8 } from '../crypto';
 import { serializeContact, deserializeContact, type Contact } from './session';
-import { loadRecord, saveRecord, deleteRecord } from './db';
+import { loadRecord, saveRecord, secureDeleteRecord } from './db';
+import { cryptoEraseRoom } from './messages';
 
 const INDEX_AAD = utf8.encode('scytale:contact-index:v1');
 const contactAad = (roomId: string) => utf8.encode(`scytale:contact:v1:${roomId}`);
@@ -30,8 +31,10 @@ export async function saveContact(dek: CryptoKey, c: Contact): Promise<void> {
 }
 
 export async function removeContact(dek: CryptoKey, roomId: string): Promise<void> {
-  await deleteRecord(`contact:${roomId}`);
-  await deleteRecord(`msgs:${roomId}`);
+  // Crypto-erase the whole room (per-room key → the message history is unrecoverable),
+  // and overwrite+delete the contact record itself (it holds the live ratchet state).
+  await cryptoEraseRoom(roomId);
+  await secureDeleteRecord(`contact:${roomId}`);
   const ids = (await loadIndex(dek)).filter((id) => id !== roomId);
   await saveIndex(dek, ids);
 }

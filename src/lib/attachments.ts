@@ -20,7 +20,7 @@
  * swapped between attachments or reordered under the seal.
  */
 import { seal, open, utf8, type SealedRecord, type Bytes } from '../crypto';
-import { loadRecord, saveRecord, deleteRecord, listRecordKeys } from './db';
+import { loadRecord, saveRecord, deleteRecord, listRecordKeys, secureDeleteRecord } from './db';
 import { bytesToB64 } from './bytes';
 
 /** Raw bytes per stored chunk. Independent of the wire chunk size — this only
@@ -52,6 +52,53 @@ const chunkKey = (id: string, idx: number) => `att:${id}:${idx}`;
 const recvKey = (id: string) => `attrecv:${id}`;
 const metaAad = (id: string) => utf8.encode(`scytale:att-meta:v1:${id}`);
 const chunkAad = (id: string, idx: number) => utf8.encode(`scytale:att:v1:${id}:${idx}`);
+
+// ── Per-attachment key (crypto-erase) ────────────────────────────────────────
+// Each attachment's chunks + meta are sealed under a random 32-byte key K, and K is
+// itself stored sealed under the DEK at att:<id>:key. Destroying the attachment means
+// overwriting+deleting that tiny key (secureWipeAttachment): every chunk then becomes
+// unrecoverable ciphertext instantly, independent of whether the physical bytes linger.
+// LEGACY attachments (written before this, no key record) are sealed directly under the
+// DEK — reads fall back to the DEK so they keep working.
+const keyKey = (id: string) => `att:${id}:key`;
+const keyAad = (id: string) => utf8.encode(`scytale:att-key:v1:${id}`);
+
+function importAttKey(raw: Bytes): Promise<CryptoKey> {
+  return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
+}
+async function attKey(dek: CryptoKey, id: string): Promise<CryptoKey | null> {
+  const rec = await loadRecord(keyKey(id));
+  if (!rec) return null;
+  try {
+    return await importAttKey(await open(dek, rec, keyAad(id)));
+  } catch {
+    return null;
+  }
+}
+/** The per-attachment key, creating + persisting it on first use. */
+async function ensureAttKey(dek: CryptoKey, id: string): Promise<CryptoKey> {
+  const existing = await attKey(dek, id);
+  if (existing) return existing;
+  const raw = crypto.getRandomValues(new Uint8Array(32)) as Uint8Array<ArrayBuffer>;
+  await saveRecord(keyKey(id), await seal(dek, raw, keyAad(id)));
+  return importAttKey(raw);
+}
+/** Ordered keys to TRY when opening: the attachment key first (if any), then the DEK
+ *  (legacy attachment, or a crash between key-write and chunk-write). */
+async function attKeys(dek: CryptoKey, id: string): Promise<CryptoKey[]> {
+  const k = await attKey(dek, id);
+  return k ? [k, dek] : [dek];
+}
+async function openUnder(keys: CryptoKey[], rec: SealedRecord, aad: Bytes): Promise<Bytes | null> {
+  for (const k of keys) {
+    try {
+      return await open(k, rec, aad);
+    } catch {
+      /* try the next candidate key */
+    }
+  }
+  return null;
+}
 const recvAad = (id: string) => utf8.encode(`scytale:att-recv:v1:${id}`);
 
 /** A fresh random attachment id (16 bytes, hex). */
@@ -65,12 +112,13 @@ export function newAttachmentId(): string {
 export async function putAttachment(dek: CryptoKey, id: string, bytes: Uint8Array, name: string, mime: string): Promise<AttachmentMeta> {
   const chunks = Math.max(1, Math.ceil(bytes.length / STORE_CHUNK));
   try {
+    const ck = await ensureAttKey(dek, id);
     for (let i = 0; i < chunks; i++) {
       const slice = bytes.slice(i * STORE_CHUNK, (i + 1) * STORE_CHUNK);
-      await saveRecord(chunkKey(id, i), await seal(dek, slice, chunkAad(id, i)));
+      await saveRecord(chunkKey(id, i), await seal(ck, slice, chunkAad(id, i)));
     }
     const meta: AttachmentMeta = { name, mime, size: bytes.length, chunks };
-    await saveRecord(metaKey(id), await seal(dek, utf8.encode(JSON.stringify(meta)), metaAad(id))); // LAST
+    await saveRecord(metaKey(id), await seal(ck, utf8.encode(JSON.stringify(meta)), metaAad(id))); // LAST
     return meta;
   } catch (e) {
     // Clean up our own partial write (e.g. out of space mid-store) so a failed
@@ -91,7 +139,8 @@ export async function putAttachmentChunk(id: string, idx: number, sealed: Sealed
  *  (crash-safe, never assembled whole in memory) and getAttachmentBlob reassembles
  *  it regardless of chunk sizes. Idempotent: a re-delivered chunk overwrites its key. */
 export async function sealAndPutChunk(dek: CryptoKey, id: string, idx: number, bytes: Bytes): Promise<void> {
-  await saveRecord(chunkKey(id, idx), await seal(dek, bytes, chunkAad(id, idx)));
+  const ck = await ensureAttKey(dek, id);
+  await saveRecord(chunkKey(id, idx), await seal(ck, bytes, chunkAad(id, idx)));
 }
 
 /** How many distinct chunk records are stored for `id` (ignores the meta record).
@@ -105,7 +154,8 @@ export async function storedChunkCount(id: string): Promise<number> {
 
 /** Finalise an incrementally-written attachment by committing its meta LAST. */
 export async function finalizeAttachment(dek: CryptoKey, id: string, meta: AttachmentMeta): Promise<void> {
-  await saveRecord(metaKey(id), await seal(dek, utf8.encode(JSON.stringify(meta)), metaAad(id)));
+  const ck = await ensureAttKey(dek, id);
+  await saveRecord(metaKey(id), await seal(ck, utf8.encode(JSON.stringify(meta)), metaAad(id)));
 }
 
 /** Mark an incoming transfer in progress (written on the first chunk). */
@@ -133,8 +183,10 @@ export async function allRecvMarkerIds(): Promise<string[]> {
 export async function getAttachmentMeta(dek: CryptoKey, id: string): Promise<AttachmentMeta | null> {
   const rec = await loadRecord(metaKey(id));
   if (!rec) return null;
+  const pt = await openUnder(await attKeys(dek, id), rec, metaAad(id));
+  if (!pt) return null;
   try {
-    return JSON.parse(utf8.decode(await open(dek, rec, metaAad(id)))) as AttachmentMeta;
+    return JSON.parse(utf8.decode(pt)) as AttachmentMeta;
   } catch {
     return null;
   }
@@ -153,15 +205,14 @@ export async function attachmentComplete(dek: CryptoKey, id: string): Promise<bo
 export async function getAttachmentBlob(dek: CryptoKey, id: string): Promise<Blob | null> {
   const meta = await getAttachmentMeta(dek, id);
   if (!meta) return null;
+  const keys = await attKeys(dek, id); // resolve once, reuse for every chunk
   const parts: BlobPart[] = [];
   for (let i = 0; i < meta.chunks; i++) {
     const rec = await loadRecord(chunkKey(id, i));
     if (!rec) return null;
-    try {
-      parts.push(await open(dek, rec, chunkAad(id, i)));
-    } catch {
-      return null;
-    }
+    const pt = await openUnder(keys, rec, chunkAad(id, i));
+    if (!pt) return null;
+    parts.push(pt);
   }
   return new Blob(parts, { type: meta.mime });
 }
@@ -172,39 +223,23 @@ export async function deleteAttachment(id: string): Promise<void> {
   for (const k of await listRecordKeys(`att:${id}:`)) await deleteRecord(k);
 }
 
-/** getRandomValues caps at 65536 bytes per call — fill a larger buffer in blocks. */
-function randomFill(n: number): Uint8Array<ArrayBuffer> {
-  const out = new Uint8Array(n);
-  for (let o = 0; o < n; o += 65536) crypto.getRandomValues(out.subarray(o, Math.min(o + 65536, n)));
-  return out as Uint8Array<ArrayBuffer>;
-}
-
 /**
- * Irrecoverably wipe an attachment (view-once photos): overwrite every stored chunk
- * (and its meta) with same-length random noise, THEN delete the records.
- *
- * Honest limits — a browser cannot force PHYSICAL erasure of the backing store:
- * IndexedDB/LevelDB is log-structured, so overwriting a key appends a new value and
- * the old ciphertext may linger in an un-compacted segment until the engine's own GC
- * reclaims it; SSD wear-levelling defeats in-place overwrite regardless. What this
- * DOES guarantee: the logical record is replaced and removed, and every chunk was
- * AES-GCM sealed to begin with — so any byte that survives is ciphertext, useless
- * without the non-extractable, vault-held DEK. The overwrite is best-effort
- * defence-in-depth on top of the encryption, not a substitute for it.
+ * Crypto-erase an attachment (view-once photos, deleted messages/chats/contacts). The
+ * REAL guarantee is destroying the per-attachment key: once att:<id>:key is gone, every
+ * chunk is unrecoverable AES-GCM ciphertext, instantly, no matter what bytes linger in
+ * the log-structured store or on the SSD's flash cells (which the FTL never lets us
+ * overwrite in place anyway). See db.secureDeleteRecord + SECURITY.md for the honest
+ * limits. A LEGACY attachment (no key record) has no key to destroy, so its chunks fall
+ * back to the same-length overwrite-then-delete best-effort the DEK-at-rest already backs.
  */
 export async function secureWipeAttachment(id: string): Promise<void> {
+  const hadKey = !!(await loadRecord(keyKey(id)));
+  await secureDeleteRecord(keyKey(id)); // ← crypto-erase: the whole guarantee is here
   for (const k of await listRecordKeys(`att:${id}:`)) {
-    try {
-      const rec = await loadRecord(k);
-      const ctLen = rec?.ct.byteLength ?? 0;
-      await saveRecord(k, {
-        iv: crypto.getRandomValues(new Uint8Array(12)) as Uint8Array<ArrayBuffer>,
-        ct: randomFill(ctLen),
-      });
-    } catch {
-      /* best-effort — fall through to the delete */
-    }
-    await deleteRecord(k);
+    // Keyed chunks are already unrecoverable → a plain delete just reclaims space.
+    // Legacy chunks (sealed under the DEK) still get the best-effort overwrite.
+    if (hadKey) await deleteRecord(k);
+    else await secureDeleteRecord(k);
   }
   await deleteRecord(recvKey(id));
 }

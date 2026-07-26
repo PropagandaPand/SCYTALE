@@ -88,6 +88,37 @@ export async function deleteRecord(key: string): Promise<void> {
   await withDB((d) => d.delete('records', key));
 }
 
+/** getRandomValues caps at 65536 bytes per call — fill a larger buffer in blocks. */
+function randomBytes(n: number): Uint8Array<ArrayBuffer> {
+  const out = new Uint8Array(n);
+  for (let o = 0; o < n; o += 65536) crypto.getRandomValues(out.subarray(o, Math.min(o + 65536, n)));
+  return out as Uint8Array<ArrayBuffer>;
+}
+
+/**
+ * Crypto-erase-friendly delete: overwrite a record with same-length random noise a
+ * few times, then delete it. Used to destroy the SMALL per-item keys (attachment /
+ * room keys) that gate the encrypted payload — once the key is gone the payload is
+ * unrecoverable ciphertext regardless of what bytes linger physically. Honest limit:
+ * on an SSD the overwrite does not reach the original flash cells (the FTL remaps and
+ * wear-levels), so the guarantee is the KEY DESTRUCTION, not the physical overwrite —
+ * the overwrite is a cheap best-effort gesture on a 44-byte record. See SECURITY.md.
+ */
+export async function secureDeleteRecord(key: string): Promise<void> {
+  try {
+    const rec = await loadRecord(key);
+    if (rec) {
+      const len = rec.ct.byteLength;
+      for (let pass = 0; pass < 3; pass++) {
+        await saveRecord(key, { iv: randomBytes(12), ct: randomBytes(len) });
+      }
+    }
+  } catch {
+    /* best-effort — fall through to the delete */
+  }
+  await deleteRecord(key);
+}
+
 /** Every record key starting with `prefix`. A real key-range scan, not a sealed
  *  index blob — an index blob would recreate exactly the "one growing blob" problem
  *  the attachment store exists to avoid. Used to enumerate an attachment's chunks

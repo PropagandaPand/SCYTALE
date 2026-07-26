@@ -115,7 +115,6 @@ import {
   getAttachmentBlob,
   getAttachmentMeta,
   newAttachmentId,
-  deleteAttachment,
   secureWipeAttachment,
   allAttachmentIds,
   sealAndPutChunk,
@@ -646,7 +645,7 @@ export function Messenger({ dek, onLock }: Props) {
     if (messagesRef.current[roomId] === undefined) messagesRef.current[roomId] = await loadMessages(dek, roomId);
     const arr = messagesRef.current[roomId] ?? [];
     const next = arr.filter((x) => x !== m);
-    if (m.file?.attId) void deleteAttachment(m.file.attId);
+    if (m.file?.attId) void secureWipeAttachment(m.file.attId);
     messagesRef.current[roomId] = next;
     commitMessages();
     await saveMessages(dek, roomId, next);
@@ -771,7 +770,7 @@ export function Messenger({ dek, onLock }: Props) {
     const arr = messagesRef.current[roomId] ?? [];
     const next = arr.map((m) => {
       if (m.mid === targetMid && m.mine === mine && !m.recalled) {
-        if (m.file?.attId) void deleteAttachment(m.file.attId);
+        if (m.file?.attId) void secureWipeAttachment(m.file.attId);
         return { ...m, recalled: true, text: undefined, file: undefined, reply: undefined };
       }
       return m;
@@ -1148,7 +1147,7 @@ export function Messenger({ dek, onLock }: Props) {
       return r;
     });
     if (out.perDevice.length === 0) {
-      await deleteAttachment(tid); // nothing sent — don't leak the local copy
+      await secureWipeAttachment(tid); // nothing sent — don't leak the local copy
       return false;
     }
     // RelayClient buffers, so a burst is fine within the relay's mailbox byte-cap
@@ -2589,22 +2588,26 @@ export function Messenger({ dek, onLock }: Props) {
       const marker = await getRecvMarker(dek, tid);
       if (marker && Date.now() - marker.ts > RECV_TTL_MS) {
         await clearRecvMarker(tid);
-        await deleteAttachment(tid);
+        await secureWipeAttachment(tid);
       } else {
         referenced.add(tid); // live transfer — keep its chunks
       }
     }
-    for (const id of await allAttachmentIds()) if (!referenced.has(id)) await deleteAttachment(id);
+    for (const id of await allAttachmentIds()) if (!referenced.has(id)) await secureWipeAttachment(id);
   }
 
+  // Crypto-erase every attachment this room references. Loads from the store if the
+  // in-memory list is already gone, so it works whatever order the caller clears state.
   async function gcRoomAttachments(roomId: string) {
-    for (const m of messagesRef.current[roomId] ?? []) {
-      if (m.file?.attId) await deleteAttachment(m.file.attId);
+    const msgs = messagesRef.current[roomId] ?? (await loadMessages(dek, roomId));
+    for (const m of msgs) {
+      if (m.file?.attId) await secureWipeAttachment(m.file.attId);
     }
   }
 
   async function deleteContactAction(roomId: string) {
     setChatMenu(false);
+    await gcRoomAttachments(roomId); // crypto-erase attachments while the room still exists
     const sendRoom = sendRoomRef.current.get(roomId);
     if (sendRoom) {
       relaysRef.current.get(sendRoom)?.close();
@@ -2615,7 +2618,6 @@ export function Messenger({ dek, onLock }: Props) {
     delete messagesRef.current[roomId];
     delete unreadRef.current[roomId];
     profileSentRef.current.delete(roomId);
-    await gcRoomAttachments(roomId);
     await removeContact(dek, roomId);
     if (activeRoom === roomId) {
       setActiveRoom(null);
@@ -2627,8 +2629,9 @@ export function Messenger({ dek, onLock }: Props) {
 
   async function clearChatAction(roomId: string) {
     setChatMenu(false);
+    await gcRoomAttachments(roomId); // crypto-erase this room's attachments first
     messagesRef.current[roomId] = [];
-    await clearMessages(roomId);
+    await clearMessages(roomId); // crypto-erase the per-room key → history unrecoverable
     commitMessages();
     bump();
   }

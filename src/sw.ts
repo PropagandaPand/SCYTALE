@@ -20,6 +20,7 @@
  * bare wake-up — nothing about who wrote or what they said ever leaves a device.
  */
 /// <reference lib="webworker" />
+import { bumpBadge } from './lib/badge';
 
 const sw = self as unknown as ServiceWorkerGlobalScope;
 
@@ -150,12 +151,18 @@ sw.addEventListener('fetch', (event) => {
 // Content-free by design — no sender, no text.
 sw.addEventListener('push', (event) => {
   event.waitUntil(
-    sw.registration.showNotification('Neue Nachricht', {
-      body: 'Tippen zum Öffnen',
-      icon: '/pwa-192.png',
-      badge: '/pwa-192.png',
-      tag: 'scytale-new-message',
-    }),
+    (async () => {
+      // The app is closed (the relay only pushes an offline owner), so we don't know
+      // the real unread count — bump the app-icon badge by one. The app corrects it
+      // to the true count on next open. Best-effort; never block the notification.
+      await bumpBadge().catch(() => undefined);
+      await sw.registration.showNotification('Neue Nachricht', {
+        body: 'Tippen zum Öffnen',
+        icon: '/pwa-192.png',
+        badge: '/pwa-192.png',
+        tag: 'scytale-new-message',
+      });
+    })(),
   );
 });
 

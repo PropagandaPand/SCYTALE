@@ -137,6 +137,7 @@ import { BackupModal } from './BackupModal';
 import { BiometricEnroll } from './BiometricEnroll';
 import { Explainer } from './Explainer';
 import { t, useLang, LANGS, getLang, setLang, type Lang } from './lib/i18n';
+import { applyBadge } from './lib/badge';
 import { biometricAvailable, biometricEnrolled, disableBiometricUnlock } from './lib/vaultService';
 import { Attachment, LightboxImg } from './Attachment';
 import {
@@ -312,6 +313,8 @@ function isSilentFrame(kind: MessageContent['kind']): boolean {
   }
 }
 
+const MSG_WINDOW = 60; // messages rendered initially / added per older-page load
+
 const shortFp = (fp: string) => (fp ? fp.split(' ').slice(0, 3).join(' ') + ' …' : '…');
 
 // WhatsApp-style large emoji: a message that is ONLY one or two emoji (no letters or
@@ -432,6 +435,14 @@ export function Messenger({ dek, onLock }: Props) {
     if (msgInputRef.current) msgInputRef.current.value = '';
     setHasText(false);
   };
+  // Message windowing: render only the most recent MSG_WINDOW messages so opening a
+  // long/group chat isn't 3–4 s of rendering the ENTIRE history. Scrolling to the top
+  // loads an older page (windowNRef/loadMoreRef drive the scroll effect below).
+  const [windowN, setWindowN] = useState(MSG_WINDOW);
+  const windowNRef = useRef(MSG_WINDOW);
+  windowNRef.current = windowN;
+  const loadMoreRef = useRef(false);
+  const prevHeightRef = useRef(0);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
   const [shared, setShared] = useState(false); // feedback for the share button's copy fallback
@@ -2462,6 +2473,17 @@ export function Messenger({ dek, onLock }: Props) {
     toBottom();
     const onScroll = () => {
       pin = atBottom();
+      // Near the top → reveal an older page of messages (windowing). Remember the
+      // height first so the viewport stays put after the prepend (restore effect).
+      if (el.scrollTop < 260 && !loadMoreRef.current) {
+        const roomKey = activeGroupRef.current ?? activeRoomRef.current;
+        const total = roomKey ? messagesRef.current[roomKey]?.length ?? 0 : 0;
+        if (windowNRef.current < total) {
+          prevHeightRef.current = el.scrollHeight;
+          loadMoreRef.current = true;
+          setWindowN((n) => n + MSG_WINDOW);
+        }
+      }
     };
     el.addEventListener('scroll', onScroll, { passive: true });
     // Observe ONLY the content wrapper's height — one target, cheap even with hundreds
@@ -2484,6 +2506,23 @@ export function Messenger({ dek, onLock }: Props) {
     setRenaming(false);
     setChatMenu(false);
   }, [activeRoom, activeGroup]);
+
+  // App-icon badge: the running app is the source of truth for the total unread
+  // count. unreadRef changes are always followed by a re-render (bump/commit), so
+  // this recomputes and repaints the badge whenever it actually changes.
+  const totalUnread = Object.values(unreadRef.current).reduce((s, n) => s + (n || 0), 0);
+  useEffect(() => {
+    void applyBadge(totalUnread);
+  }, [totalUnread]);
+
+  // After an older page is prepended, keep the viewport on the same message instead
+  // of jumping (the newly added rows above would otherwise push everything down).
+  useLayoutEffect(() => {
+    if (!loadMoreRef.current) return;
+    loadMoreRef.current = false;
+    const el = document.getElementById('msgs');
+    if (el) el.scrollTop += el.scrollHeight - prevHeightRef.current;
+  }, [windowN]);
 
   /** Delete the out-of-band attachments referenced by a room's messages, so
    *  removing a chat does not leak its videos in the vault. */
@@ -2732,6 +2771,7 @@ export function Messenger({ dek, onLock }: Props) {
     setActiveRoom(null);
     activeRoomRef.current = null;
     unreadRef.current[gid] = 0;
+    setWindowN(MSG_WINDOW); // render only the most recent page → instant open
     setView('chat');
     bump();
   }
@@ -2951,6 +2991,7 @@ export function Messenger({ dek, onLock }: Props) {
     setActiveRoom(roomId);
     activeRoomRef.current = roomId;
     unreadRef.current[roomId] = 0;
+    setWindowN(MSG_WINDOW); // render only the most recent page → instant open
     setView('chat');
     bump();
   }
@@ -4020,6 +4061,8 @@ export function Messenger({ dek, onLock }: Props) {
   // ── Chat ──────────────────────────────────────────────────────────
   if (view === 'chat' && activeContact) {
     const msgs = messages[activeContact.roomId] ?? [];
+    const start = Math.max(0, msgs.length - windowN);
+    const shown = start > 0 ? msgs.slice(start) : msgs;
     const verified = !!activeContact.verified;
     return (
       <div
@@ -4109,9 +4152,9 @@ export function Messenger({ dek, onLock }: Props) {
             </span>
             Verschlüsselt · nur ihr beide lest mit
           </div>
-          {msgs.map((m, i) => (
+          {shown.map((m, i) => (
             <div
-              key={`${m.ts}-${i}`}
+              key={m.mid ?? `${m.ts}-${start + i}`}
               data-mid={m.mid}
               className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file && isSticker(m.file) ? ' is-sticker' : m.file && (m.file.mime.startsWith('image/') || m.file.mime.startsWith('video/')) ? ' has-file' : ''}${(() => { const e = !m.file && !m.recalled ? bigEmojiLevel(m.text) : 0; return e ? ` emoji-${e}${m.reply ? '' : ' emoji-big'}` : ''; })()}`}
               onPointerDown={(e) => onBubblePointerDown(e, m)}
@@ -4188,6 +4231,8 @@ export function Messenger({ dek, onLock }: Props) {
   // ── Group chat ────────────────────────────────────────────────────
   if (view === 'chat' && activeGroupData) {
     const msgs = messages[activeGroupData.id] ?? [];
+    const start = Math.max(0, msgs.length - windowN);
+    const shown = start > 0 ? msgs.slice(start) : msgs;
     return (
       <div
         className="chat"
@@ -4250,9 +4295,9 @@ export function Messenger({ dek, onLock }: Props) {
               ⓘ Gruppen synchen noch nicht auf deine anderen Geräte
             </div>
           )}
-          {msgs.map((m, i) => (
+          {shown.map((m, i) => (
             <div
-              key={`${m.ts}-${i}`}
+              key={m.mid ?? `${m.ts}-${start + i}`}
               data-mid={m.mid}
               className={`bubble ${m.mine ? 'mine' : 'theirs'}${m.file && isSticker(m.file) ? ' is-sticker' : m.file && (m.file.mime.startsWith('image/') || m.file.mime.startsWith('video/')) ? ' has-file' : ''}${(() => { const e = !m.file && !m.recalled ? bigEmojiLevel(m.text) : 0; return e ? ` emoji-${e}${m.reply ? '' : ' emoji-big'}` : ''; })()}`}
               onPointerDown={(e) => onBubblePointerDown(e, m)}

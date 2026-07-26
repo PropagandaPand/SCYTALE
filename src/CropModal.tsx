@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { t } from './lib/i18n';
+
 
 /**
  * Circular avatar cropper. The crop window is a fixed square (previewed as a
@@ -170,8 +172,8 @@ export function CropModal({
   }
 
   return (
-    <div className="crop-modal" role="dialog" aria-label={shape === 'square' ? 'Sticker zuschneiden' : 'Profilbild zuschneiden'}>
-      <div className="crop-head">{shape === 'square' ? 'Sticker-Ausschnitt wählen' : 'Ausschnitt wählen'}</div>
+    <div className="crop-modal" role="dialog" aria-label={shape === 'square' ? t('Sticker zuschneiden') : t('Profilbild zuschneiden')}>
+      <div className="crop-head">{shape === 'square' ? t('Sticker-Ausschnitt wählen') : t('Ausschnitt wählen')}</div>
       <div
         className="crop-stage"
         ref={stageRef}
@@ -200,15 +202,15 @@ export function CropModal({
         step={0.01}
         value={zoom}
         onChange={(e) => applyZoom(parseFloat(e.target.value))}
-        aria-label="Zoom"
+        aria-label={t('Zoom')}
       />
       {err && <div className="err-note">{err}</div>}
       <div className="crop-actions">
         <button className="btn btn-ghost" onClick={onCancel}>
-          Abbrechen
+          {t('Abbrechen')}
         </button>
         <button className="btn btn-primary" disabled={busy || !nat} onClick={() => void confirm()}>
-          Übernehmen
+          {t('Übernehmen')}
         </button>
       </div>
     </div>

@@ -137,6 +137,7 @@ import { BackupModal } from './BackupModal';
 import { BiometricEnroll } from './BiometricEnroll';
 import { Explainer } from './Explainer';
 import { t, useLang, LANGS, getLang, setLang, type Lang } from './lib/i18n';
+import { tb } from './lib/tnodes';
 import { applyBadge } from './lib/badge';
 import { biometricAvailable, biometricEnrolled, disableBiometricUnlock } from './lib/vaultService';
 import { Attachment, LightboxImg } from './Attachment';
@@ -793,11 +794,11 @@ export function Messenger({ dek, onLock }: Props) {
           : m.file.attId
             ? await getAttachmentBlob(dek, m.file.attId)
             : null;
-        if (!blob) return setError('Anhang nicht mehr verfügbar.');
+        if (!blob) return setError(t('Anhang nicht mehr verfügbar.'));
         const data = new Uint8Array(await blob.arrayBuffer()) as Uint8Array<ArrayBuffer>;
         const { name, mime } = m.file;
         if (data.length > MAX_ATTACH) {
-          if (data.length > AUTOPUSH_CAP) return setError('Datei zu groß zum Weiterleiten.');
+          if (data.length > AUTOPUSH_CAP) return setError(t('Datei zu groß zum Weiterleiten.'));
           await sendChunkedAttachment(contact, data, name, mime);
           return;
         }
@@ -816,7 +817,7 @@ export function Messenger({ dek, onLock }: Props) {
       await saveContact(dek, contact);
       bump();
     } catch (e) {
-      setError('Weiterleiten fehlgeschlagen: ' + (e as Error).message);
+      setError(t('Weiterleiten fehlgeschlagen: {msg}', { msg: (e as Error).message }));
     }
   }
 
@@ -957,7 +958,7 @@ export function Messenger({ dek, onLock }: Props) {
         if (s === 'open') void ensureListGossiped(contact);
       },
       onAck: (mid) => markStatus(mid, 'sent'),
-      onNack: (mid) => markStatus(mid, 'failed', 'Nicht zugestellt — das Postfach des Empfängers ist voll.'),
+      onNack: (mid) => markStatus(mid, 'failed', t('Nicht zugestellt — das Postfach des Empfängers ist voll.')),
     });
     relaysRef.current.set(room, client);
     client.connect();
@@ -993,7 +994,7 @@ export function Messenger({ dek, onLock }: Props) {
       mid,
       setTimeout(() => {
         ackTimers.current.delete(mid);
-        markStatus(mid, 'failed', 'Keine Bestätigung vom Relay — noch nicht zugestellt (evtl. offline).');
+        markStatus(mid, 'failed', t('Keine Bestätigung vom Relay — noch nicht zugestellt (evtl. offline).'));
       }, 10_000),
     );
   }
@@ -1049,7 +1050,7 @@ export function Messenger({ dek, onLock }: Props) {
     if (relaysRef.current.has(room)) return;
     const client = new RelayClient(room, {
       onAck: (id) => markStatus(id, 'sent'),
-      onNack: (id) => markStatus(id, 'failed', 'An ein Gerät nicht zugestellt — Postfach voll.'),
+      onNack: (id) => markStatus(id, 'failed', t('An ein Gerät nicht zugestellt — Postfach voll.')),
     });
     relaysRef.current.set(room, client);
     client.connect();
@@ -1804,7 +1805,7 @@ export function Messenger({ dek, onLock }: Props) {
             await sendEnvelopeTo(
               c,
               await encryptAndPersist(c, () =>
-                sendMessage(id, c, '🔗 Ich habe ein neues Gerät gekoppelt — meine Identität ändert sich. Bitte bestätige die neue Identität, wenn du gefragt wirst.'),
+                sendMessage(id, c, t('🔗 Ich habe ein neues Gerät gekoppelt — meine Identität ändert sich. Bitte bestätige die neue Identität, wenn du gefragt wirst.')),
               ),
             );
           } catch {
@@ -1924,7 +1925,7 @@ export function Messenger({ dek, onLock }: Props) {
     setLinkBusy(true);
     try {
       const currentList = await loadOrCreateOwnDeviceList(dek, id, ownSpkPublic(pre));
-      if (!currentList) throw new Error('Geräteliste nicht verfügbar.');
+      if (!currentList) throw new Error(t('Geräteliste nicht verfügbar.'));
       const newList = await completeLinkOnP(dek, id, session, currentList, sendToInbox);
       // Gossip the updated list so contacts learn the new device (and, later,
       // stop accepting a removed one). Best-effort: revocation takes effect for
@@ -2037,7 +2038,7 @@ export function Messenger({ dek, onLock }: Props) {
                 signPub: env.x3dh.identitySignPub, dhPub: env.x3dh.identityDhPub,
               };
               await saveContact(dek, origin);
-              setError(`⚠ ${displayName(origin)} meldet sich mit einer neuen Identität (unbelegt). Prüfe sie in der Kontaktansicht und vergleiche die Sicherheitsnummer.`);
+              setError(t('⚠ {name} meldet sich mit einer neuen Identität (unbelegt). Prüfe sie in der Kontaktansicht und vergleiche die Sicherheitsnummer.', { name: displayName(origin) }));
               bump();
             }
             return; // the merge affordance is the path — do NOT auto-create a stranger
@@ -2066,7 +2067,7 @@ export function Messenger({ dek, onLock }: Props) {
           // inbox, and a warning per copy would blunt the user against it.
           await saveContact(dek, contact);
           if (e.firstOccurrence) {
-            setError(`⚠ Sicherheit: Für ${displayName(contact)} wird eine neue Identität behauptet — nicht übernommen. Prüfe sie in der Kontaktansicht, bevor du sie akzeptierst.`);
+            setError(t('⚠ Sicherheit: Für {name} wird eine neue Identität behauptet — nicht übernommen. Prüfe sie in der Kontaktansicht, bevor du sie akzeptierst.', { name: displayName(contact) }));
           }
           bump();
         } else if (e instanceof RetiredIdentityError) {
@@ -2076,7 +2077,7 @@ export function Messenger({ dek, onLock }: Props) {
           // warnings. The state stays visible in the contact view.
           await saveContact(dek, contact);
           if (e.firstOccurrence) {
-            setError(`⚠ Sicherheit: Jemand hat sich als ${displayName(contact)} mit einer bereits ersetzten Identität gemeldet — abgelehnt.`);
+            setError(t('⚠ Sicherheit: Jemand hat sich als {name} mit einer bereits ersetzten Identität gemeldet — abgelehnt.', { name: displayName(contact) }));
           }
           bump();
         } else if (e instanceof RevokedDeviceError) {
@@ -2347,7 +2348,7 @@ export function Messenger({ dek, onLock }: Props) {
       setAddInput('');
       openChat(contact.roomId);
     } catch (e) {
-      setError('Ungültiges Bundle: ' + (e as Error).message);
+      setError(t('Ungültiges Bundle: {msg}', { msg: (e as Error).message }));
     }
   }
 
@@ -2752,7 +2753,7 @@ export function Messenger({ dek, onLock }: Props) {
       members.push({ signPub: c.peerSignPub, dhPub: c.peerDhPub, bundle: c.bundle, name: displayName(c) });
     }
     if (members.length === 0) {
-      setError('Wähle mindestens einen Kontakt.');
+      setError(t('Wähle mindestens einen Kontakt.'));
       return;
     }
     const group: Group = { id: randomGroupId(), name: groupNameInput.trim() || 'Gruppe', members, createdAt: Date.now() };
@@ -3108,12 +3109,12 @@ export function Messenger({ dek, onLock }: Props) {
         // Auto-push chunked: a 1:1 contact, above the inline cap and within AUTOPUSH_CAP.
         if (target && data.length <= AUTOPUSH_CAP) {
           const sent = await sendChunkedAttachment(target, data, name, mime);
-          if (!sent) setError('Empfänger kann große Anhänge noch nicht empfangen — bitte App aktualisieren lassen.');
+          if (!sent) setError(t('Empfänger kann große Anhänge noch nicht empfangen — bitte App aktualisieren lassen.'));
           return;
         }
         if (target && data.length <= MAX_BIG_ATTACH) {
           const offered = await sendOfferedAttachment(target, data, name, mime);
-          if (!offered) setError('Empfänger kann große Anhänge noch nicht empfangen — bitte App aktualisieren lassen.');
+          if (!offered) setError(t('Empfänger kann große Anhänge noch nicht empfangen — bitte App aktualisieren lassen.'));
           return;
         }
         const cap = Math.round(MAX_BIG_ATTACH / (1024 * 1024));
@@ -3146,7 +3147,7 @@ export function Messenger({ dek, onLock }: Props) {
   async function onStickerCropped(bytes: Uint8Array, mime: string) {
     setStickerFile(null);
     if (stickers.length >= MAX_STICKERS) {
-      setError(`Sticker-Grenze erreicht (${MAX_STICKERS}) — lösche erst einen.`);
+      setError(t('Sticker-Grenze erreicht ({n}) — lösche erst einen.', { n: MAX_STICKERS }));
       return;
     }
     const next: Sticker[] = [
@@ -3166,7 +3167,7 @@ export function Messenger({ dek, onLock }: Props) {
     if (stickers.some((x) => x.dataB64 === s.dataB64)) return; // already mine
     if (stickers.length >= MAX_STICKERS) {
       setStickerZoom(null);
-      setError(`Sticker-Grenze erreicht (${MAX_STICKERS}) — lösche erst einen.`);
+      setError(t('Sticker-Grenze erreicht ({n}) — lösche erst einen.', { n: MAX_STICKERS }));
       return;
     }
     const next: Sticker[] = [
@@ -3258,7 +3259,7 @@ export function Messenger({ dek, onLock }: Props) {
         });
       }, 1000);
     } catch (e) {
-      setError('Mikrofon nicht verfügbar: ' + (e as Error).message);
+      setError(t('Mikrofon nicht verfügbar: {msg}', { msg: (e as Error).message }));
       cleanupRecording();
     }
   }
@@ -3285,7 +3286,7 @@ export function Messenger({ dek, onLock }: Props) {
     const ext = mime.includes('mp4') ? 'm4a' : mime.includes('ogg') ? 'ogg' : 'webm';
     const data = new Uint8Array(await new Blob(chunks, { type: mime }).arrayBuffer());
     if (data.length > MAX_ATTACH) {
-      setError(`Aufnahme zu groß (${Math.round(data.length / 1024)} KB).`);
+      setError(t('Aufnahme zu groß ({kb} KB).', { kb: Math.round(data.length / 1024) }));
       return;
     }
     const name = `sprachnachricht.${ext}`;
@@ -3405,9 +3406,11 @@ export function Messenger({ dek, onLock }: Props) {
   // where a link only ever opens Safari, pastes it via "Aus Zwischenablage".
   function contactShareText(): string {
     return (
-      'Verbinde dich mit mir auf SKYTALE 🔐\n\n' +
+      t('Verbinde dich mit mir auf SKYTALE 🔐') +
+      '\n\n' +
       shareLink +
-      '\n\nFalls sich nur der Browser öffnet: In SKYTALE auf „Verbinden“ → „Aus Zwischenablage verbinden“.'
+      '\n\n' +
+      t('Falls sich nur der Browser öffnet: In SKYTALE auf „Verbinden“ → „Aus Zwischenablage verbinden“.')
     );
   }
 
@@ -3440,17 +3443,17 @@ export function Messenger({ dek, onLock }: Props) {
     setError('');
     try {
       if (!navigator.clipboard?.readText) {
-        setError('Zwischenablage nicht verfügbar — füge den Code unten ins Feld ein.');
+        setError(t('Zwischenablage nicht verfügbar — füge den Code unten ins Feld ein.'));
         return;
       }
       const text = await navigator.clipboard.readText();
       if (!text.trim()) {
-        setError('Zwischenablage ist leer — kopiere zuerst den Verbindungscode deines Kontakts.');
+        setError(t('Zwischenablage ist leer — kopiere zuerst den Verbindungscode deines Kontakts.'));
         return;
       }
       await addBundle(text);
     } catch {
-      setError('Zugriff auf die Zwischenablage nicht möglich — füge den Code stattdessen unten ins Feld ein.');
+      setError(t('Zugriff auf die Zwischenablage nicht möglich — füge den Code stattdessen unten ins Feld ein.'));
     }
   }
 
@@ -3507,7 +3510,7 @@ export function Messenger({ dek, onLock }: Props) {
   async function acceptNewIdentity() {
     const c = contactsRef.current.find((x) => x.roomId === activeRoom);
     if (!c || !c.pendingMaster) return;
-    if (!confirm('Neue Identität dieses Kontakts übernehmen? Danach musst du die Sicherheitsnummer erneut vergleichen.'))
+    if (!confirm(t('Neue Identität dieses Kontakts übernehmen? Danach musst du die Sicherheitsnummer erneut vergleichen.')))
       return;
     const r = await acceptMasterChange(c); // sets new roomId + verified=false
     if (!r) return;
@@ -3576,7 +3579,7 @@ export function Messenger({ dek, onLock }: Props) {
             <div className="msg-pop" style={{ left, top, width: W }} onClick={(e) => e.stopPropagation()}>
               <button className="msg-pop-row" onClick={() => { setReplyTo(quoteFrom(m)); close(); }}>
                 <IconReply />
-                <span>Antworten</span>
+                <span>{t('Antworten')}</span>
               </button>
               {isText && (
                 <button
@@ -3587,13 +3590,13 @@ export function Messenger({ dek, onLock }: Props) {
                   }}
                 >
                   <IconCopy />
-                  <span>Kopieren</span>
+                  <span>{t('Kopieren')}</span>
                 </button>
               )}
               {hasContent && (
                 <button className="msg-pop-row" onClick={() => { setForwardMsg(m); close(); }}>
                   <IconForward />
-                  <span>Weiterleiten</span>
+                  <span>{t('Weiterleiten')}</span>
                 </button>
               )}
               <button
@@ -3605,7 +3608,7 @@ export function Messenger({ dek, onLock }: Props) {
                 }}
               >
                 <IconTrash />
-                <span>Löschen</span>
+                <span>{t('Löschen')}</span>
               </button>
             </div>
           </div>
@@ -3617,7 +3620,7 @@ export function Messenger({ dek, onLock }: Props) {
   const forwardEl = forwardMsg ? (
     <div className="sheet-scrim" onClick={() => setForwardMsg(null)}>
       <div className="fwd-sheet" onClick={(e) => e.stopPropagation()}>
-        <div className="fwd-head">Weiterleiten an</div>
+        <div className="fwd-head">{t('Weiterleiten an')}</div>
         <div className="fwd-list">
           {contactsRef.current
             .filter((c) => !c.hidden && !c.staleIdentity)
@@ -3643,10 +3646,10 @@ export function Messenger({ dek, onLock }: Props) {
   // Tapping a sticker in a chat opens it large, with the option to keep it. The
   // action button must stop propagation — the backdrop closes on click.
   const stickerViewEl = stickerZoom ? (
-    <div className="sticker-view" onClick={() => setStickerZoom(null)} role="dialog" aria-label="Sticker">
-      <img src={`data:${stickerZoom.mime};base64,${stickerZoom.dataB64}`} alt="Sticker" />
+    <div className="sticker-view" onClick={() => setStickerZoom(null)} role="dialog" aria-label={t('Sticker')}>
+      <img src={`data:${stickerZoom.mime};base64,${stickerZoom.dataB64}`} alt={t('Sticker')} />
       {stickers.some((s) => s.dataB64 === stickerZoom.dataB64) ? (
-        <p className="sticker-view-note">Ist schon in deinen Stickern.</p>
+        <p className="sticker-view-note">{t('Ist schon in deinen Stickern.')}</p>
       ) : (
         <button
           className="btn btn-primary"
@@ -3655,10 +3658,10 @@ export function Messenger({ dek, onLock }: Props) {
             void addStickerToLibrary(stickerZoom);
           }}
         >
-          Zu meinen Stickern hinzufügen
+          {t('Zu meinen Stickern hinzufügen')}
         </button>
       )}
-      <button className="lightbox-close" onClick={() => setStickerZoom(null)} aria-label="Schließen">
+      <button className="lightbox-close" onClick={() => setStickerZoom(null)} aria-label={t('Schließen')}>
         ×
       </button>
     </div>
@@ -3683,19 +3686,19 @@ export function Messenger({ dek, onLock }: Props) {
       onClose={closeLink}
     />
   ) : linkView ? (
-    <div className="link-overlay" role="dialog" aria-label="Gerät koppeln">
+    <div className="link-overlay" role="dialog" aria-label={t('Gerät koppeln')}>
       <div className="link-card">
-        <button className="link-x" onClick={closeLink} aria-label="Schließen">
+        <button className="link-x" onClick={closeLink} aria-label={t('Schließen')}>
           ×
         </button>
 
         {linkView === 'menu' && (
           <>
-            <div className="link-head">Gerät koppeln</div>
-            <p className="link-sub">Welche Rolle hat dieses Gerät?</p>
+            <div className="link-head">{t('Gerät koppeln')}</div>
+            <p className="link-sub">{t('Welche Rolle hat dieses Gerät?')}</p>
             <button className="btn btn-primary btn-tall" onClick={() => void startJoinAsNewDevice()}>
-              Dieses Gerät verbinden
-              <span className="link-btn-note">Zeigt einen QR-Code, den das Hauptgerät scannt</span>
+              {t('Dieses Gerät verbinden')}
+              <span className="link-btn-note">{t('Zeigt einen QR-Code, den das Hauptgerät scannt')}</span>
             </button>
             <button
               className="btn btn-outline btn-tall"
@@ -3703,28 +3706,27 @@ export function Messenger({ dek, onLock }: Props) {
               onClick={() => {
                 const id = identityRef.current;
                 if (id && !isPrimaryDevice(id)) {
-                  setError('Dieses Gerät ist selbst gekoppelt — nur das Hauptgerät kann weitere hinzufügen.');
+                  setError(t('Dieses Gerät ist selbst gekoppelt — nur das Hauptgerät kann weitere hinzufügen.'));
                   return;
                 }
                 setLinkView('scan');
               }}
             >
-              Neues Gerät hinzufügen
-              <span className="link-btn-note">Scannt den QR-Code des neuen Geräts</span>
+              {t('Neues Gerät hinzufügen')}
+              <span className="link-btn-note">{t('Scannt den QR-Code des neuen Geräts')}</span>
             </button>
           </>
         )}
 
         {linkView === 'qr' && (
           <>
-            <div className="link-head">Auf dem Hauptgerät scannen</div>
+            <div className="link-head">{t('Auf dem Hauptgerät scannen')}</div>
             <p className="link-sub">
-              Öffne auf deinem Hauptgerät <b>Profil → Gerät koppeln → Neues Gerät hinzufügen</b> und scanne diesen
-              Code.
+              {tb('Öffne auf deinem Hauptgerät **Profil → Gerät koppeln → Neues Gerät hinzufügen** und scanne diesen Code.')}
             </p>
-            <div className="link-qr">{linkQr ? <img src={linkQr} alt="Kopplungs-QR" /> : <span className="ph">…</span>}</div>
+            <div className="link-qr">{linkQr ? <img src={linkQr} alt={t('Kopplungs-QR')} /> : <span className="ph">…</span>}</div>
             <p className="link-wait">
-              <span className="rec-dot" /> Warte auf das Hauptgerät…
+              <span className="rec-dot" /> {t('Warte auf das Hauptgerät…')}
             </p>
           </>
         )}
@@ -3732,10 +3734,9 @@ export function Messenger({ dek, onLock }: Props) {
 
         {linkView === 'sas' && linkSas && (
           <>
-            <div className="link-head">Stimmen die Emojis überein?</div>
+            <div className="link-head">{t('Stimmen die Emojis überein?')}</div>
             <p className="link-sub">
-              Vergleiche diese sieben Zeichen mit dem <b>anderen Gerät</b>. Nur wenn sie exakt gleich sind, ist die
-              Verbindung frei von einem Angreifer in der Mitte.
+              {tb('Vergleiche diese sieben Zeichen mit dem **anderen Gerät**. Nur wenn sie exakt gleich sind, ist die Verbindung frei von einem Angreifer in der Mitte.')}
             </p>
             <div className="sas-grid">
               {linkSas.emoji.map((e, i) => (
@@ -3747,18 +3748,18 @@ export function Messenger({ dek, onLock }: Props) {
             </div>
             {linkBusy ? (
               <p className="link-wait">
-                <span className="rec-dot" /> Warte auf Bestätigung des Hauptgeräts…
+                <span className="rec-dot" /> {t('Warte auf Bestätigung des Hauptgeräts…')}
               </p>
             ) : (
               <div className="link-actions">
                 <button className="btn btn-danger" onClick={closeLink}>
-                  Stimmt nicht
+                  {t('Stimmt nicht')}
                 </button>
                 <button
                   className="btn btn-primary"
                   onClick={() => (linkRole === 'primary' ? void onPConfirmSas() : void onNConfirmSas())}
                 >
-                  Stimmt überein
+                  {t('Stimmt überein')}
                 </button>
               </div>
             )}
@@ -3770,14 +3771,14 @@ export function Messenger({ dek, onLock }: Props) {
             <div className="link-done-icon">
               <IconShield size={30} filled />
             </div>
-            <div className="link-head">Gerät gekoppelt</div>
+            <div className="link-head">{t('Gerät gekoppelt')}</div>
             <p className="link-sub">
               {linkRole === 'primary'
-                ? 'Das neue Gerät gehört jetzt zu deiner Identität. Es holt sich gleich dein Profil und deine Kontaktliste.'
-                : 'Dieses Gerät nutzt jetzt deine bestehende Identität. Profil und Kontakte werden gerade von deinem Hauptgerät übertragen — das kann einen Moment dauern. Bestehende Kontakte müssen die neue Identität bestätigen; schreibe ihnen, um das auszulösen.'}
+                ? t('Das neue Gerät gehört jetzt zu deiner Identität. Es holt sich gleich dein Profil und deine Kontaktliste.')
+                : t('Dieses Gerät nutzt jetzt deine bestehende Identität. Profil und Kontakte werden gerade von deinem Hauptgerät übertragen — das kann einen Moment dauern. Bestehende Kontakte müssen die neue Identität bestätigen; schreibe ihnen, um das auszulösen.')}
             </p>
             <button className="btn btn-primary btn-tall" onClick={() => setLinkView(null)}>
-              Fertig
+              {t('Fertig')}
             </button>
           </>
         )}
@@ -3828,12 +3829,12 @@ export function Messenger({ dek, onLock }: Props) {
       <div className="sticker-grid">
         {stickers.map((st) => (
           <div key={st.id} className="sticker-cell">
-            <button className="sticker-btn" onClick={() => void sendSticker(st)} aria-label="Sticker senden">
+            <button className="sticker-btn" onClick={() => void sendSticker(st)} aria-label={t('Sticker senden')}>
               <img src={`data:${st.mime};base64,${st.dataB64}`} alt="" />
             </button>
             <button
               className="sticker-del"
-              aria-label="Sticker löschen"
+              aria-label={t('Sticker löschen')}
               onClick={() => void deleteSticker(st.id)}
             >
               ×
@@ -3843,7 +3844,7 @@ export function Messenger({ dek, onLock }: Props) {
         <button
           className="sticker-add"
           onClick={() => stickerInputRef.current?.click()}
-          aria-label="Sticker hinzufügen"
+          aria-label={t('Sticker hinzufügen')}
         >
           +
         </button>
@@ -3990,7 +3991,7 @@ export function Messenger({ dek, onLock }: Props) {
           <div className="conv-scroll">
             {groups.length === 0 && visibleContacts.length === 0 ? (
               <div className="list-empty">
-                Noch keine Chats.<br />Oben: <b>+</b> für Kontakte, das Gruppen-Symbol für eine Gruppe.
+                {t('Noch keine Chats.')}<br />{tb('Oben: **+** für Kontakte, das Gruppen-Symbol für eine Gruppe.')}
               </div>
             ) : (
               <>
@@ -4094,7 +4095,7 @@ export function Messenger({ dek, onLock }: Props) {
               <input
                 autoFocus
                 value={renameInput}
-                placeholder="Name für diesen Kontakt…"
+                placeholder={t('Name für diesen Kontakt…')}
                 onChange={(e) => setRenameInput(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && void saveNickname()}
               />
@@ -4104,7 +4105,7 @@ export function Messenger({ dek, onLock }: Props) {
             </div>
           ) : (
             <div className="chat-peer">
-              <button className="n" onClick={startRename} title="Umbenennen">
+              <button className="n" onClick={startRename} title={t('Umbenennen')}>
                 {displayName(activeContact)} <span className="pencil">✎</span>
               </button>
               <button
@@ -4113,12 +4114,12 @@ export function Messenger({ dek, onLock }: Props) {
                 onClick={() => void openVerify()}
               >
                 <IconLock size={10} />
-                {verified ? 'verifiziert' : 'nicht verifiziert · antippen'}
+                {verified ? t('verifiziert') : t('nicht verifiziert · antippen')}
               </button>
             </div>
           )}
           <span className={`sdot ${st(activeContact.roomId)}`} style={{ position: 'static', border: 0, width: 9, height: 9 }} />
-          <button className="chat-menu-btn" onClick={() => setChatMenu((v) => !v)} aria-label="Menü">
+          <button className="chat-menu-btn" onClick={() => setChatMenu((v) => !v)} aria-label={t('Menü')}>
             <IconDots />
           </button>
           {chatMenu && (
@@ -4126,19 +4127,19 @@ export function Messenger({ dek, onLock }: Props) {
               <button
                 onClick={() => {
                   setChatMenu(false);
-                  if (confirm('Chatverlauf wirklich löschen?')) void clearChatAction(activeContact.roomId);
+                  if (confirm(t('Chatverlauf wirklich löschen?'))) void clearChatAction(activeContact.roomId);
                 }}
               >
-                Chatverlauf löschen
+                {t('Chatverlauf löschen')}
               </button>
               <button
                 className="danger"
                 onClick={() => {
                   setChatMenu(false);
-                  if (confirm('Kontakt und Chat wirklich löschen?')) void deleteContactAction(activeContact.roomId);
+                  if (confirm(t('Kontakt und Chat wirklich löschen?'))) void deleteContactAction(activeContact.roomId);
                 }}
               >
-                Kontakt löschen
+                {t('Kontakt löschen')}
               </button>
             </div>
           )}
@@ -4254,30 +4255,30 @@ export function Messenger({ dek, onLock }: Props) {
           </div>
           <div className="chat-peer">
             <div className="n">{activeGroupData.name}</div>
-            <span className="peer-fp">{activeGroupData.members.length + 1} Mitglieder</span>
+            <span className="peer-fp">{t('{n} Mitglieder', { n: activeGroupData.members.length + 1 })}</span>
           </div>
-          <button className="chat-menu-btn" onClick={() => setChatMenu((v) => !v)} aria-label="Menü">
+          <button className="chat-menu-btn" onClick={() => setChatMenu((v) => !v)} aria-label={t('Menü')}>
             <IconDots />
           </button>
           {chatMenu && (
             <div className="chat-menu">
-              <button onClick={() => openManage(activeGroupData)}>Gruppe verwalten</button>
+              <button onClick={() => openManage(activeGroupData)}>{t('Gruppe verwalten')}</button>
               <button
                 onClick={() => {
                   setChatMenu(false);
-                  if (confirm('Chatverlauf wirklich löschen?')) void clearChatAction(activeGroupData.id);
+                  if (confirm(t('Chatverlauf wirklich löschen?'))) void clearChatAction(activeGroupData.id);
                 }}
               >
-                Chatverlauf löschen
+                {t('Chatverlauf löschen')}
               </button>
               <button
                 className="danger"
                 onClick={() => {
                   setChatMenu(false);
-                  if (confirm('Gruppe wirklich verlassen?')) void leaveGroup(activeGroupData);
+                  if (confirm(t('Gruppe wirklich verlassen?'))) void leaveGroup(activeGroupData);
                 }}
               >
-                Gruppe verlassen
+                {t('Gruppe verlassen')}
               </button>
             </div>
           )}
@@ -4360,57 +4361,57 @@ export function Messenger({ dek, onLock }: Props) {
           <button className="back" onClick={() => setView('list')}>
             <IconBack />
           </button>
-          <div className="h">Verbinden</div>
+          <div className="h">{t('Verbinden')}</div>
         </div>
         <div className="subbody">
-          <div className="sect-lbl">Mich teilen</div>
+          <div className="sect-lbl">{t('Mich teilen')}</div>
           <div className="card share-card">
             <button
               className="qr-card tappable"
               onClick={() => qrDataUrl && setQrFull(true)}
-              aria-label="QR-Code groß anzeigen"
+              aria-label={t('QR-Code groß anzeigen')}
             >
-              {qrDataUrl ? <img src={qrDataUrl} alt="QR-Code deines Kontakt-Links" /> : <span className="ph">QR…</span>}
+              {qrDataUrl ? <img src={qrDataUrl} alt={t('QR-Code deines Kontakt-Links')} /> : <span className="ph">QR…</span>}
             </button>
             <p className="share-hint">
-              <b>Persönlich:</b> Code antippen für Vollbild, der andere scannt ihn.
+              {tb('**Persönlich:** Code antippen für Vollbild, der andere scannt ihn.')}
               <br />
-              <b>Aus der Ferne:</b> teilen — der Kontakt fügt dich per „Aus Zwischenablage verbinden“ hinzu.
+              {tb('**Aus der Ferne:** teilen — der Kontakt fügt dich per „Aus Zwischenablage verbinden“ hinzu.')}
             </p>
             <div className="link-box">{shareLink}</div>
             <div className="share-actions">
               <button className="btn btn-primary" onClick={() => void shareContactCode()}>
-                {shared ? 'Kopiert ✓' : 'Code teilen'}
+                {shared ? t('Kopiert ✓') : t('Code teilen')}
               </button>
               <button className="btn btn-outline" onClick={() => void copyLink()}>
-                {copied ? 'Kopiert ✓' : 'Kopieren'}
+                {copied ? t('Kopiert ✓') : t('Kopieren')}
               </button>
             </div>
           </div>
 
           <div className="divider">
             <div className="l" />
-            <span>ODER</span>
+            <span>{t('ODER')}</span>
             <div className="l" />
           </div>
 
-          <div className="sect-lbl">Kontakt hinzufügen</div>
+          <div className="sect-lbl">{t('Kontakt hinzufügen')}</div>
           <div className="card pad16">
             <button className="btn btn-primary" onClick={() => void pasteAndAdd()}>
-              Aus Zwischenablage verbinden
+              {t('Aus Zwischenablage verbinden')}
             </button>
             <button className="btn btn-outline scan-btn" style={{ marginTop: 10 }} onClick={() => setScanning(true)}>
-              <IconCamera /> QR-Code scannen
+              <IconCamera /> {t('QR-Code scannen')}
             </button>
-            <div className="or-tiny">oder Link / Token manuell einfügen</div>
+            <div className="or-tiny">{t('oder Link / Token manuell einfügen')}</div>
             <textarea
               className="paste-box"
-              placeholder="Link oder Bundle-Token einfügen"
+              placeholder={t('Link oder Bundle-Token einfügen')}
               value={addInput}
               onChange={(e) => setAddInput(e.target.value)}
             />
             <button className="btn btn-ghost" onClick={() => void addBundle(addInput)}>
-              Hinzufügen
+              {t('Hinzufügen')}
             </button>
           </div>
 
@@ -4427,9 +4428,9 @@ export function Messenger({ dek, onLock }: Props) {
           )}
 
           {qrFull && qrDataUrl && (
-            <div className="qr-full" onClick={() => setQrFull(false)} role="dialog" aria-label="QR-Code Vollbild">
-              <img src={qrDataUrl} alt="QR-Code deines Kontakt-Links" />
-              <p>Halte den Code vor die Kamera des Kontakts · tippen zum Schließen</p>
+            <div className="qr-full" onClick={() => setQrFull(false)} role="dialog" aria-label={t('QR-Code Vollbild')}>
+              <img src={qrDataUrl} alt={t('QR-Code deines Kontakt-Links')} />
+              <p>{t('Halte den Code vor die Kamera des Kontakts · tippen zum Schließen')}</p>
             </div>
           )}
 
@@ -4438,8 +4439,7 @@ export function Messenger({ dek, onLock }: Props) {
               <IconInfo />
             </span>
             <p>
-              Enthält <b>nur öffentliche Schlüssel</b>. Über jeden Kanal teilbar — gegen MITM danach die Safety
-              Number vergleichen.
+              {tb('Enthält **nur öffentliche Schlüssel**. Über jeden Kanal teilbar — gegen MITM danach die Safety Number vergleichen.')}
             </p>
           </div>
         </div>
@@ -4457,14 +4457,14 @@ export function Messenger({ dek, onLock }: Props) {
           <button className="back" onClick={() => setView('chat')}>
             <IconBack />
           </button>
-          <div className="h">Safety Number</div>
+          <div className="h">{t('Safety Number')}</div>
         </div>
         <div className="verify-body">
           <div className="qr-card sm">
-            {safetyQr ? <img src={safetyQr} alt="Safety-Number-QR" /> : <span className="ph">…</span>}
+            {safetyQr ? <img src={safetyQr} alt={t('Safety-Number-QR')} /> : <span className="ph">…</span>}
           </div>
           <p className="verify-expl">
-            Vergleicht diese Zahl mit <b>{displayName(activeContact)}</b> — persönlich oder über einen anderen Kanal.
+            {tb('Vergleicht diese Zahl mit **{name}** — persönlich oder über einen anderen Kanal.', { name: displayName(activeContact) })}
           </p>
           <div className="sn-grid">
             {groups.map((g, i) => (
@@ -4474,14 +4474,14 @@ export function Messenger({ dek, onLock }: Props) {
           {verified ? (
             <div className="verified-banner">
               <IconShield size={17} />
-              Als verifiziert markiert
+              {t('Als verifiziert markiert')}
             </div>
           ) : (
             <button className="btn btn-primary" style={{ height: 50 }} onClick={() => void markVerified()}>
-              Als verifiziert markieren
+              {t('Als verifiziert markieren')}
             </button>
           )}
-          <p className="verify-foot">Stimmen die Zahlen überein, ist die Leitung frei von Man-in-the-Middle.</p>
+          <p className="verify-foot">{t('Stimmen die Zahlen überein, ist die Leitung frei von Man-in-the-Middle.')}</p>
         </div>
       </div>
     );
@@ -4498,16 +4498,16 @@ export function Messenger({ dek, onLock }: Props) {
           <button className="back" onClick={() => setView('chat')}>
             <IconBack />
           </button>
-          <div className="h">Kontakt</div>
+          <div className="h">{t('Kontakt')}</div>
         </div>
         <div className="contact-body">
           <button
             className="contact-avatar"
             onClick={() => hasAvatar && setZoomImg(new Blob([b64ToBytes(c.peerAvatarB64!)], { type: 'image/jpeg' }))}
-            aria-label={hasAvatar ? 'Profilbild groß ansehen' : undefined}
+            aria-label={hasAvatar ? t('Profilbild groß ansehen') : undefined}
           >
             {hasAvatar ? (
-              <img src={avatarSrc(c.peerAvatarB64!)} alt="Profilbild" />
+              <img src={avatarSrc(c.peerAvatarB64!)} alt={t('Profilbild')} />
             ) : (
               <div className="contact-identicon">
                 <Identicon seed={c.roomId} />
@@ -4522,24 +4522,22 @@ export function Messenger({ dek, onLock }: Props) {
             onClick={() => void openVerify()}
           >
             <IconLock size={12} />
-            {verified ? 'verifiziert' : 'nicht verifiziert · zum Prüfen antippen'}
+            {verified ? t('verifiziert') : t('nicht verifiziert · zum Prüfen antippen')}
           </button>
 
           {!verified && c.verifiedSuggestion && !c.verifiedSuggestionDismissed && (
             <div className="contact-warn">
               <div className="cw-text">
-                <b>Auf deinem anderen Gerät bestätigt</b>
+                <b>{t('Auf deinem anderen Gerät bestätigt')}</b>
                 <span>
-                  Beim Übernehmen deiner Kontakte kam die Info mit, dass du diesen Kontakt auf einem anderen Gerät
-                  schon verifiziert hast. Das allein zählt hier NICHT als Bestätigung — vergleiche die
-                  Sicherheitsnummer auf diesem Gerät selbst.
+                  {t('Beim Übernehmen deiner Kontakte kam die Info mit, dass du diesen Kontakt auf einem anderen Gerät schon verifiziert hast. Das allein zählt hier NICHT als Bestätigung — vergleiche die Sicherheitsnummer auf diesem Gerät selbst.')}
                 </span>
               </div>
               <button className="btn btn-primary sm" onClick={() => void openVerify()}>
-                Sicherheitsnummer vergleichen
+                {t('Sicherheitsnummer vergleichen')}
               </button>
               <button className="btn btn-ghost sm" onClick={() => void dismissVerifiedSuggestion()}>
-                Ausblenden
+                {t('Ausblenden')}
               </button>
             </div>
           )}
@@ -4547,15 +4545,13 @@ export function Messenger({ dek, onLock }: Props) {
           {c.retiredAttempt && (
             <div className="contact-warn">
               <div className="cw-text">
-                <b>Abgelehnter Anmeldeversuch</b>
+                <b>{t('Abgelehnter Anmeldeversuch')}</b>
                 <span>
-                  Es kamen Nachrichten unter einer früheren, bereits ersetzten Identität dieses Kontakts an. Sie
-                  wurden verworfen. Das ist normal, wenn ein altes Gerät noch läuft — kann aber auch bedeuten, dass
-                  jemand einen alten Schlüssel besitzt.
+                  {t('Es kamen Nachrichten unter einer früheren, bereits ersetzten Identität dieses Kontakts an. Sie wurden verworfen. Das ist normal, wenn ein altes Gerät noch läuft — kann aber auch bedeuten, dass jemand einen alten Schlüssel besitzt.')}
                 </span>
               </div>
               <button className="btn btn-ghost sm" onClick={() => void dismissRetiredNotice()}>
-                Verstanden
+                {t('Verstanden')}
               </button>
             </div>
           )}
@@ -4563,15 +4559,13 @@ export function Messenger({ dek, onLock }: Props) {
           {c.pendingMaster && (
             <div className="contact-warn door">
               <div className="cw-text">
-                <b>Neue Identität behauptet</b>
+                <b>{t('Neue Identität behauptet')}</b>
                 <span>
-                  Dieser Kontakt meldet sich mit einem neuen Identitätsschlüssel — etwa nach einem Gerätewechsel.
-                  Übernimm ihn nur, wenn du sicher bist, dass es wirklich diese Person ist. Danach ist ein neuer
-                  Sicherheitsnummer-Vergleich fällig.
+                  {t('Dieser Kontakt meldet sich mit einem neuen Identitätsschlüssel — etwa nach einem Gerätewechsel. Übernimm ihn nur, wenn du sicher bist, dass es wirklich diese Person ist. Danach ist ein neuer Sicherheitsnummer-Vergleich fällig.')}
                 </span>
               </div>
               <button className="btn btn-primary sm" onClick={() => void acceptNewIdentity()}>
-                Neue Identität akzeptieren
+                {t('Neue Identität akzeptieren')}
               </button>
             </div>
           )}
@@ -4579,15 +4573,13 @@ export function Messenger({ dek, onLock }: Props) {
           {c.staleIdentity && (
             <div className="contact-warn door">
               <div className="cw-text">
-                <b>Verbindung veraltet</b>
+                <b>{t('Verbindung veraltet')}</b>
                 <span>
-                  Du hast ein Gerät gekoppelt, seitdem hat sich deine Identität geändert. Dieser Kontakt kennt noch
-                  die alte. „Neu verbinden“ baut die Sitzung frisch auf — die Gegenseite sieht dann eine
-                  Identitätswarnung und muss dich neu bestätigen.
+                  {t('Du hast ein Gerät gekoppelt, seitdem hat sich deine Identität geändert. Dieser Kontakt kennt noch die alte. „Neu verbinden“ baut die Sitzung frisch auf — die Gegenseite sieht dann eine Identitätswarnung und muss dich neu bestätigen.')}
                 </span>
               </div>
               <button className="btn btn-primary sm" onClick={() => void reconnectStaleContact()}>
-                Neu verbinden
+                {t('Neu verbinden')}
               </button>
             </div>
           )}
@@ -4595,12 +4587,12 @@ export function Messenger({ dek, onLock }: Props) {
           <div className="contact-fields">
             {renaming ? (
               <div className="contact-field">
-                <span className="cf-label">Dein Name für den Kontakt</span>
+                <span className="cf-label">{t('Dein Name für den Kontakt')}</span>
                 <div className="rename-row">
                   <input
                     autoFocus
                     value={renameInput}
-                    placeholder="Nickname…"
+                    placeholder={t('Nickname…')}
                     onChange={(e) => setRenameInput(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && void saveNickname()}
                   />
@@ -4612,19 +4604,19 @@ export function Messenger({ dek, onLock }: Props) {
             ) : (
               <button className="contact-field tappable" onClick={startRename}>
                 <span className="cf-label">
-                  Dein Name für den Kontakt <span className="pencil">✎</span>
+                  {t('Dein Name für den Kontakt')} <span className="pencil">✎</span>
                 </span>
-                <span className="cf-value">{c.nickname?.trim() || <em>nicht gesetzt</em>}</span>
+                <span className="cf-value">{c.nickname?.trim() || <em>{t('nicht gesetzt')}</em>}</span>
               </button>
             )}
 
             <div className="contact-field">
-              <span className="cf-label">Name, den die Person selbst gesetzt hat</span>
-              <span className="cf-value">{c.peerName?.trim() || <em>keiner</em>}</span>
+              <span className="cf-label">{t('Name, den die Person selbst gesetzt hat')}</span>
+              <span className="cf-value">{c.peerName?.trim() || <em>{t('keiner')}</em>}</span>
             </div>
 
             <div className="contact-field">
-              <span className="cf-label">Sicherheitsnummer (Fingerprint)</span>
+              <span className="cf-label">{t('Sicherheitsnummer (Fingerprint)')}</span>
               <span className="cf-value mono">{c.peerFingerprint}</span>
             </div>
           </div>
@@ -4632,15 +4624,15 @@ export function Messenger({ dek, onLock }: Props) {
           <div className="contact-actions">
             <button
               className="btn btn-ghost"
-              onClick={() => confirm('Chatverlauf wirklich löschen?') && void clearChatAction(c.roomId)}
+              onClick={() => confirm(t('Chatverlauf wirklich löschen?')) && void clearChatAction(c.roomId)}
             >
-              Chatverlauf löschen
+              {t('Chatverlauf löschen')}
             </button>
             <button
               className="btn btn-danger"
-              onClick={() => confirm('Kontakt und Chat wirklich löschen?') && void deleteContactAction(c.roomId)}
+              onClick={() => confirm(t('Kontakt und Chat wirklich löschen?')) && void deleteContactAction(c.roomId)}
             >
-              Kontakt löschen
+              {t('Kontakt löschen')}
             </button>
           </div>
         </div>
@@ -4834,22 +4826,22 @@ export function Messenger({ dek, onLock }: Props) {
           <button className="back" onClick={() => setView('list')}>
             <IconBack />
           </button>
-          <div className="h">Neue Gruppe</div>
+          <div className="h">{t('Neue Gruppe')}</div>
         </div>
         <div className="subbody">
-          <div className="field-lbl">Gruppenname</div>
+          <div className="field-lbl">{t('Gruppenname')}</div>
           <input
             className="name-input"
             value={groupNameInput}
-            placeholder="z. B. Redaktion"
+            placeholder={t('z. B. Redaktion')}
             onChange={(e) => setGroupNameInput(e.target.value)}
           />
           <div className="sect-lbl" style={{ marginTop: 18 }}>
-            Mitglieder wählen
+            {t('Mitglieder wählen')}
           </div>
           {selectable.length === 0 ? (
             <p className="share-hint" style={{ textAlign: 'left' }}>
-              Du brauchst zuerst Kontakte (über deren Code), um sie in eine Gruppe zu holen.
+              {t('Du brauchst zuerst Kontakte (über deren Code), um sie in eine Gruppe zu holen.')}
             </p>
           ) : (
             <div className="card pad16">
@@ -4887,7 +4879,7 @@ export function Messenger({ dek, onLock }: Props) {
             disabled={groupSel.size === 0}
             onClick={() => void createGroup()}
           >
-            Gruppe erstellen ({groupSel.size})
+            {t('Gruppe erstellen ({n})', { n: groupSel.size })}
           </button>
         </div>
       </div>
@@ -4906,10 +4898,10 @@ export function Messenger({ dek, onLock }: Props) {
           <button className="back" onClick={() => setView('chat')}>
             <IconBack />
           </button>
-          <div className="h">Gruppe verwalten</div>
+          <div className="h">{t('Gruppe verwalten')}</div>
         </div>
         <div className="subbody">
-          <div className="field-lbl">Gruppenname</div>
+          <div className="field-lbl">{t('Gruppenname')}</div>
           <div className="rename-row" style={{ marginBottom: 18 }}>
             <input className="name-input" value={groupRenameInput} onChange={(e) => setGroupRenameInput(e.target.value)} />
             <button className="btn btn-primary" style={{ width: 'auto' }} onClick={() => void renameGroup(g, groupRenameInput)}>
@@ -4917,7 +4909,7 @@ export function Messenger({ dek, onLock }: Props) {
             </button>
           </div>
 
-          <div className="sect-lbl">Mitglieder ({g.members.length + 1})</div>
+          <div className="sect-lbl">{t('Mitglieder ({n})', { n: g.members.length + 1 })}</div>
           <div className="card pad16">
             <div className="member-row">
               {myAvatarB64 ? (
@@ -4927,7 +4919,7 @@ export function Messenger({ dek, onLock }: Props) {
                   <Identicon seed={'me-' + fingerprint} />
                 </div>
               )}
-              <span className="conv-name">Du</span>
+              <span className="conv-name">{t('Du')}</span>
             </div>
             {g.members.map((m, i) => (
               <div key={i} className="member-row">
@@ -4937,9 +4929,9 @@ export function Messenger({ dek, onLock }: Props) {
                 <span className="conv-name">{m.name || '…'}</span>
                 <button
                   className="icon-mini danger"
-                  aria-label="Entfernen"
+                  aria-label={t('Entfernen')}
                   onClick={() => {
-                    if (confirm(`${m.name || 'Mitglied'} entfernen?`)) void removeMemberFromGroup(g, m);
+                    if (confirm(t('{name} entfernen?', { name: m.name || t('Mitglied') }))) void removeMemberFromGroup(g, m);
                   }}
                 >
                   <IconTrash size={15} />
@@ -4951,7 +4943,7 @@ export function Messenger({ dek, onLock }: Props) {
           {addable.length > 0 && (
             <>
               <div className="sect-lbl" style={{ marginTop: 18 }}>
-                Hinzufügen
+                {t('Hinzufügen')}
               </div>
               <div className="card pad16">
                 {addable.map((c) => {
@@ -4988,7 +4980,7 @@ export function Messenger({ dek, onLock }: Props) {
                     setGroupSel(new Set());
                   }}
                 >
-                  {groupSel.size} hinzufügen
+                  {t('{n} hinzufügen', { n: groupSel.size })}
                 </button>
               </div>
             </>
@@ -4999,10 +4991,10 @@ export function Messenger({ dek, onLock }: Props) {
             className="btn btn-outline danger-btn"
             style={{ marginTop: 18 }}
             onClick={() => {
-              if (confirm('Gruppe wirklich verlassen?')) void leaveGroup(g);
+              if (confirm(t('Gruppe wirklich verlassen?'))) void leaveGroup(g);
             }}
           >
-            Gruppe verlassen
+            {t('Gruppe verlassen')}
           </button>
         </div>
       </div>

@@ -1,5 +1,7 @@
 import { useRegisterSW } from 'virtual:pwa-register/react';
 import { IconInfo } from './icons';
+import { t } from './lib/i18n';
+
 
 /**
  * Registers the service worker and shows a toast when a new version is ready.
@@ -35,14 +37,14 @@ export function ReloadPrompt() {
         <IconInfo size={15} />
       </span>
       <div className="toast-body">
-        <div className="toast-title">Neue Version verfügbar</div>
-        <div className="toast-sub">Beim Aktualisieren startet die App kurz neu.</div>
+        <div className="toast-title">{t('Neue Version verfügbar')}</div>
+        <div className="toast-sub">{t('Beim Aktualisieren startet die App kurz neu.')}</div>
         <div className="toast-actions">
           <button className="toast-cta" onClick={() => void updateServiceWorker(true)}>
-            Aktualisieren
+            {t('Aktualisieren')}
           </button>
           <button className="toast-later" onClick={() => setNeedRefresh(false)}>
-            Später
+            {t('Später')}
           </button>
         </div>
       </div>

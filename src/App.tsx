@@ -16,6 +16,7 @@ import { hasWebCrypto, isInAppBrowser, isInstagram } from './lib/environment';
 import { t, useLang } from './lib/i18n';
 import { Messenger } from './Messenger';
 import { ReloadPrompt } from './ReloadPrompt';
+import { InstallPrompt } from './InstallPrompt';
 import { IconLock, IconEye, IconEyeOff } from './icons';
 
 type Phase = 'loading' | 'create' | 'unlock' | 'open' | 'unsupported';
@@ -244,6 +245,7 @@ export function App() {
       <>
         <Messenger dek={dek} onLock={lock} />
         <ReloadPrompt />
+        <InstallPrompt />
       </>
     );
   }
@@ -356,6 +358,7 @@ export function App() {
         </div>
       </div>
       <ReloadPrompt />
+      <InstallPrompt />
     </>
   );
 }

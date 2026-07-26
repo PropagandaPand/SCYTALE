@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { t } from './lib/i18n';
+
 
 /**
  * In-app QR scanner. Opens the rear camera, samples video frames onto a canvas
@@ -69,10 +71,10 @@ export function QrScanner({
         const err = e as Error;
         setError(
           err.name === 'NotAllowedError'
-            ? 'Kamerazugriff verweigert. Erlaube die Kamera in den Browser-Einstellungen.'
+            ? t('Kamerazugriff verweigert. Erlaube die Kamera in den Browser-Einstellungen.')
             : err.name === 'NotFoundError'
-              ? 'Keine Kamera gefunden.'
-              : 'Kamera nicht verfügbar: ' + err.message,
+              ? t('Keine Kamera gefunden.')
+              : t('Kamera nicht verfügbar: {msg}', { msg: err.message }),
         );
       }
     })();

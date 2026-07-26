@@ -306,6 +306,16 @@ export function IconServer({ size = 16 }: { size?: number }) {
   );
 }
 
+export function IconBug({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden="true">
+      <rect x="6" y="5.5" width="6" height="8.5" rx="3" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M7.2 5.2a1.8 1.8 0 0 1 3.6 0" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M6 8H2.6M6 11H3M6 13.6l-2.4 1.8M12 8h3.4M12 11h3M12 13.6l2.4 1.8M9 5.4V3" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export function IconGlobe({ size = 16 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden="true">

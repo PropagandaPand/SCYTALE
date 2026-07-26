@@ -135,6 +135,7 @@ import { QrScanner } from './QrScanner';
 import { CropModal } from './CropModal';
 import { BackupModal } from './BackupModal';
 import { BiometricEnroll } from './BiometricEnroll';
+import { BugReport } from './BugReport';
 import { Explainer } from './Explainer';
 import { t, useLang, LANGS, getLang, setLang, type Lang } from './lib/i18n';
 import { tb } from './lib/tnodes';
@@ -144,7 +145,7 @@ import { Attachment, LightboxImg } from './Attachment';
 import {
   IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach, IconMic, IconTrash, IconDots, IconGroup, IconReply, IconForward, IconCopy,
   IconBell, IconDevices, IconArchive, IconChevron,
-  IconSticker, IconGraduation, IconGlobe,
+  IconSticker, IconGraduation, IconGlobe, IconBug,
 } from './icons';
 
 const MAX_ATTACH = 600 * 1024; // inline cap — keeps the WS frame under Cloudflare's ~1 MiB limit
@@ -491,6 +492,7 @@ export function Messenger({ dek, onLock }: Props) {
   const [bioOn, setBioOn] = useState(false); // biometric unlock enrolled for this vault
   const [bioEnroll, setBioEnroll] = useState(false); // enrollment modal open
   const [langSheet, setLangSheet] = useState(false); // language picker open
+  const [bugOpen, setBugOpen] = useState(false); // bug-report modal open
   // ── Device linking ────────────────────────────────────────────────
   // 'menu'  : choose join-as-new vs add-a-device
   // 'qr'    : N shows its QR, waits for the offer
@@ -4779,9 +4781,19 @@ export function Messenger({ dek, onLock }: Props) {
               </span>
               <span className="setting-go"><IconChevron /></span>
             </button>
+
+            <button className="setting-row" onClick={() => setBugOpen(true)}>
+              <span className="setting-ic"><IconBug /></span>
+              <span className="setting-tx">
+                <span className="setting-title">{t('Fehler melden')}</span>
+                <span className="setting-sub">{t('Etwas klemmt oder du hast eine Idee?')}</span>
+              </span>
+              <span className="setting-go"><IconChevron /></span>
+            </button>
           </div>
 
           {backupMode && <BackupModal mode={backupMode} dek={dek} onClose={() => setBackupMode(null)} />}
+          {bugOpen && <BugReport onClose={() => setBugOpen(false)} />}
           {bioEnroll && (
             <BiometricEnroll
               onDone={() => {

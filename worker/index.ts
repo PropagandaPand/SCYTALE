@@ -57,6 +57,48 @@ export default {
       return stub.fetch(request);
     }
 
+    // Bug reports: the client POSTs a short JSON report to its OWN origin (allowed by
+    // `connect-src 'self'`), and the Worker forwards it server-side (no CSP) to an
+    // optional webhook and/or the logs. NO end-to-end content ever passes through the
+    // client here — only a description and non-sensitive diagnostics the user opted in.
+    if (url.pathname === '/api/bug') {
+      if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+      let body: { category?: unknown; message?: unknown; diagnostics?: unknown };
+      try {
+        body = (await request.json()) as typeof body;
+      } catch {
+        return new Response('Bad request', { status: 400 });
+      }
+      const clip = (v: unknown, n: number) => (typeof v === 'string' ? v.slice(0, n) : '');
+      const category = clip(body.category, 40);
+      const message = clip(body.message, 4000);
+      const diagnostics = clip(body.diagnostics, 1500);
+      if (!message.trim()) return new Response('Empty', { status: 400 });
+      const subject = `🐞 SKYTALE bug report${category ? ` [${category}]` : ''}`;
+      const text = `${subject}\n\n${message}${diagnostics ? `\n\n— diagnostics —\n${diagnostics}` : ''}`;
+      console.log('bug-report', JSON.stringify({ category, len: message.length, hasDiag: !!diagnostics }));
+      try {
+        if (env.RESEND_API_KEY && env.BUG_FROM && env.BUG_TO) {
+          // Resend transactional email API.
+          await fetch('https://api.resend.com/emails', {
+            method: 'POST',
+            headers: { authorization: `Bearer ${env.RESEND_API_KEY}`, 'content-type': 'application/json' },
+            body: JSON.stringify({ from: env.BUG_FROM, to: [env.BUG_TO], subject, text }),
+          });
+        } else if (env.BUG_WEBHOOK_URL) {
+          // `content` works for Discord incoming webhooks, `text` for Slack — send both.
+          await fetch(env.BUG_WEBHOOK_URL, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ content: text.slice(0, 1900), text: text.slice(0, 3500) }),
+          });
+        }
+      } catch {
+        /* sink down — the console.log above still captured it */
+      }
+      return new Response(null, { status: 204 });
+    }
+
     const res = await env.ASSETS.fetch(request);
     const headers = new Headers(res.headers);
     applySecurityHeaders(headers);

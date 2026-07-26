@@ -28,6 +28,15 @@ export interface Env {
   VAPID_PUBLIC?: string;
   VAPID_SUBJECT?: string;
   VAPID_JWK?: string;
+  // Optional bug-report sink. Two ways, checked in this order; if neither is set the
+  // report is only logged (visible via `wrangler tail`):
+  //  1. Resend email — set the secret RESEND_API_KEY plus the vars BUG_FROM (a verified
+  //     sender, e.g. "SKYTALE <bugs@skytale.chat>") and BUG_TO (your inbox).
+  //  2. A generic incoming webhook (Discord/Slack) — set the secret BUG_WEBHOOK_URL.
+  RESEND_API_KEY?: string;
+  BUG_FROM?: string;
+  BUG_TO?: string;
+  BUG_WEBHOOK_URL?: string;
 }
 
 interface Att {

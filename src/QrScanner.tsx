@@ -96,10 +96,10 @@ export function QrScanner({
           <span className="c bl" />
           <span className="c br" />
         </div>
-        <div className="scanner-hint">{error || 'QR-Code des Kontakts in den Rahmen halten'}</div>
+        <div className="scanner-hint">{error || t('QR-Code des Kontakts in den Rahmen halten')}</div>
       </div>
       <button className="btn btn-outline scanner-close" onClick={onClose}>
-        Abbrechen
+        {t('Abbrechen')}
       </button>
     </div>
   );

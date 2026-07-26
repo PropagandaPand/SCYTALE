@@ -64,7 +64,15 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Gruppen synchen noch nicht auf deine anderen Geräte": "Groups don't sync to your other devices yet",
     "Nachricht zurückgerufen": "Message unsent",
     "Anhang auf diesem Gerät nicht verfügbar": "Attachment not available on this device",
-    "Anhang lädt…": "Attachment loading…"
+    "Anhang lädt…": "Attachment loading…",
+    "Fast geschafft — im Browser öffnen": "Almost there — open in your browser",
+    "Du bist gerade im In-App-Browser von Instagram. Der kann die Verschlüsselung nicht ausführen.": "You're in Instagram's in-app browser. It can't run the encryption.",
+    "Du bist gerade im Vorschau-Browser einer App. Der kann die Verschlüsselung nicht ausführen.": "You're in an app's preview browser. It can't run the encryption.",
+    "Tippe oben rechts auf ⋯ (oder ⋮).": "Tap ⋯ (or ⋮) in the top right.",
+    "Wähle „Im Browser öffnen“ — Safari, Chrome oder Firefox.": "Choose \"Open in browser\" — Safari, Chrome or Firefox.",
+    "Link kopieren": "Copy link",
+    "Link kopiert ✓": "Link copied ✓",
+    "SKYTALE verschlüsselt alles direkt auf deinem Gerät — dafür braucht es einen echten Browser.": "SKYTALE encrypts everything right on your device — and that needs a real browser."
   },
   es: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — Falló la autoprueba de WebCrypto. Bloqueado por seguridad.",
@@ -120,7 +128,15 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Gruppen synchen noch nicht auf deine anderen Geräte": "Los grupos aún no se sincronizan con tus otros dispositivos",
     "Nachricht zurückgerufen": "Mensaje retirado",
     "Anhang auf diesem Gerät nicht verfügbar": "Adjunto no disponible en este dispositivo",
-    "Anhang lädt…": "Cargando adjunto…"
+    "Anhang lädt…": "Cargando adjunto…",
+    "Fast geschafft — im Browser öffnen": "Casi listo — abre en el navegador",
+    "Du bist gerade im In-App-Browser von Instagram. Der kann die Verschlüsselung nicht ausführen.": "Estás en el navegador integrado de Instagram. No puede ejecutar el cifrado.",
+    "Du bist gerade im Vorschau-Browser einer App. Der kann die Verschlüsselung nicht ausführen.": "Estás en el navegador de vista previa de una app. No puede ejecutar el cifrado.",
+    "Tippe oben rechts auf ⋯ (oder ⋮).": "Toca ⋯ (o ⋮) arriba a la derecha.",
+    "Wähle „Im Browser öffnen“ — Safari, Chrome oder Firefox.": "Elige «Abrir en el navegador» — Safari, Chrome o Firefox.",
+    "Link kopieren": "Copiar enlace",
+    "Link kopiert ✓": "Enlace copiado ✓",
+    "SKYTALE verschlüsselt alles direkt auf deinem Gerät — dafür braucht es einen echten Browser.": "SKYTALE cifra todo directamente en tu dispositivo — para eso necesita un navegador real."
   },
   fr: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — échec de l'autotest WebCrypto. Verrouillé par sécurité.",
@@ -176,7 +192,15 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Gruppen synchen noch nicht auf deine anderen Geräte": "Les groupes ne se synchronisent pas encore sur tes autres appareils",
     "Nachricht zurückgerufen": "Message rappelé",
     "Anhang auf diesem Gerät nicht verfügbar": "Pièce jointe non disponible sur cet appareil",
-    "Anhang lädt…": "Chargement de la pièce jointe…"
+    "Anhang lädt…": "Chargement de la pièce jointe…",
+    "Fast geschafft — im Browser öffnen": "Presque terminé — ouvrir dans le navigateur",
+    "Du bist gerade im In-App-Browser von Instagram. Der kann die Verschlüsselung nicht ausführen.": "Tu es actuellement dans le navigateur intégré d'Instagram. Il ne peut pas exécuter le chiffrement.",
+    "Du bist gerade im Vorschau-Browser einer App. Der kann die Verschlüsselung nicht ausführen.": "Tu es actuellement dans le navigateur d'aperçu d'une application. Il ne peut pas exécuter le chiffrement.",
+    "Tippe oben rechts auf ⋯ (oder ⋮).": "Appuie en haut à droite sur ⋯ (ou ⋮).",
+    "Wähle „Im Browser öffnen“ — Safari, Chrome oder Firefox.": "Choisis « Ouvrir dans le navigateur » — Safari, Chrome ou Firefox.",
+    "Link kopieren": "Copier le lien",
+    "Link kopiert ✓": "Lien copié ✓",
+    "SKYTALE verschlüsselt alles direkt auf deinem Gerät — dafür braucht es einen echten Browser.": "SKYTALE chiffre tout directement sur ton appareil — pour cela, il lui faut un vrai navigateur."
   },
   it: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — Autotest WebCrypto fallito. Bloccato per motivi di sicurezza.",
@@ -232,7 +256,15 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Gruppen synchen noch nicht auf deine anderen Geräte": "I gruppi non si sincronizzano ancora sui tuoi altri dispositivi",
     "Nachricht zurückgerufen": "Messaggio ritirato",
     "Anhang auf diesem Gerät nicht verfügbar": "Allegato non disponibile su questo dispositivo",
-    "Anhang lädt…": "Allegato in caricamento…"
+    "Anhang lädt…": "Allegato in caricamento…",
+    "Fast geschafft — im Browser öffnen": "Ci siamo quasi — apri nel browser",
+    "Du bist gerade im In-App-Browser von Instagram. Der kann die Verschlüsselung nicht ausführen.": "Sei nel browser interno di Instagram. Non può eseguire la crittografia.",
+    "Du bist gerade im Vorschau-Browser einer App. Der kann die Verschlüsselung nicht ausführen.": "Sei nel browser di anteprima di un'app. Non può eseguire la crittografia.",
+    "Tippe oben rechts auf ⋯ (oder ⋮).": "Tocca ⋯ (o ⋮) in alto a destra.",
+    "Wähle „Im Browser öffnen“ — Safari, Chrome oder Firefox.": "Seleziona «Apri nel browser» — Safari, Chrome o Firefox.",
+    "Link kopieren": "Copia link",
+    "Link kopiert ✓": "Link copiato ✓",
+    "SKYTALE verschlüsselt alles direkt auf deinem Gerät — dafür braucht es einen echten Browser.": "SKYTALE crittografa tutto direttamente sul tuo dispositivo — per questo serve un browser vero."
   },
   pt: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — Autoteste do WebCrypto falhou. Bloqueado por motivos de segurança.",
@@ -288,7 +320,15 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Gruppen synchen noch nicht auf deine anderen Geräte": "Os grupos ainda não sincronizam com os seus outros dispositivos",
     "Nachricht zurückgerufen": "Mensagem apagada",
     "Anhang auf diesem Gerät nicht verfügbar": "Anexo não disponível neste dispositivo",
-    "Anhang lädt…": "Carregando anexo…"
+    "Anhang lädt…": "Carregando anexo…",
+    "Fast geschafft — im Browser öffnen": "Quase lá — abrir no navegador",
+    "Du bist gerade im In-App-Browser von Instagram. Der kann die Verschlüsselung nicht ausführen.": "Você está no navegador interno do Instagram. Ele não consegue executar a encriptação.",
+    "Du bist gerade im Vorschau-Browser einer App. Der kann die Verschlüsselung nicht ausführen.": "Você está no navegador de pré-visualização de um app. Ele não consegue executar a encriptação.",
+    "Tippe oben rechts auf ⋯ (oder ⋮).": "Toque em ⋯ (ou ⋮) no canto superior direito.",
+    "Wähle „Im Browser öffnen“ — Safari, Chrome oder Firefox.": "Escolha \"Abrir no navegador\" — Safari, Chrome ou Firefox.",
+    "Link kopieren": "Copiar link",
+    "Link kopiert ✓": "Link copiado ✓",
+    "SKYTALE verschlüsselt alles direkt auf deinem Gerät — dafür braucht es einen echten Browser.": "O SKYTALE encripta tudo diretamente no seu dispositivo — para isso, precisa de um navegador de verdade."
   },
   nl: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — WebCrypto-zelftest mislukt. Uit veiligheidsoverwegingen vergrendeld.",
@@ -344,7 +384,15 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Gruppen synchen noch nicht auf deine anderen Geräte": "Groepen synchroniseren nog niet naar je andere apparaten",
     "Nachricht zurückgerufen": "Bericht ingetrokken",
     "Anhang auf diesem Gerät nicht verfügbar": "Bijlage niet beschikbaar op dit apparaat",
-    "Anhang lädt…": "Bijlage laadt…"
+    "Anhang lädt…": "Bijlage laadt…",
+    "Fast geschafft — im Browser öffnen": "Bijna klaar — open in de browser",
+    "Du bist gerade im In-App-Browser von Instagram. Der kann die Verschlüsselung nicht ausführen.": "Je zit nu in de in-app browser van Instagram. Die kan de versleuteling niet uitvoeren.",
+    "Du bist gerade im Vorschau-Browser einer App. Der kann die Verschlüsselung nicht ausführen.": "Je zit nu in de voorbeeldbrowser van een app. Die kan de versleuteling niet uitvoeren.",
+    "Tippe oben rechts auf ⋯ (oder ⋮).": "Tik rechtsboven op ⋯ (of ⋮).",
+    "Wähle „Im Browser öffnen“ — Safari, Chrome oder Firefox.": "Kies ‚Openen in browser' — Safari, Chrome of Firefox.",
+    "Link kopieren": "Link kopiëren",
+    "Link kopiert ✓": "Link gekopieerd ✓",
+    "SKYTALE verschlüsselt alles direkt auf deinem Gerät — dafür braucht es einen echten Browser.": "SKYTALE versleutelt alles direct op je apparaat — daarvoor is een echte browser nodig."
   },
   pl: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — autotest WebCrypto nie powiódł się. Zablokowano ze względów bezpieczeństwa.",
@@ -400,7 +448,15 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Gruppen synchen noch nicht auf deine anderen Geräte": "Grupy nie synchronizują się jeszcze z Twoimi innymi urządzeniami",
     "Nachricht zurückgerufen": "Wiadomość wycofana",
     "Anhang auf diesem Gerät nicht verfügbar": "Załącznik niedostępny na tym urządzeniu",
-    "Anhang lädt…": "Ładowanie załącznika…"
+    "Anhang lädt…": "Ładowanie załącznika…",
+    "Fast geschafft — im Browser öffnen": "Już prawie — otwórz w przeglądarce",
+    "Du bist gerade im In-App-Browser von Instagram. Der kann die Verschlüsselung nicht ausführen.": "Jesteś teraz w przeglądarce wewnętrznej Instagrama. Nie może ona wykonać szyfrowania.",
+    "Du bist gerade im Vorschau-Browser einer App. Der kann die Verschlüsselung nicht ausführen.": "Jesteś teraz w przeglądarce podglądu aplikacji. Nie może ona wykonać szyfrowania.",
+    "Tippe oben rechts auf ⋯ (oder ⋮).": "Dotknij ⋯ (lub ⋮) w prawym górnym rogu.",
+    "Wähle „Im Browser öffnen“ — Safari, Chrome oder Firefox.": "Wybierz „Otwórz w przeglądarce” — Safari, Chrome lub Firefox.",
+    "Link kopieren": "Kopiuj link",
+    "Link kopiert ✓": "Link skopiowany ✓",
+    "SKYTALE verschlüsselt alles direkt auf deinem Gerät — dafür braucht es einen echten Browser.": "SKYTALE szyfruje wszystko bezpośrednio na Twoim urządzeniu — do tego potrzebna jest prawdziwa przeglądarka."
   },
   ru: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — самопроверка WebCrypto не пройдена. Заблокировано в целях безопасности.",
@@ -456,7 +512,15 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Gruppen synchen noch nicht auf deine anderen Geräte": "Группы пока не синхронизируются с вашими другими устройствами",
     "Nachricht zurückgerufen": "Сообщение отозвано",
     "Anhang auf diesem Gerät nicht verfügbar": "Вложение недоступно на этом устройстве",
-    "Anhang lädt…": "Вложение загружается…"
+    "Anhang lädt…": "Вложение загружается…",
+    "Fast geschafft — im Browser öffnen": "Почти готово — откройте в браузере",
+    "Du bist gerade im In-App-Browser von Instagram. Der kann die Verschlüsselung nicht ausführen.": "Вы сейчас во встроенном браузере Instagram. Он не может выполнить шифрование.",
+    "Du bist gerade im Vorschau-Browser einer App. Der kann die Verschlüsselung nicht ausführen.": "Вы сейчас в браузере предпросмотра приложения. Он не может выполнить шифрование.",
+    "Tippe oben rechts auf ⋯ (oder ⋮).": "Нажмите вверху справа на ⋯ (или ⋮).",
+    "Wähle „Im Browser öffnen“ — Safari, Chrome oder Firefox.": "Выберите «Открыть в браузере» — Safari, Chrome или Firefox.",
+    "Link kopieren": "Скопировать ссылку",
+    "Link kopiert ✓": "Ссылка скопирована ✓",
+    "SKYTALE verschlüsselt alles direkt auf deinem Gerät — dafür braucht es einen echten Browser.": "SKYTALE шифрует всё прямо на вашем устройстве — для этого нужен настоящий браузер."
   },
   uk: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — самоперевірка WebCrypto не пройдена. Заблоковано з міркувань безпеки.",
@@ -512,7 +576,15 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Gruppen synchen noch nicht auf deine anderen Geräte": "Групи ще не синхронізуються з іншими твоїми пристроями",
     "Nachricht zurückgerufen": "Повідомлення відкликано",
     "Anhang auf diesem Gerät nicht verfügbar": "Вкладення недоступне на цьому пристрої",
-    "Anhang lädt…": "Вкладення завантажується…"
+    "Anhang lädt…": "Вкладення завантажується…",
+    "Fast geschafft — im Browser öffnen": "Майже готово — відкрийте у браузері",
+    "Du bist gerade im In-App-Browser von Instagram. Der kann die Verschlüsselung nicht ausführen.": "Ви зараз у вбудованому браузері Instagram. Він не може виконати шифрування.",
+    "Du bist gerade im Vorschau-Browser einer App. Der kann die Verschlüsselung nicht ausführen.": "Ви зараз у браузері попереднього перегляду застосунку. Він не може виконати шифрування.",
+    "Tippe oben rechts auf ⋯ (oder ⋮).": "Натисніть угорі праворуч ⋯ (або ⋮).",
+    "Wähle „Im Browser öffnen“ — Safari, Chrome oder Firefox.": "Виберіть «Відкрити у браузері» — Safari, Chrome або Firefox.",
+    "Link kopieren": "Скопіювати посилання",
+    "Link kopiert ✓": "Посилання скопійовано ✓",
+    "SKYTALE verschlüsselt alles direkt auf deinem Gerät — dafür braucht es einen echten Browser.": "SKYTALE шифрує все безпосередньо на вашому пристрої — для цього потрібен справжній браузер."
   },
   tr: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — WebCrypto öz testi başarısız. Güvenlik nedeniyle kilitlendi.",
@@ -568,7 +640,15 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Gruppen synchen noch nicht auf deine anderen Geräte": "Gruplar henüz diğer cihazlarınla senkronize olmuyor",
     "Nachricht zurückgerufen": "Mesaj geri çekildi",
     "Anhang auf diesem Gerät nicht verfügbar": "Ek bu cihazda kullanılamıyor",
-    "Anhang lädt…": "Ek yükleniyor…"
+    "Anhang lädt…": "Ek yükleniyor…",
+    "Fast geschafft — im Browser öffnen": "Neredeyse tamam — tarayıcıda aç",
+    "Du bist gerade im In-App-Browser von Instagram. Der kann die Verschlüsselung nicht ausführen.": "Şu anda Instagram'ın uygulama içi tarayıcısındasın. O, şifrelemeyi çalıştıramaz.",
+    "Du bist gerade im Vorschau-Browser einer App. Der kann die Verschlüsselung nicht ausführen.": "Şu anda bir uygulamanın önizleme tarayıcısındasın. O, şifrelemeyi çalıştıramaz.",
+    "Tippe oben rechts auf ⋯ (oder ⋮).": "Sağ üstteki ⋯ (veya ⋮) simgesine dokun.",
+    "Wähle „Im Browser öffnen“ — Safari, Chrome oder Firefox.": "„Tarayıcıda aç\"ı seç — Safari, Chrome veya Firefox.",
+    "Link kopieren": "Bağlantıyı kopyala",
+    "Link kopiert ✓": "Bağlantı kopyalandı ✓",
+    "SKYTALE verschlüsselt alles direkt auf deinem Gerät — dafür braucht es einen echten Browser.": "SKYTALE her şeyi doğrudan cihazında şifreler — bunun için gerçek bir tarayıcı gerekir."
   },
   zh: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — WebCrypto 自检失败。出于安全原因已锁定。",
@@ -624,6 +704,14 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Gruppen synchen noch nicht auf deine anderen Geräte": "群组暂不同步到你的其他设备",
     "Nachricht zurückgerufen": "消息已撤回",
     "Anhang auf diesem Gerät nicht verfügbar": "附件在此设备上不可用",
-    "Anhang lädt…": "附件加载中…"
+    "Anhang lädt…": "附件加载中…",
+    "Fast geschafft — im Browser öffnen": "快完成了 — 请在浏览器中打开",
+    "Du bist gerade im In-App-Browser von Instagram. Der kann die Verschlüsselung nicht ausführen.": "你现在处于 Instagram 的应用内浏览器中，它无法运行加密。",
+    "Du bist gerade im Vorschau-Browser einer App. Der kann die Verschlüsselung nicht ausführen.": "你现在处于某个应用的预览浏览器中，它无法运行加密。",
+    "Tippe oben rechts auf ⋯ (oder ⋮).": "点击右上角的 ⋯（或 ⋮）。",
+    "Wähle „Im Browser öffnen“ — Safari, Chrome oder Firefox.": "选择「在浏览器中打开」— Safari、Chrome 或 Firefox。",
+    "Link kopieren": "复制链接",
+    "Link kopiert ✓": "链接已复制 ✓",
+    "SKYTALE verschlüsselt alles direkt auf deinem Gerät — dafür braucht es einen echten Browser.": "SKYTALE 直接在你的设备上加密所有内容 — 因此需要一个真正的浏览器。"
   },
 };

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { t } from './lib/i18n';
-import { IconEyeOff } from './icons';
+import { IconBomb } from './icons';
 
 /**
  * Full-screen viewer for a view-once photo. By the time this mounts the stored bytes
@@ -51,7 +51,7 @@ export function ViewOnceViewer({ blob, onClose }: { blob: Blob; onClose: () => v
         {url && <img className="vo-img" src={url} alt="" draggable={false} />}
         {!held && (
           <div className="vo-cover">
-            <IconEyeOff size={30} />
+            <IconBomb size={30} />
             <div className="vo-cover-title">{t('Zum Ansehen gedrückt halten')}</div>
             <div className="vo-cover-sub">{t('Das Foto ist bereits gelöscht — dies ist deine einzige Ansicht.')}</div>
           </div>

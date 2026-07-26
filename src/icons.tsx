@@ -246,6 +246,31 @@ export function IconEye({ size = 16 }: { size?: number }) {
   );
 }
 
+export function IconBomb({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
+      {/* body */}
+      <circle cx="6.8" cy="10" r="4.4" fill="currentColor" />
+      {/* cap + fuse up to the spark */}
+      <path
+        d="M9.4 6.5 10.6 5.3M10.6 5.3q1.1-1.6 2.6-1"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      {/* spark burst */}
+      <path
+        d="M13.2 4.3 14.4 3.7M13.2 4.3 12.8 3M13.2 4.3 14.3 5M13.2 4.3 12 4.8"
+        stroke="currentColor"
+        strokeWidth="1.1"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 export function IconEyeOff({ size = 16 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">

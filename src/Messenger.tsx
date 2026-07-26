@@ -146,7 +146,7 @@ import { ViewOnceViewer } from './ViewOnceViewer';
 import {
   IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach, IconMic, IconTrash, IconDots, IconGroup, IconReply, IconForward, IconCopy,
   IconBell, IconDevices, IconArchive, IconChevron,
-  IconSticker, IconGraduation, IconGlobe, IconBug, IconEyeOff,
+  IconSticker, IconGraduation, IconGlobe, IconBug, IconBomb,
 } from './icons';
 
 const MAX_ATTACH = 600 * 1024; // inline cap — keeps the WS frame under Cloudflare's ~1 MiB limit
@@ -3666,34 +3666,25 @@ export function Messenger({ dek, onLock }: Props) {
           <img className="vo-preview-media" src={pendingMedia.url} alt="" />
         )}
       </div>
-      {/* View-once is only offered when the media fits the self-destruct path (≤ ~2 MB).
-          A round WhatsApp-style toggle in the send bar — no checkbox — with a hint that
-          fades in when it's armed. */}
-      {canVO && (
-        <div className={`vo-hint${pendingVO ? ' on' : ''}`} aria-hidden={!pendingVO}>
-          <IconEyeOff size={13} />
-          <span>
-            <b>{t('Einmal ansehen')}</b> · {t('Löscht sich nach dem Öffnen')}
-          </span>
-        </div>
-      )}
-      <div className="vo-preview-bar">
-        <button className="btn btn-ghost" onClick={cancelPendingMedia}>
-          {t('Abbrechen')}
-        </button>
-        <div className="vo-preview-right">
-          {canVO && (
-            <button
-              type="button"
-              className={`vo-round${pendingVO ? ' on' : ''}`}
-              onClick={() => setPendingVO((v) => !v)}
-              aria-pressed={pendingVO}
-              aria-label={t('Einmal ansehen')}
-              title={t('Einmal ansehen')}
-            >
-              <IconEyeOff size={19} />
-            </button>
-          )}
+      <div className="vo-preview-foot">
+        {/* View-once is only offered when the media fits the self-destruct path (≤ ~2 MB).
+            A full-width "arm" pill — no checkbox — that fills with the accent + glows when
+            armed; the bomb signals self-destruct. */}
+        {canVO && (
+          <button
+            type="button"
+            className={`vo-arm${pendingVO ? ' on' : ''}`}
+            onClick={() => setPendingVO((v) => !v)}
+            aria-pressed={pendingVO}
+          >
+            <IconBomb size={17} />
+            <span>{t('Einmal ansehen')}</span>
+          </button>
+        )}
+        <div className="crop-actions">
+          <button className="btn btn-outline" onClick={cancelPendingMedia}>
+            {t('Abbrechen')}
+          </button>
           <button className="btn btn-primary" onClick={() => void confirmPendingMedia()}>
             {t('Senden')}
           </button>
@@ -4325,11 +4316,11 @@ export function Messenger({ dek, onLock }: Props) {
                     m.file.viewOnce ? (
                       m.voSeen || !m.file.attId ? (
                         <span className="vo-seen">
-                          <IconEyeOff size={14} /> {t('Foto angesehen')}
+                          <IconBomb size={14} /> {t('Foto angesehen')}
                         </span>
                       ) : (
                         <button className="vo-open" onClick={() => void openViewOnce(activeContact?.roomId ?? '', m)}>
-                          <IconEyeOff size={16} />
+                          <IconBomb size={16} />
                           <span className="vo-open-tx">
                             <span className="vo-open-title">{t('Einmal ansehen')}</span>
                             <span className="vo-open-sub">{t('Löscht sich nach dem Öffnen')}</span>

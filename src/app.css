@@ -3847,63 +3847,46 @@ select {
   object-fit: contain;
   border-radius: var(--r-md);
 }
-/* Hint fades in when view-once is armed — space is reserved so nothing jumps. */
-.vo-hint {
+/* Footer holds the arm pill + the action row, both at one consistent width. */
+.vo-preview-foot {
+  width: min(86vw, 52vh);
   display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  min-height: 20px;
-  margin-bottom: 12px;
-  font-size: 12.5px;
-  color: var(--accent);
-  opacity: 0;
-  transform: translateY(3px);
-  transition: opacity 180ms var(--ease-out), transform 180ms var(--ease-out);
+  flex-direction: column;
 }
-.vo-hint.on {
-  opacity: 1;
-  transform: none;
-}
-.vo-hint svg {
-  flex: none;
-}
-.vo-hint b {
-  font-weight: 600;
+.vo-preview-foot .crop-actions {
+  width: 100%;
 }
 
-/* Send bar: [Abbrechen] … [round view-once toggle] [Senden] */
-.vo-preview-bar {
+/* Full-width "arm" pill — tap to toggle view-once. Outlined when off; fills with the
+   accent + a soft glow when armed. The bomb signals self-destruct. No checkbox. */
+.vo-arm {
   display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.vo-preview-right {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.vo-round {
-  width: 46px;
-  height: 46px;
-  border-radius: 50%;
-  display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 9px;
+  width: 100%;
+  height: 46px;
+  margin-bottom: 12px;
+  border-radius: var(--r-md);
   border: 1.5px solid var(--border);
   background: var(--surface2);
   color: var(--muted);
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: 14.5px;
   cursor: pointer;
   transition: transform 160ms var(--ease-out), background 160ms var(--ease-out),
-    border-color 160ms var(--ease-out), color 160ms var(--ease-out), box-shadow 200ms var(--ease-out);
+    border-color 160ms var(--ease-out), color 160ms var(--ease-out), box-shadow 220ms var(--ease-out);
 }
-.vo-round:active {
-  transform: scale(0.92);
+.vo-arm svg {
+  flex: none;
 }
-.vo-round.on {
+.vo-arm:active {
+  transform: scale(0.98);
+}
+.vo-arm.on {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 22%, transparent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 20%, transparent);
 }

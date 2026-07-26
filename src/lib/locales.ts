@@ -330,6 +330,9 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Vorschlag / Feedback": "Suggestion / feedback",
     "Was ist passiert?": "What happened?",
     "Zum Ansehen gedrückt halten": "Press and hold to view",
+    "Einmal-Medien sind zu groß — max ~2 MB (kürzeres Video oder kleineres Bild wählen).": "View-once media is too large — max ~2 MB (choose a shorter video or smaller image).",
+    "Foto senden": "Send photo",
+    "Video senden": "Send video",
   },
   es: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — Falló la autoprueba de WebCrypto. Bloqueado por seguridad.",
@@ -655,6 +658,9 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Vorschlag / Feedback": "Sugerencia / opinión",
     "Was ist passiert?": "¿Qué ha pasado?",
     "Zum Ansehen gedrückt halten": "Mantén pulsado para ver",
+    "Einmal-Medien sind zu groß — max ~2 MB (kürzeres Video oder kleineres Bild wählen).": "El contenido de una sola vez es demasiado grande — máx. ~2 MB (elige un vídeo más corto o una imagen más pequeña).",
+    "Foto senden": "Enviar foto",
+    "Video senden": "Enviar vídeo",
   },
   fr: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — échec de l'autotest WebCrypto. Verrouillé par sécurité.",
@@ -980,6 +986,9 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Vorschlag / Feedback": "Suggestion / avis",
     "Was ist passiert?": "Que s'est-il passé ?",
     "Zum Ansehen gedrückt halten": "Maintiens appuyé pour voir",
+    "Einmal-Medien sind zu groß — max ~2 MB (kürzeres Video oder kleineres Bild wählen).": "Le média à usage unique est trop volumineux — max ~2 MB (choisissez une vidéo plus courte ou une image plus petite).",
+    "Foto senden": "Envoyer la photo",
+    "Video senden": "Envoyer la vidéo",
   },
   it: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — Autotest WebCrypto fallito. Bloccato per motivi di sicurezza.",
@@ -1305,6 +1314,9 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Vorschlag / Feedback": "Suggerimento / Feedback",
     "Was ist passiert?": "Cosa è successo?",
     "Zum Ansehen gedrückt halten": "Tieni premuto per visualizzare",
+    "Einmal-Medien sind zu groß — max ~2 MB (kürzeres Video oder kleineres Bild wählen).": "Il contenuto visualizzabile una sola volta è troppo grande — max ~2 MB (scegli un video più corto o un'immagine più piccola).",
+    "Foto senden": "Invia foto",
+    "Video senden": "Invia video",
   },
   pt: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — Autoteste do WebCrypto falhou. Bloqueado por motivos de segurança.",
@@ -1630,6 +1642,9 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Vorschlag / Feedback": "Sugestão / Feedback",
     "Was ist passiert?": "O que aconteceu?",
     "Zum Ansehen gedrückt halten": "Manter premido para ver",
+    "Einmal-Medien sind zu groß — max ~2 MB (kürzeres Video oder kleineres Bild wählen).": "A mídia de visualização única é muito grande — máx. ~2 MB (escolha um vídeo mais curto ou uma imagem menor).",
+    "Foto senden": "Enviar foto",
+    "Video senden": "Enviar vídeo",
   },
   nl: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — WebCrypto-zelftest mislukt. Uit veiligheidsoverwegingen vergrendeld.",
@@ -1955,6 +1970,9 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Vorschlag / Feedback": "Suggestie / feedback",
     "Was ist passiert?": "Wat is er gebeurd?",
     "Zum Ansehen gedrückt halten": "Ingedrukt houden om te bekijken",
+    "Einmal-Medien sind zu groß — max ~2 MB (kürzeres Video oder kleineres Bild wählen).": "Eenmalige media is te groot — max ~2 MB (kies een kortere video of kleinere afbeelding).",
+    "Foto senden": "Foto versturen",
+    "Video senden": "Video versturen",
   },
   pl: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — autotest WebCrypto nie powiódł się. Zablokowano ze względów bezpieczeństwa.",
@@ -2280,6 +2298,9 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Vorschlag / Feedback": "Sugestia / opinia",
     "Was ist passiert?": "Co się stało?",
     "Zum Ansehen gedrückt halten": "Przytrzymaj, aby wyświetlić",
+    "Einmal-Medien sind zu groß — max ~2 MB (kürzeres Video oder kleineres Bild wählen).": "Multimedia jednorazowe są zbyt duże — maks. ~2 MB (wybierz krótszy film lub mniejsze zdjęcie).",
+    "Foto senden": "Wyślij zdjęcie",
+    "Video senden": "Wyślij film",
   },
   ru: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — самопроверка WebCrypto не пройдена. Заблокировано в целях безопасности.",
@@ -2605,6 +2626,9 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Vorschlag / Feedback": "Предложение / отзыв",
     "Was ist passiert?": "Что случилось?",
     "Zum Ansehen gedrückt halten": "Удерживайте, чтобы посмотреть",
+    "Einmal-Medien sind zu groß — max ~2 MB (kürzeres Video oder kleineres Bild wählen).": "Одноразовое медиа слишком большое — макс. ~2 MB (выберите более короткое видео или изображение меньшего размера).",
+    "Foto senden": "Отправить фото",
+    "Video senden": "Отправить видео",
   },
   uk: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — самоперевірка WebCrypto не пройдена. Заблоковано з міркувань безпеки.",
@@ -2930,6 +2954,9 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Vorschlag / Feedback": "Пропозиція / Відгук",
     "Was ist passiert?": "Що сталося?",
     "Zum Ansehen gedrückt halten": "Утримуй, щоб переглянути",
+    "Einmal-Medien sind zu groß — max ~2 MB (kürzeres Video oder kleineres Bild wählen).": "Одноразове медіа завелике — макс. ~2 MB (виберіть коротше відео або менше зображення).",
+    "Foto senden": "Надіслати фото",
+    "Video senden": "Надіслати відео",
   },
   tr: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — WebCrypto öz testi başarısız. Güvenlik nedeniyle kilitlendi.",
@@ -3255,6 +3282,9 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Vorschlag / Feedback": "Öneri / Geri bildirim",
     "Was ist passiert?": "Ne oldu?",
     "Zum Ansehen gedrückt halten": "Görüntülemek için basılı tut",
+    "Einmal-Medien sind zu groß — max ~2 MB (kürzeres Video oder kleineres Bild wählen).": "Tek seferlik medya çok büyük — en fazla ~2 MB (daha kısa bir video veya daha küçük bir görsel seçin).",
+    "Foto senden": "Fotoğraf gönder",
+    "Video senden": "Video gönder",
   },
   zh: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — WebCrypto 自检失败。出于安全原因已锁定。",
@@ -3580,5 +3610,8 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Vorschlag / Feedback": "建议 / 反馈",
     "Was ist passiert?": "发生了什么？",
     "Zum Ansehen gedrückt halten": "长按查看",
+    "Einmal-Medien sind zu groß — max ~2 MB (kürzeres Video oder kleineres Bild wählen).": "阅后即焚媒体太大 — 最多 ~2 MB（请选择更短的视频或更小的图片）。",
+    "Foto senden": "发送照片",
+    "Video senden": "发送视频",
   },
 };

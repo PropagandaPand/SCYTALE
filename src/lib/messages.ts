@@ -25,6 +25,10 @@ export interface FileRef {
   // out to the contact; only the offering device (which holds the file) serves it.
   // Cleared once the bytes are reassembled into the store.
   pull?: { total: number };
+  // View-once photo: shown as a covered placeholder, opened at most once, then the
+  // stored bytes are securely wiped and the message becomes a tombstone. Set on the
+  // RECIPIENT's copy (the sender keeps their own). See src/ViewOnceViewer.tsx.
+  viewOnce?: boolean;
 }
 
 /** A quoted message shown above a reply. Self-contained (a rendered preview + who
@@ -48,6 +52,9 @@ export interface ChatMessage {
   // sides, its text/file dropped. Cooperative, not a guarantee (see SECURITY.md): it
   // only asks the recipient's client to retract; it can't undo what was already read.
   recalled?: boolean;
+  // A view-once photo (file.viewOnce) that has been opened once. The bytes are wiped
+  // and file.attId is cleared; the bubble renders as an "angesehen" tombstone.
+  voSeen?: boolean;
   // Delivery to the relay (not read-receipt): pending until the DO confirms the
   // SQLite insert, then 'sent'; 'failed' on nack (mailbox full) or ack timeout.
   // Undefined on old/received messages → rendered as delivered.

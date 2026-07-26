@@ -780,7 +780,7 @@ export interface RosterEntry {
 /** Message payload framed into the ratchet plaintext. */
 export type MessageContent =
   | { kind: 'text'; text: string }
-  | { kind: 'file'; name: string; mime: string; data: Bytes }
+  | { kind: 'file'; name: string; mime: string; data: Bytes; viewOnce?: boolean }
   | { kind: 'profile'; name?: string; avatar?: Bytes }
   | { kind: 'group'; groupId: string; senderName?: string; inner: MessageContent }
   | { kind: 'ginvite'; group: GroupInvite }
@@ -880,7 +880,11 @@ export async function frameContent(c: MessageContent): Promise<Bytes> {
     const out = new Uint8Array(1 + 2 + name.length + 2 + mime.length + c.data.length);
     const dv = new DataView(out.buffer);
     let o = 0;
-    out[o++] = 1;
+    // Byte 18 = a view-once file: same payload as a normal file (byte 1), but the tag
+    // tells the recipient to treat it as single-view + self-destruct. Old clients that
+    // don't know byte 18 simply drop it, so a view-once photo only lands on a peer new
+    // enough to honour the semantics — a normal file (byte 1) stays fully compatible.
+    out[o++] = c.viewOnce ? 18 : 1;
     dv.setUint16(o, name.length);
     o += 2;
     out.set(name, o);
@@ -1109,7 +1113,7 @@ export async function unframeContent(bytes: Bytes): Promise<MessageContent> {
     return { kind: 'attreq', tid: String(j.t) };
   }
 
-  if (bytes[0] !== 1) throw new Error('Unbekannter Frame-Typ: ' + bytes[0]);
+  if (bytes[0] !== 1 && bytes[0] !== 18) throw new Error('Unbekannter Frame-Typ: ' + bytes[0]);
 
   let o = 1;
   const nameLen = dv.getUint16(o);
@@ -1120,7 +1124,7 @@ export async function unframeContent(bytes: Bytes): Promise<MessageContent> {
   o += 2;
   const mime = utf8.decode(bytes.slice(o, o + mimeLen));
   o += mimeLen;
-  return { kind: 'file', name, mime, data: bytes.slice(o) };
+  return { kind: 'file', name, mime, data: bytes.slice(o), viewOnce: bytes[0] === 18 || undefined };
 }
 
 interface DeviceTarget {

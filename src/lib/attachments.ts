@@ -172,6 +172,43 @@ export async function deleteAttachment(id: string): Promise<void> {
   for (const k of await listRecordKeys(`att:${id}:`)) await deleteRecord(k);
 }
 
+/** getRandomValues caps at 65536 bytes per call — fill a larger buffer in blocks. */
+function randomFill(n: number): Uint8Array<ArrayBuffer> {
+  const out = new Uint8Array(n);
+  for (let o = 0; o < n; o += 65536) crypto.getRandomValues(out.subarray(o, Math.min(o + 65536, n)));
+  return out as Uint8Array<ArrayBuffer>;
+}
+
+/**
+ * Irrecoverably wipe an attachment (view-once photos): overwrite every stored chunk
+ * (and its meta) with same-length random noise, THEN delete the records.
+ *
+ * Honest limits — a browser cannot force PHYSICAL erasure of the backing store:
+ * IndexedDB/LevelDB is log-structured, so overwriting a key appends a new value and
+ * the old ciphertext may linger in an un-compacted segment until the engine's own GC
+ * reclaims it; SSD wear-levelling defeats in-place overwrite regardless. What this
+ * DOES guarantee: the logical record is replaced and removed, and every chunk was
+ * AES-GCM sealed to begin with — so any byte that survives is ciphertext, useless
+ * without the non-extractable, vault-held DEK. The overwrite is best-effort
+ * defence-in-depth on top of the encryption, not a substitute for it.
+ */
+export async function secureWipeAttachment(id: string): Promise<void> {
+  for (const k of await listRecordKeys(`att:${id}:`)) {
+    try {
+      const rec = await loadRecord(k);
+      const ctLen = rec?.ct.byteLength ?? 0;
+      await saveRecord(k, {
+        iv: crypto.getRandomValues(new Uint8Array(12)) as Uint8Array<ArrayBuffer>,
+        ct: randomFill(ctLen),
+      });
+    } catch {
+      /* best-effort — fall through to the delete */
+    }
+    await deleteRecord(k);
+  }
+  await deleteRecord(recvKey(id));
+}
+
 /** Every attachment id currently in the store (distinct, from the chunk/meta keys).
  *  For garbage collection: an id no message references is an orphan. */
 export async function allAttachmentIds(): Promise<string[]> {

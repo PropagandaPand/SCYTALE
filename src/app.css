@@ -3668,3 +3668,161 @@ select {
   text-decoration: underline;
   cursor: pointer;
 }
+
+/* ── View-once photos (self-destructing) ─────────────────────────────────── */
+/* Composer toggle: a quiet eye-off button; distinct enough to notice, not loud. */
+.attach-btn.vo-btn {
+  color: var(--muted);
+}
+.attach-btn.vo-btn:active {
+  transform: scale(0.94);
+}
+
+/* Received placeholder: a frosted card that does NOT reveal the photo until tapped. */
+.vo-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 15px;
+  border-radius: var(--r-md);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface2));
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  transition: transform 140ms var(--ease-out), background 140ms var(--ease-out);
+}
+.vo-open:active {
+  transform: scale(0.97);
+}
+.vo-open svg {
+  color: var(--accent);
+  flex: none;
+}
+.vo-open-tx {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+}
+.vo-open-title {
+  font-weight: 600;
+  font-size: 14.5px;
+}
+.vo-open-sub {
+  font-size: 12px;
+  color: var(--muted);
+}
+.vo-seen {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13.5px;
+  font-style: italic;
+  color: var(--muted);
+  opacity: 0.85;
+}
+.vo-seen svg {
+  flex: none;
+  opacity: 0.7;
+}
+
+/* Full-screen viewer: hold-to-view, honest about screenshots. */
+.vo-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: #04050a;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+  animation: vo-fade 160ms var(--ease-out);
+}
+@keyframes vo-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.vo-close {
+  position: absolute;
+  top: max(10px, env(safe-area-inset-top));
+  right: 14px;
+  width: 42px;
+  height: 42px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 2;
+}
+.vo-stage {
+  position: relative;
+  flex: 1;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: pointer;
+}
+.vo-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  -webkit-user-drag: none;
+  /* Not held: heavily blurred + dimmed so the content is not discernible; the slight
+     upscale hides the transparent fringe blur leaves at the edges. */
+  filter: blur(34px) brightness(0.35);
+  transform: scale(1.12);
+  transition: filter 180ms var(--ease-out), transform 180ms var(--ease-out);
+}
+.vo-stage.held .vo-img {
+  filter: none;
+  transform: none;
+}
+.vo-cover {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  text-align: center;
+  padding: 0 32px;
+  color: #fff;
+  pointer-events: none;
+  transition: opacity 160ms var(--ease-out);
+}
+.vo-stage.held .vo-cover {
+  opacity: 0;
+}
+.vo-cover svg {
+  opacity: 0.9;
+}
+.vo-cover-title {
+  font-size: 17px;
+  font-weight: 600;
+}
+.vo-cover-sub {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.6);
+  max-width: 300px;
+}
+.vo-note {
+  flex: none;
+  margin-top: 12px;
+  font-size: 11.5px;
+  color: rgba(255, 255, 255, 0.4);
+  text-align: center;
+}

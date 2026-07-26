@@ -116,6 +116,7 @@ import {
   getAttachmentMeta,
   newAttachmentId,
   deleteAttachment,
+  secureWipeAttachment,
   allAttachmentIds,
   sealAndPutChunk,
   finalizeAttachment,
@@ -142,10 +143,11 @@ import { tb } from './lib/tnodes';
 import { applyBadge } from './lib/badge';
 import { biometricAvailable, biometricEnrolled, disableBiometricUnlock } from './lib/vaultService';
 import { Attachment, LightboxImg } from './Attachment';
+import { ViewOnceViewer } from './ViewOnceViewer';
 import {
   IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach, IconMic, IconTrash, IconDots, IconGroup, IconReply, IconForward, IconCopy,
   IconBell, IconDevices, IconArchive, IconChevron,
-  IconSticker, IconGraduation, IconGlobe, IconBug,
+  IconSticker, IconGraduation, IconGlobe, IconBug, IconEyeOff,
 } from './icons';
 
 const MAX_ATTACH = 600 * 1024; // inline cap — keeps the WS frame under Cloudflare's ~1 MiB limit
@@ -468,6 +470,8 @@ export function Messenger({ dek, onLock }: Props) {
   const [safetyNumber, setSafetyNumber] = useState('');
   const [safetyQr, setSafetyQr] = useState('');
   const [zoomImg, setZoomImg] = useState<Blob | null>(null); // full-screen image viewer (its own object URL)
+  const [viewOnceMode, setViewOnceMode] = useState(false); // next picked image sends as a self-destructing view-once photo (1:1)
+  const [viewOnce, setViewOnce] = useState<Blob | null>(null); // the currently-open view-once photo (already wiped from storage)
   const [notifOn, setNotifOn] = useState(false);
   const [notifBusy, setNotifBusy] = useState(false);
   const [qrFull, setQrFull] = useState(false); // own QR blown up full-screen for scanning
@@ -576,11 +580,11 @@ export function Messenger({ dek, onLock }: Props) {
    * stickers stay inline (tiny, and the sticker library dedups on their bytes). The
    * WIRE is unchanged — files still travel as inline bytes; this is local storage.
    */
-  async function fileRefFor(name: string, mime: string, data: Uint8Array): Promise<FileRef> {
+  async function fileRefFor(name: string, mime: string, data: Uint8Array, viewOnce?: boolean): Promise<FileRef> {
     if (name === STICKER_FILENAME) return { name, mime, dataB64: bytesToB64(data) };
     const attId = newAttachmentId();
     await putAttachment(dek, attId, data, name, mime);
-    return { name, mime, attId, size: data.length };
+    return { name, mime, attId, size: data.length, ...(viewOnce ? { viewOnce: true } : {}) };
   }
 
   /** A self-contained quote of a message, for the reply preview + the sent frame. */
@@ -779,6 +783,41 @@ export function Messenger({ dek, onLock }: Props) {
     }
     commitMessages();
     await saveMessages(dek, roomId, next);
+  }
+
+  // Open a view-once photo. The decrypt happens first (we need the bytes in memory),
+  // then the message is consumed IRREVERSIBLY before anything is shown: the stored
+  // chunks are securely wiped and attId is cleared, so a crash or reload mid-view can
+  // never re-open it. The in-memory blob is displayed by ViewOnceViewer and dropped on
+  // close. Cannot re-view — that is the whole point.
+  async function openViewOnce(roomId: string, m: ChatMessage) {
+    if (!m.mid || !m.file?.attId || m.voSeen) return;
+    const attId = m.file.attId;
+    let blob: Blob | null = null;
+    try {
+      blob = await getAttachmentBlob(dek, attId);
+    } catch {
+      blob = null;
+    }
+    // Consume + wipe BEFORE display — one viewing, no take-backs.
+    if (messagesRef.current[roomId] === undefined) {
+      messagesRef.current[roomId] = await loadMessages(dek, roomId);
+    }
+    const arr = messagesRef.current[roomId] ?? [];
+    const next = arr.map((x) =>
+      x.mid === m.mid && x.file?.viewOnce && !x.voSeen
+        ? { ...x, voSeen: true, file: { ...x.file, attId: undefined, dataB64: undefined } }
+        : x,
+    );
+    messagesRef.current[roomId] = next;
+    commitMessages();
+    await saveMessages(dek, roomId, next);
+    void secureWipeAttachment(attId);
+    if (!blob) {
+      setError(t('Foto ist nicht mehr verfügbar.'));
+      return;
+    }
+    setViewOnce(blob);
   }
 
   // Recall ("unsend") one of MY OWN messages: tombstone it locally, then ask the peer's
@@ -2264,7 +2303,7 @@ export function Messenger({ dek, onLock }: Props) {
       } else {
         const inMsg: ChatMessage =
           content.kind === 'file'
-            ? { mine: false, ts: Date.now(), mid, file: await fileRefFor(content.name, content.mime, content.data) }
+            ? { mine: false, ts: Date.now(), mid, file: await fileRefFor(content.name, content.mime, content.data, content.viewOnce) }
             : content.kind === 'reply'
               ? await replyMessage(content.quote, content.inner, mid, false)
               : incomingMessage(content, mid);
@@ -3091,6 +3130,10 @@ export function Messenger({ dek, onLock }: Props) {
     const id = identityRef.current;
     if (!file || !id || (!activeRoom && !activeGroup)) return;
     setError('');
+    // View-once is a 1:1, image-only, single-frame feature (needs byte-18 tagging,
+    // which only the inline `file` frame carries). One-shot: consume the mode now.
+    const wantVO = viewOnceMode && (file.type || '').startsWith('image/') && !!activeRoom && !activeGroup;
+    if (viewOnceMode) setViewOnceMode(false);
     try {
       let data: Uint8Array<ArrayBuffer>;
       let mime = file.type || 'application/octet-stream';
@@ -3106,6 +3149,10 @@ export function Messenger({ dek, onLock }: Props) {
       // A file literally named like our sticker marker would render chrome-free
       // on the other side. Harmless but confusing, so rename it.
       if (name === STICKER_FILENAME) name = 'datei';
+      if (wantVO && data.length > MAX_ATTACH) {
+        setError(t('Einmal-Foto ist zu groß — bitte ein kleineres Bild wählen.'));
+        return;
+      }
       if (data.length > MAX_ATTACH) {
         const target = activeGroup ? null : contactsRef.current.find((c) => c.roomId === activeRoom);
         // Auto-push chunked: a 1:1 contact, above the inline cap and within AUTOPUSH_CAP.
@@ -3135,7 +3182,10 @@ export function Messenger({ dek, onLock }: Props) {
       }
       const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
       if (!contact) return;
-      const deliveries = await fanoutSend(contact, { kind: 'file', name, mime, data }, mid);
+      // Only the RECIPIENT's copy is view-once (byte 18). The sender keeps a normal,
+      // re-viewable copy, and self-sync mirrors that normal copy to my own devices —
+      // "view once" is a property of what the other side received, not of my own photo.
+      const deliveries = await fanoutSend(contact, { kind: 'file', name, mime, data, viewOnce: wantVO || undefined }, mid);
       void syncToOwnDevices(contact.peerMasterPub, 'sent', mid, localMsg.ts, { kind: 'file', name, mime, data });
       await appendMessage(contact.roomId, { ...localMsg, deliveries });
       await saveContact(dek, contact);
@@ -3561,6 +3611,7 @@ export function Messenger({ dek, onLock }: Props) {
 
   // Full-screen image viewer (avatars, later chat images). Tap anywhere closes.
   const lightbox = zoomImg ? <LightboxImg blob={zoomImg} onClose={() => setZoomImg(null)} /> : null;
+  const viewOnceEl = viewOnce ? <ViewOnceViewer blob={viewOnce} onClose={() => setViewOnce(null)} /> : null;
 
   // Long-press action popover, floating next to the pressed message.
   const msgMenuEl = msgMenu
@@ -3892,9 +3943,29 @@ export function Messenger({ dek, onLock }: Props) {
           if (f) setStickerFile(f);
         }}
       />
-      <button className="attach-btn" title={t('Anhang')} onClick={() => fileInputRef.current?.click()}>
+      <button
+        className="attach-btn"
+        title={t('Anhang')}
+        onClick={() => {
+          setViewOnceMode(false);
+          fileInputRef.current?.click();
+        }}
+      >
         <IconAttach />
       </button>
+      {!activeGroup && (
+        <button
+          className="attach-btn vo-btn"
+          title={t('Einmal ansehen — Foto löscht sich nach dem Öffnen')}
+          aria-label={t('Einmal-Foto senden')}
+          onClick={() => {
+            setViewOnceMode(true);
+            fileInputRef.current?.click();
+          }}
+        >
+          <IconEyeOff />
+        </button>
+      )}
       <button
         className={`attach-btn${stickerPanel ? ' active' : ''}`}
         title={t('Sticker')}
@@ -4182,7 +4253,21 @@ export function Messenger({ dek, onLock }: Props) {
                     </div>
                   )}
                   {m.file ? (
-                    m.file.pull ? (
+                    m.file.viewOnce ? (
+                      m.voSeen || !m.file.attId ? (
+                        <span className="vo-seen">
+                          <IconEyeOff size={14} /> {t('Foto angesehen')}
+                        </span>
+                      ) : (
+                        <button className="vo-open" onClick={() => void openViewOnce(activeContact?.roomId ?? '', m)}>
+                          <IconEyeOff size={16} />
+                          <span className="vo-open-tx">
+                            <span className="vo-open-title">{t('Einmal ansehen')}</span>
+                            <span className="vo-open-sub">{t('Löscht sich nach dem Öffnen')}</span>
+                          </span>
+                        </button>
+                      )
+                    ) : m.file.pull ? (
                       <button
                         className="pull-chip"
                         disabled={!!(m.file.attId && downloadingRef.current.has(m.file.attId))}
@@ -4226,6 +4311,7 @@ export function Messenger({ dek, onLock }: Props) {
         {msgMenuEl}
         {forwardEl}
         {lightbox}
+        {viewOnceEl}
         {stickerViewEl}
       </div>
     );
@@ -4639,6 +4725,7 @@ export function Messenger({ dek, onLock }: Props) {
           </div>
         </div>
         {lightbox}
+        {viewOnceEl}
         {stickerViewEl}
       </div>
     );

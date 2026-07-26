@@ -3853,14 +3853,14 @@ export function Messenger({ dek, onLock }: Props) {
 
   const composerEl = recording ? (
     <div className="composer recording">
-      <button className="attach-btn danger" onClick={cancelRecording} aria-label="Abbrechen">
+      <button className="attach-btn danger" onClick={cancelRecording} aria-label={t('Abbrechen')}>
         <IconTrash />
       </button>
       <div className="rec-indicator">
         <span className="rec-dot" />
-        Aufnahme… {fmtRec(recSeconds)}
+        {t('Aufnahme…')} {fmtRec(recSeconds)}
       </div>
-      <button className="send-btn" onClick={stopAndSend} aria-label="Senden">
+      <button className="send-btn" onClick={stopAndSend} aria-label={t('Senden')}>
         <IconSend />
       </button>
     </div>
@@ -3869,10 +3869,10 @@ export function Messenger({ dek, onLock }: Props) {
       {replyTo && (
         <div className="reply-bar">
           <div className="reply-bar-tx">
-            <span className="reply-bar-who">{replyTo.mine ? 'Antwort an dich' : 'Antwort'}</span>
+            <span className="reply-bar-who">{replyTo.mine ? t('Antwort an dich') : t('Antwort')}</span>
             <span className="reply-bar-text">{replyTo.text || '📎 Anhang'}</span>
           </div>
-          <button className="reply-bar-x" onClick={() => setReplyTo(null)} aria-label="Antwort verwerfen">
+          <button className="reply-bar-x" onClick={() => setReplyTo(null)} aria-label={t('Antwort verwerfen')}>
             ×
           </button>
         </div>
@@ -3889,12 +3889,12 @@ export function Messenger({ dek, onLock }: Props) {
           if (f) setStickerFile(f);
         }}
       />
-      <button className="attach-btn" title="Anhang" onClick={() => fileInputRef.current?.click()}>
+      <button className="attach-btn" title={t('Anhang')} onClick={() => fileInputRef.current?.click()}>
         <IconAttach />
       </button>
       <button
         className={`attach-btn${stickerPanel ? ' active' : ''}`}
-        title="Sticker"
+        title={t('Sticker')}
         aria-expanded={stickerPanel}
         onClick={() => setStickerPanel((v) => !v)}
       >
@@ -3904,17 +3904,17 @@ export function Messenger({ dek, onLock }: Props) {
         <input
           ref={msgInputRef}
           defaultValue=""
-          placeholder="Verschlüsselte Nachricht…"
+          placeholder={t('Verschlüsselte Nachricht…')}
           onChange={(e) => setHasText(e.target.value.trim().length > 0)}
           onKeyDown={(e) => e.key === 'Enter' && void onSend()}
         />
       </div>
       {hasText ? (
-        <button className="send-btn" onClick={() => void onSend()} aria-label="Senden">
+        <button className="send-btn" onClick={() => void onSend()} aria-label={t('Senden')}>
           <IconSend />
         </button>
       ) : (
-        <button className="send-btn mic" onClick={() => void startRecording()} aria-label="Sprachnachricht">
+        <button className="send-btn mic" onClick={() => void startRecording()} aria-label={t('Sprachnachricht')}>
           <IconMic />
         </button>
       )}
@@ -4150,7 +4150,7 @@ export function Messenger({ dek, onLock }: Props) {
             <span className="g">
               <IconLock size={10} />
             </span>
-            Verschlüsselt · nur ihr beide lest mit
+            {t('Verschlüsselt · nur ihr beide lest mit')}
           </div>
           {shown.map((m, i) => (
             <div
@@ -4164,7 +4164,7 @@ export function Messenger({ dek, onLock }: Props) {
               onContextMenu={(e) => e.preventDefault()}
             >
               {m.recalled ? (
-                <span className="recalled">Nachricht zurückgerufen</span>
+                <span className="recalled">{t('Nachricht zurückgerufen')}</span>
               ) : (
                 <>
                   {m.reply && (
@@ -4288,11 +4288,11 @@ export function Messenger({ dek, onLock }: Props) {
             <span className="g">
               <IconLock size={10} />
             </span>
-            Verschlüsselt · Ende-zu-Ende
+            {t('Verschlüsselt · Ende-zu-Ende')}
           </div>
           {multiDevice && (
-            <div className="enc-pill" title="Gruppen synchronisieren noch nicht auf deine anderen Geräte (kommt mit v3).">
-              ⓘ Gruppen synchen noch nicht auf deine anderen Geräte
+            <div className="enc-pill" title={t('Gruppen synchronisieren noch nicht auf deine anderen Geräte (kommt mit v3).')}>
+              ⓘ {t('Gruppen synchen noch nicht auf deine anderen Geräte')}
             </div>
           )}
           {shown.map((m, i) => (
@@ -4308,7 +4308,7 @@ export function Messenger({ dek, onLock }: Props) {
             >
               {!m.mine && m.sender && <div className="bubble-sender">{m.sender}</div>}
               {m.recalled ? (
-                <span className="recalled">Nachricht zurückgerufen</span>
+                <span className="recalled">{t('Nachricht zurückgerufen')}</span>
               ) : (
                 <>
                   {m.reply && (

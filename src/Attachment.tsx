@@ -4,6 +4,7 @@ import { IconAttach } from './icons';
 import { b64ToBytes } from './lib/bytes';
 import { getAttachmentBlob } from './lib/attachments';
 import { isSticker } from './lib/stickers';
+import { t } from './lib/i18n';
 import type { FileRef } from './lib/messages';
 
 /** Resolve a message attachment to a Blob, from either storage format. Returns null
@@ -114,7 +115,7 @@ export function Attachment({
   }, [blob]);
 
   if (state === 'missing') {
-    return <div className="file-missing">Anhang auf diesem Gerät nicht verfügbar</div>;
+    return <div className="file-missing">{t('Anhang auf diesem Gerät nicht verfügbar')}</div>;
   }
   if (state !== 'ready' || !url || !blob) {
     // Reserve some space for still-media so lazy loading doesn't jump the scroll.
@@ -126,7 +127,7 @@ export function Attachment({
         aria-busy={near}
         style={media ? { minHeight: 160, minWidth: 120 } : undefined}
       >
-        {state === 'loading' ? 'Anhang lädt…' : ''}
+        {state === 'loading' ? t('Anhang lädt…') : ''}
       </div>
     );
   }

@@ -3655,6 +3655,7 @@ export function Messenger({ dek, onLock }: Props) {
   // Full-screen image viewer (avatars, later chat images). Tap anywhere closes.
   const lightbox = zoomImg ? <LightboxImg blob={zoomImg} onClose={() => setZoomImg(null)} /> : null;
   const viewOnceEl = viewOnce ? <ViewOnceViewer blob={viewOnce} onClose={() => setViewOnce(null)} /> : null;
+  const canVO = !!pendingMedia && pendingMedia.data.length <= AUTOPUSH_CAP; // fits the self-destruct path (≤ ~2 MB)
   const mediaPreviewEl = pendingMedia ? (
     <div className="crop-modal vo-preview" role="dialog" aria-label={t('Senden')}>
       <div className="crop-head">{pendingMedia.isVideo ? t('Video senden') : t('Foto senden')}</div>
@@ -3665,25 +3666,38 @@ export function Messenger({ dek, onLock }: Props) {
           <img className="vo-preview-media" src={pendingMedia.url} alt="" />
         )}
       </div>
-      {/* View-once is only offered when the media fits the self-destruct path (≤ ~2 MB). */}
-      {pendingMedia.data.length <= AUTOPUSH_CAP && (
-        <label className="vo-toggle">
-          <span className="vo-toggle-tx">
-            <span className="vo-toggle-title">
-              <IconEyeOff size={15} /> {t('Einmal ansehen')}
-            </span>
-            <span className="vo-toggle-sub">{t('Löscht sich nach dem Öffnen')}</span>
+      {/* View-once is only offered when the media fits the self-destruct path (≤ ~2 MB).
+          A round WhatsApp-style toggle in the send bar — no checkbox — with a hint that
+          fades in when it's armed. */}
+      {canVO && (
+        <div className={`vo-hint${pendingVO ? ' on' : ''}`} aria-hidden={!pendingVO}>
+          <IconEyeOff size={13} />
+          <span>
+            <b>{t('Einmal ansehen')}</b> · {t('Löscht sich nach dem Öffnen')}
           </span>
-          <input type="checkbox" checked={pendingVO} onChange={(e) => setPendingVO(e.target.checked)} />
-        </label>
+        </div>
       )}
-      <div className="crop-actions">
+      <div className="vo-preview-bar">
         <button className="btn btn-ghost" onClick={cancelPendingMedia}>
           {t('Abbrechen')}
         </button>
-        <button className="btn btn-primary" onClick={() => void confirmPendingMedia()}>
-          {t('Senden')}
-        </button>
+        <div className="vo-preview-right">
+          {canVO && (
+            <button
+              type="button"
+              className={`vo-round${pendingVO ? ' on' : ''}`}
+              onClick={() => setPendingVO((v) => !v)}
+              aria-pressed={pendingVO}
+              aria-label={t('Einmal ansehen')}
+              title={t('Einmal ansehen')}
+            >
+              <IconEyeOff size={19} />
+            </button>
+          )}
+          <button className="btn btn-primary" onClick={() => void confirmPendingMedia()}>
+            {t('Senden')}
+          </button>
+        </div>
       </div>
     </div>
   ) : null;

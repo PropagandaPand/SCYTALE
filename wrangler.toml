@@ -6,6 +6,10 @@ compatibility_date = "2025-06-01"
 # so custom_domain = true makes Cloudflare create the proxied DNS record and the TLS
 # cert automatically on deploy — no manual DNS. The worker keeps its internal name
 # ("scytale") so the existing Durable Object and deploy history stay attached.
+#
+# workers_dev = true is REQUIRED here: specifying routes otherwise disables the
+# *.workers.dev URL, which would take the app offline until the custom domain is live.
+workers_dev = true
 routes = [
   { pattern = "skytale.chat", custom_domain = true },
 ]

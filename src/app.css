@@ -3826,3 +3826,62 @@ select {
   color: rgba(255, 255, 255, 0.4);
   text-align: center;
 }
+
+/* ── Media send preview (photo/video) with the view-once toggle ───────────── */
+.vo-preview {
+  display: flex;
+  flex-direction: column;
+}
+.vo-preview-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  margin: 4px 0 14px;
+}
+.vo-preview-media {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--r-md);
+}
+.vo-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  cursor: pointer;
+  margin-bottom: 12px;
+}
+.vo-toggle-tx {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+.vo-toggle-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 600;
+  font-size: 14.5px;
+}
+.vo-toggle-title svg {
+  color: var(--accent);
+}
+.vo-toggle-sub {
+  font-size: 12px;
+  color: var(--muted);
+  padding-left: 22px;
+}
+.vo-toggle input {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--accent);
+  flex: none;
+}

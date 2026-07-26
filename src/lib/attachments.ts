@@ -45,6 +45,7 @@ export interface RecvMarker {
   ts: number; // when the transfer started — a stale one (sender vanished) is swept
   receivedIdx: number[]; // distinct chunk indices stored so far (completion = length === total)
   receivedBytes: number; // bytes stored so far — bounded by `size` so a peer can't over-store
+  viewOnce?: boolean; // a view-once video/photo — the completed message self-destructs on first open
 }
 
 const metaKey = (id: string) => `att:${id}:meta`;

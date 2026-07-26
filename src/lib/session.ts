@@ -812,7 +812,7 @@ export type MessageContent =
   // carries the full transfer descriptor (tid/total/size/name/mime) so it is
   // self-describing and order-independent. Gated on the peer device's pv (>= 2): a
   // stale device is never sent a byte-14 frame, which it would throw on and lose.
-  | { kind: 'chunk'; tid: string; idx: number; total: number; size: number; name: string; mime: string; data: Bytes }
+  | { kind: 'chunk'; tid: string; idx: number; total: number; size: number; name: string; mime: string; data: Bytes; viewOnce?: boolean }
   // Recall ("unsend"): retract a previously-sent message, referenced by its E2E mid.
   // Cooperative — the recipient's client tombstones its copy; no guarantee (SECURITY.md).
   | { kind: 'recall'; targetMid: string }
@@ -967,7 +967,9 @@ export async function frameContent(c: MessageContent): Promise<Bytes> {
   if (c.kind === 'chunk') {
     // [14][headerLen u32][header JSON][raw data]: JSON for the tiny descriptor, raw
     // bytes for the payload so the bulk isn't base64-inflated on the wire.
-    const header = utf8.encode(JSON.stringify({ t: c.tid, i: c.idx, n: c.total, s: c.size, nm: c.name, m: c.mime }));
+    const header = utf8.encode(
+      JSON.stringify({ t: c.tid, i: c.idx, n: c.total, s: c.size, nm: c.name, m: c.mime, vo: c.viewOnce ? 1 : undefined }),
+    );
     const out = new Uint8Array(1 + 4 + header.length + c.data.length);
     new DataView(out.buffer).setUint32(1, header.length);
     out[0] = 14;
@@ -1097,6 +1099,7 @@ export async function unframeContent(bytes: Bytes): Promise<MessageContent> {
       name: String(j.nm),
       mime: String(j.m),
       data: bytes.slice(5 + hlen),
+      viewOnce: j.vo === 1 || undefined,
     };
   }
 
@@ -1265,7 +1268,7 @@ export interface FanoutChunkDelivery {
 export async function fanoutChunks(
   me: IdentityKeys,
   contact: Contact,
-  desc: { tid: string; total: number; size: number; name: string; mime: string },
+  desc: { tid: string; total: number; size: number; name: string; mime: string; viewOnce?: boolean },
   data: Bytes,
   chunkBytes: number,
   minPv = 2,
@@ -1291,6 +1294,7 @@ export async function fanoutChunks(
           name: desc.name,
           mime: desc.mime,
           data: data.slice(idx * chunkBytes, (idx + 1) * chunkBytes),
+          viewOnce: desc.viewOnce,
         };
         sealed.push(await encryptForDevice(me, contact, t, chunk, randomMid()));
       }

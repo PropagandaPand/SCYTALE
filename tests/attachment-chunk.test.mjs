@@ -36,5 +36,18 @@ const b0 = await S.unframeContent(await S.frameContent(
 ));
 ok('leerer Daten-Chunk round-trips', b0.kind === 'chunk' && b0.data.length === 0 && b0.total === 1);
 
+// view-once flag (video/large-photo self-destruct) survives the chunk header round-trip.
+const voFrame = await S.frameContent(
+  { kind: 'chunk', tid: 'vo1', idx: 0, total: 1, size: 3, name: 'clip.mp4', mime: 'video/mp4', data: new Uint8Array([1, 2, 3]), viewOnce: true },
+);
+const voBack = await S.unframeContent(voFrame);
+ok('viewOnce chunk round-trips als true', voBack.kind === 'chunk' && voBack.viewOnce === true);
+// NEGATIVE CONTROL: a normal chunk (no vo) must NOT come back view-once — else every
+// attachment would self-destruct.
+const plainBack = await S.unframeContent(await S.frameContent(
+  { kind: 'chunk', tid: 'p1', idx: 0, total: 1, size: 3, name: 'clip.mp4', mime: 'video/mp4', data: new Uint8Array([1, 2, 3]) },
+));
+ok('Negativkontrolle: normaler Chunk ist NICHT viewOnce', plainBack.kind === 'chunk' && !plainBack.viewOnce);
+
 console.log(`\n${pass} ok, ${fail} fail`);
 process.exit(fail ? 1 : 0);

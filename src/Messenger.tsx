@@ -469,7 +469,9 @@ export function Messenger({ dek, onLock }: Props) {
   const [safetyNumber, setSafetyNumber] = useState('');
   const [safetyQr, setSafetyQr] = useState('');
   const [zoomImg, setZoomImg] = useState<Blob | null>(null); // full-screen image viewer (its own object URL)
-  const [viewOnceMode, setViewOnceMode] = useState(false); // next picked image sends as a self-destructing view-once photo (1:1)
+  // A just-picked photo/video awaiting the send-preview sheet (where "view once" is chosen).
+  const [pendingMedia, setPendingMedia] = useState<{ data: Uint8Array<ArrayBuffer>; name: string; mime: string; url: string; isVideo: boolean } | null>(null);
+  const [pendingVO, setPendingVO] = useState(false); // the preview's "einmal ansehen" toggle
   const [viewOnce, setViewOnce] = useState<Blob | null>(null); // the currently-open view-once photo (already wiped from storage)
   const [notifOn, setNotifOn] = useState(false);
   const [notifBusy, setNotifBusy] = useState(false);
@@ -900,7 +902,7 @@ export function Messenger({ dek, onLock }: Props) {
     let marker = await getRecvMarker(dek, c.tid);
     if (!marker) {
       if ((await allRecvMarkerIds()).length >= MAX_CONCURRENT_RECV) return; // too many in flight
-      marker = { total: c.total, name: c.name, mime: c.mime, size: c.size, ts: Date.now(), receivedIdx: [], receivedBytes: 0 };
+      marker = { total: c.total, name: c.name, mime: c.mime, size: c.size, ts: Date.now(), receivedIdx: [], receivedBytes: 0, viewOnce: c.viewOnce };
       await putRecvMarker(dek, c.tid, marker);
     } else if (c.total !== marker.total) {
       return; // inconsistent with the first chunk — drop
@@ -933,7 +935,9 @@ export function Messenger({ dek, onLock }: Props) {
         // to the RECEIVED bytes' meta (the offer's name/mime/size were only a claim),
         // and drop the pull marker so it renders as a normal attachment.
         const next = arr.map((x) =>
-          x === placeholder ? { ...x, file: { name: marker.name, mime: marker.mime, size: marker.size, attId: c.tid } } : x,
+          x === placeholder
+            ? { ...x, file: { name: marker.name, mime: marker.mime, size: marker.size, attId: c.tid, viewOnce: marker.viewOnce || placeholder.file?.viewOnce || undefined } }
+            : x,
         );
         messagesRef.current[contact.roomId] = next;
         commitMessages();
@@ -943,7 +947,7 @@ export function Messenger({ dek, onLock }: Props) {
           mine: false,
           ts: Date.now(),
           mid: c.tid,
-          file: { name: marker.name, mime: marker.mime, attId: c.tid, size: marker.size },
+          file: { name: marker.name, mime: marker.mime, attId: c.tid, size: marker.size, viewOnce: marker.viewOnce || undefined },
         });
         if (!(viewRef.current === 'chat' && activeRoomRef.current === contact.roomId)) {
           unreadRef.current[contact.roomId] = (unreadRef.current[contact.roomId] ?? 0) + 1;
@@ -1134,6 +1138,7 @@ export function Messenger({ dek, onLock }: Props) {
     data: Uint8Array<ArrayBuffer>,
     name: string,
     mime: string,
+    viewOnce = false,
   ): Promise<boolean> {
     const id = identityRef.current;
     if (!id) return false;
@@ -1142,7 +1147,8 @@ export function Messenger({ dek, onLock }: Props) {
     // Store locally under the SAME id the peer will use, so the sender sees it too.
     await putAttachment(dek, tid, data, name, mime);
     const out = await enqueueInbox(async () => {
-      const r = await fanoutChunks(id, contact, { tid, total, size: data.length, name, mime }, data, CHUNK_BYTES);
+      // Only the RECIPIENT's chunks are flagged view-once; the sender keeps a normal copy.
+      const r = await fanoutChunks(id, contact, { tid, total, size: data.length, name, mime, viewOnce }, data, CHUNK_BYTES);
       await saveContact(dek, contact); // persist ratchet advances BEFORE the wire (Invariant II)
       return r;
     });
@@ -3133,15 +3139,13 @@ export function Messenger({ dek, onLock }: Props) {
     const id = identityRef.current;
     if (!file || !id || (!activeRoom && !activeGroup)) return;
     setError('');
-    // View-once is a 1:1, image-only, single-frame feature (needs byte-18 tagging,
-    // which only the inline `file` frame carries). One-shot: consume the mode now.
-    const wantVO = viewOnceMode && (file.type || '').startsWith('image/') && !!activeRoom && !activeGroup;
-    if (viewOnceMode) setViewOnceMode(false);
     try {
       let data: Uint8Array<ArrayBuffer>;
       let mime = file.type || 'application/octet-stream';
       let name = file.name || 'datei';
-      if (mime.startsWith('image/')) {
+      const isImage = mime.startsWith('image/');
+      const isVideo = mime.startsWith('video/');
+      if (isImage) {
         const c = await compressImage(file, MAX_ATTACH);
         data = c.data as Uint8Array<ArrayBuffer>;
         mime = c.mime;
@@ -3152,15 +3156,35 @@ export function Messenger({ dek, onLock }: Props) {
       // A file literally named like our sticker marker would render chrome-free
       // on the other side. Harmless but confusing, so rename it.
       if (name === STICKER_FILENAME) name = 'datei';
-      if (wantVO && data.length > MAX_ATTACH) {
-        setError(t('Einmal-Foto ist zu groß — bitte ein kleineres Bild wählen.'));
+      // Photos/videos in a 1:1 chat go through a preview sheet that carries the
+      // "view once" option — so it lives INSIDE the send flow, not in a side menu.
+      if ((isImage || isVideo) && activeRoom && !activeGroup) {
+        setPendingVO(false);
+        setPendingMedia({ data, name, mime, url: URL.createObjectURL(new Blob([data], { type: mime })), isVideo });
+        return;
+      }
+      // Everything else (non-media, or a group) is sent straight away — no view-once.
+      await sendMedia(data, name, mime, false);
+    } catch (err) {
+      setError('Anhang fehlgeschlagen: ' + (err as Error).message);
+    }
+  }
+
+  /** Actually send a picked photo/video/file. `viewOnce` (1:1 only) flags the recipient's
+   *  copy as self-destructing; the sender always keeps a normal copy. Routes by size:
+   *  inline (byte-18 for view-once), auto-push chunks (≤2 MB, view-once supported), or an
+   *  offer (larger — view-once not supported there, guarded below). */
+  async function sendMedia(data: Uint8Array<ArrayBuffer>, name: string, mime: string, viewOnce: boolean): Promise<void> {
+    try {
+      if (viewOnce && data.length > AUTOPUSH_CAP) {
+        setError(t('Einmal-Medien sind zu groß — max ~2 MB (kürzeres Video oder kleineres Bild wählen).'));
         return;
       }
       if (data.length > MAX_ATTACH) {
         const target = activeGroup ? null : contactsRef.current.find((c) => c.roomId === activeRoom);
         // Auto-push chunked: a 1:1 contact, above the inline cap and within AUTOPUSH_CAP.
         if (target && data.length <= AUTOPUSH_CAP) {
-          const sent = await sendChunkedAttachment(target, data, name, mime);
+          const sent = await sendChunkedAttachment(target, data, name, mime, viewOnce);
           if (!sent) setError(t('Empfänger kann große Anhänge noch nicht empfangen — bitte App aktualisieren lassen.'));
           return;
         }
@@ -3188,7 +3212,7 @@ export function Messenger({ dek, onLock }: Props) {
       // Only the RECIPIENT's copy is view-once (byte 18). The sender keeps a normal,
       // re-viewable copy, and self-sync mirrors that normal copy to my own devices —
       // "view once" is a property of what the other side received, not of my own photo.
-      const deliveries = await fanoutSend(contact, { kind: 'file', name, mime, data, viewOnce: wantVO || undefined }, mid);
+      const deliveries = await fanoutSend(contact, { kind: 'file', name, mime, data, viewOnce: viewOnce || undefined }, mid);
       void syncToOwnDevices(contact.peerMasterPub, 'sent', mid, localMsg.ts, { kind: 'file', name, mime, data });
       await appendMessage(contact.roomId, { ...localMsg, deliveries });
       await saveContact(dek, contact);
@@ -3196,6 +3220,22 @@ export function Messenger({ dek, onLock }: Props) {
     } catch (err) {
       setError('Anhang fehlgeschlagen: ' + (err as Error).message);
     }
+  }
+
+  /** Confirm the media preview: send with the chosen view-once flag, then tear it down. */
+  async function confirmPendingMedia() {
+    const p = pendingMedia;
+    if (!p) return;
+    setPendingMedia(null);
+    try {
+      await sendMedia(p.data, p.name, p.mime, pendingVO);
+    } finally {
+      URL.revokeObjectURL(p.url);
+    }
+  }
+  function cancelPendingMedia() {
+    if (pendingMedia) URL.revokeObjectURL(pendingMedia.url);
+    setPendingMedia(null);
   }
 
   /** Turn a cropped square into a stored, reusable sticker. */
@@ -3615,6 +3655,38 @@ export function Messenger({ dek, onLock }: Props) {
   // Full-screen image viewer (avatars, later chat images). Tap anywhere closes.
   const lightbox = zoomImg ? <LightboxImg blob={zoomImg} onClose={() => setZoomImg(null)} /> : null;
   const viewOnceEl = viewOnce ? <ViewOnceViewer blob={viewOnce} onClose={() => setViewOnce(null)} /> : null;
+  const mediaPreviewEl = pendingMedia ? (
+    <div className="crop-modal vo-preview" role="dialog" aria-label={t('Senden')}>
+      <div className="crop-head">{pendingMedia.isVideo ? t('Video senden') : t('Foto senden')}</div>
+      <div className="vo-preview-stage">
+        {pendingMedia.isVideo ? (
+          <video className="vo-preview-media" src={pendingMedia.url} controls playsInline />
+        ) : (
+          <img className="vo-preview-media" src={pendingMedia.url} alt="" />
+        )}
+      </div>
+      {/* View-once is only offered when the media fits the self-destruct path (≤ ~2 MB). */}
+      {pendingMedia.data.length <= AUTOPUSH_CAP && (
+        <label className="vo-toggle">
+          <span className="vo-toggle-tx">
+            <span className="vo-toggle-title">
+              <IconEyeOff size={15} /> {t('Einmal ansehen')}
+            </span>
+            <span className="vo-toggle-sub">{t('Löscht sich nach dem Öffnen')}</span>
+          </span>
+          <input type="checkbox" checked={pendingVO} onChange={(e) => setPendingVO(e.target.checked)} />
+        </label>
+      )}
+      <div className="crop-actions">
+        <button className="btn btn-ghost" onClick={cancelPendingMedia}>
+          {t('Abbrechen')}
+        </button>
+        <button className="btn btn-primary" onClick={() => void confirmPendingMedia()}>
+          {t('Senden')}
+        </button>
+      </div>
+    </div>
+  ) : null;
 
   // Long-press action popover, floating next to the pressed message.
   const msgMenuEl = msgMenu
@@ -3946,29 +4018,9 @@ export function Messenger({ dek, onLock }: Props) {
           if (f) setStickerFile(f);
         }}
       />
-      <button
-        className="attach-btn"
-        title={t('Anhang')}
-        onClick={() => {
-          setViewOnceMode(false);
-          fileInputRef.current?.click();
-        }}
-      >
+      <button className="attach-btn" title={t('Anhang')} onClick={() => fileInputRef.current?.click()}>
         <IconAttach />
       </button>
-      {!activeGroup && (
-        <button
-          className="attach-btn vo-btn"
-          title={t('Einmal ansehen — Foto löscht sich nach dem Öffnen')}
-          aria-label={t('Einmal-Foto senden')}
-          onClick={() => {
-            setViewOnceMode(true);
-            fileInputRef.current?.click();
-          }}
-        >
-          <IconEyeOff />
-        </button>
-      )}
       <button
         className={`attach-btn${stickerPanel ? ' active' : ''}`}
         title={t('Sticker')}
@@ -4315,6 +4367,7 @@ export function Messenger({ dek, onLock }: Props) {
         {forwardEl}
         {lightbox}
         {viewOnceEl}
+        {mediaPreviewEl}
         {stickerViewEl}
       </div>
     );
@@ -4729,6 +4782,7 @@ export function Messenger({ dek, onLock }: Props) {
         </div>
         {lightbox}
         {viewOnceEl}
+        {mediaPreviewEl}
         {stickerViewEl}
       </div>
     );

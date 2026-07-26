@@ -1,6 +1,6 @@
 # Security & Threat Model
 
-SCYTALE is built against **suspicionless mass surveillance** (the EU "Chatkontrolle" /
+SKYTALE is built against **suspicionless mass surveillance** (the EU "Chatkontrolle" /
 CSAR proposal). This document is the precise breakdown of every mechanism and states
 honestly what is protected — and what is not. Status: current `main` — on top of Stage
 3d multi-device (fan-out, per-device sessions, self-sync) and link initial-sync, it adds
@@ -343,7 +343,7 @@ Asynchronous Signal handshake (the recipient need not be online):
 ```
 DH1 = DH(IK_A, SPK_B)   DH2 = DH(EK_A, IK_B)
 DH3 = DH(EK_A, SPK_B)   DH4 = DH(EK_A, OPK_B)   ← one-time prekey (forward secrecy)
-SK  = HKDF-SHA256( 0xFF·32 || DH1||DH2||DH3||DH4 ,  info="SCYTALE_X3DH_v1" )
+SK  = HKDF-SHA256( 0xFF·32 || DH1||DH2||DH3||DH4 ,  info="SKYTALE_X3DH_v1" )
 ```
 - **The signed-prekey signature is checked** — a server-substituted key aborts (MITM protection).
 - **Associated data = IK_A ‖ IK_B** bound into the first AEAD → both identities authenticated.
@@ -352,7 +352,7 @@ SK  = HKDF-SHA256( 0xFF·32 || DH1||DH2||DH3||DH4 ,  info="SCYTALE_X3DH_v1" )
 
 ### One-time prekeys: deliberately NOT in the shared code
 
-X3DH's one-time prekey only works if a server hands out each OPK **exactly once** and deletes it. SCYTALE
+X3DH's one-time prekey only works if a server hands out each OPK **exactly once** and deletes it. SKYTALE
 has no prekey server — the code is generated once and **broadcast** (QR, link, group roster). Every
 recipient would get the same OPK.
 
@@ -516,7 +516,7 @@ both arrive.
   > stable per-device token — bound to the inbox room. So Cloudflare's DO storage holds **{inbox ↔ device push
   > token}**: a subpoena **to Cloudflare alone** yields that binding, and turning `endpoint → device/account`
   > then requires Apple/Google. Separately, the VAPID `sub` (the app's own domain) tells the **push provider**
-  > "this device uses SCYTALE" plus delivery timing. This is the price of background wake-ups; users who want no
+  > "this device uses SKYTALE" plus delivery timing. This is the price of background wake-ups; users who want no
   > such binding can simply leave push off (the app still receives on next open). A future hardening is to store
   > the endpoint hashed/encrypted at the relay.
 

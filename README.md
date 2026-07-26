@@ -1,4 +1,4 @@
-# SCYTALE
+# SKYTALE
 
 An end-to-end-encrypted messenger, delivered as an installable **PWA**, built
 against **suspicionless mass surveillance** (the EU "Chat Control" / CSAR

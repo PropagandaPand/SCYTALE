@@ -3405,9 +3405,9 @@ export function Messenger({ dek, onLock }: Props) {
   // where a link only ever opens Safari, pastes it via "Aus Zwischenablage".
   function contactShareText(): string {
     return (
-      'Verbinde dich mit mir auf SCYTALE 🔐\n\n' +
+      'Verbinde dich mit mir auf SKYTALE 🔐\n\n' +
       shareLink +
-      '\n\nFalls sich nur der Browser öffnet: In SCYTALE auf „Verbinden“ → „Aus Zwischenablage verbinden“.'
+      '\n\nFalls sich nur der Browser öffnet: In SKYTALE auf „Verbinden“ → „Aus Zwischenablage verbinden“.'
     );
   }
 
@@ -3948,7 +3948,7 @@ export function Messenger({ dek, onLock }: Props) {
                 )}
                 <div>
                   <div className="t">
-                    SCYTALE <span className="ver">v{__APP_VERSION__}</span>
+                    SKYTALE <span className="ver">v{__APP_VERSION__}</span>
                   </div>
                   <div className="fp">{shortFp(fingerprint)}</div>
                 </div>

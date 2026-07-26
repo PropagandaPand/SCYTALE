@@ -243,8 +243,8 @@ export function App() {
   return (
     <>
       <div className="lock">
-        <img className="lock-logo" src="/scytale-icon.svg" alt="SCYTALE" />
-        <div className="lock-brand">SCYTALE</div>
+        <img className="lock-logo" src="/scytale-icon.svg" alt="SKYTALE" />
+        <div className="lock-brand">SKYTALE</div>
         <p className="lock-sub">{t('Ende-zu-Ende verschlüsselt · client-side')}</p>
 
         {showForm && (

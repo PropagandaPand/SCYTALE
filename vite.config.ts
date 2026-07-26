@@ -32,8 +32,8 @@ export default defineConfig({
       registerType: 'prompt',
       injectRegister: null,
       manifest: {
-        name: 'SCYTALE',
-        short_name: 'SCYTALE',
+        name: 'SKYTALE',
+        short_name: 'SKYTALE',
         description: 'Ende-zu-Ende verschlüsselter Messenger.',
         theme_color: '#0b0c0e',
         background_color: '#0b0c0e',

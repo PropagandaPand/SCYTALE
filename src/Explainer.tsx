@@ -1,5 +1,5 @@
 /**
- * In-app, jargon-free explainer of what SCYTALE protects and how — reachable from
+ * In-app, jargon-free explainer of what SKYTALE protects and how — reachable from
  * Profile → "So funktioniert der Schutz". Aimed at a non-technical reader: no
  * "hash / Argon2id / Double Ratchet" wording, every idea carried by a metaphor and
  * something the reader can poke at. Six short steps, each with its own little
@@ -99,7 +99,7 @@ function StepIntro() {
       <div className="xpl-hero">
         <IconShield size={44} filled />
       </div>
-      <h2 className="xpl-title">So schützt dich SCYTALE</h2>
+      <h2 className="xpl-title">So schützt dich SKYTALE</h2>
       <p className="xpl-lead">
         In fünf kurzen Schritten — ohne Fachbegriffe. Du musst uns nicht blind
         vertrauen: Probier bei jedem Schritt selbst aus, was passiert.
@@ -357,7 +357,7 @@ function StepVerify() {
       )}
 
       <p className="xpl-note">
-        Das machst du in SCYTALE bei jedem Kontakt über <b>Verifizieren</b>. Danach
+        Das machst du in SKYTALE bei jedem Kontakt über <b>Verifizieren</b>. Danach
         weißt du sicher: die Leitung gehört wirklich euch beiden.
       </p>
     </div>

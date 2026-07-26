@@ -1,6 +1,6 @@
 # Changelog
 
-Alle nennenswerten Änderungen an SCYTALE. Format nach
+Alle nennenswerten Änderungen an SKYTALE. Format nach
 [Keep a Changelog](https://keepachangelog.com/de/1.1.0/),
 Versionierung nach [SemVer](https://semver.org/lang/de/).
 
@@ -51,7 +51,7 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ### Feature: Versionsanzeige im Header
 
-- Neben „SCYTALE" wird die **SemVer-Version** (`v0.9.0`) angezeigt, zur
+- Neben „SKYTALE" wird die **SemVer-Version** (`v0.9.0`) angezeigt, zur
   Build-Zeit aus `package.json` eingebacken. So sieht man pro Gerät sofort, ob
   der Service Worker die neueste Version geladen hat — gleiche Nummer = gleicher
   Stand.
@@ -244,7 +244,7 @@ Jetzt reicht es, wenn eine Person den Code der anderen hat.
 ### App-Icon: SVG + optimierte Install-Icons
 
 #### Hinzugefügt
-- **`scytale-icon.svg`** — flache Vektor-Version des Logos (Teal-Scytale-
+- **`scytale-icon.svg`** — flache Vektor-Version des Logos (Teal-Skytale-
   Silhouette per potrace getraced, Verlauf, 4,7 KB). Genutzt als Favicon und
   In-App-Logo (gestochen scharf, skaliert unendlich).
 
@@ -314,7 +314,7 @@ AZIS-Projekt.
 
 ### Krypto-Härtung: Device-Binding + Lockout + Self-Test
 
-Inspiriert von der At-Rest-Krypto des AZIS-Projekts, neu in SCYTALEs Architektur.
+Inspiriert von der At-Rest-Krypto des AZIS-Projekts, neu in SKYTALEs Architektur.
 
 #### Hinzugefügt
 - **Device-Binding**: ein **non-extractable** AES-256-GCM-Gerätekey (IndexedDB)
@@ -339,7 +339,7 @@ Inspiriert von der At-Rest-Krypto des AZIS-Projekts, neu in SCYTALEs Architektur
 - **Deep-Link** `…/#add=<token>`: ein Tap öffnet die App und importiert den
   Kontakt automatisch (Fragment wird nach dem Import aus der URL entfernt).
 - **QR-Code** des Kontakt-Links (`qrcode`, lazy-geladen, als `data:`-Bild) —
-  das Gegenüber scannt mit der normalen Handy-Kamera; SCYTALE braucht dafür
+  das Gegenüber scannt mit der normalen Handy-Kamera; SKYTALE braucht dafür
   keine Kamera-Berechtigung.
 - „Kontakt hinzufügen" akzeptiert jetzt **Link *oder* rohes Token**.
 

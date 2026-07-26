@@ -44,11 +44,11 @@ export async function createBiometricCredential(): Promise<{
   const opts = {
     publicKey: {
       challenge: crypto.getRandomValues(new Uint8Array(32)),
-      rp: { name: 'SCYTALE' }, // rp.id defaults to this exact origin
+      rp: { name: 'SKYTALE' }, // rp.id defaults to this exact origin
       user: {
         id: crypto.getRandomValues(new Uint8Array(16)),
-        name: 'SCYTALE',
-        displayName: 'SCYTALE',
+        name: 'SKYTALE',
+        displayName: 'SKYTALE',
       },
       pubKeyCredParams: [
         { type: 'public-key', alg: -7 }, // ES256

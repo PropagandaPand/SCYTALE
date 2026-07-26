@@ -147,7 +147,7 @@ sw.addEventListener('fetch', (event) => {
 // iOS revokes push permission if a push event doesn't end in showNotification
 // (no silent push allowed), so we ALWAYS show one — never bail out early. The
 // server only pushes when the owner isn't connected, so notify-while-open is
-// rare. Title omits "SCYTALE" (iOS already shows the app name as the source).
+// rare. Title omits "SKYTALE" (iOS already shows the app name as the source).
 // Content-free by design — no sender, no text.
 sw.addEventListener('push', (event) => {
   event.waitUntil(

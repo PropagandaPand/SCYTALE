@@ -216,7 +216,7 @@ export async function exportBackup(dek: CryptoKey, exportPassphrase: string): Pr
   return new Blob([prefix, headerBytes, ...bodyParts], { type: 'application/octet-stream' });
 }
 
-const CORRUPT = 'Beschädigtes Backup — die Datei ist unvollständig oder kein SCYTALE-Backup.';
+const CORRUPT = 'Beschädigtes Backup — die Datei ist unvollständig oder kein SKYTALE-Backup.';
 const WRONG_PASS = 'Falsche Export-Passphrase oder beschädigtes Backup.';
 
 async function sliceBytes(file: Blob, start: number, end: number): Promise<Bytes> {

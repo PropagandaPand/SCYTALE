@@ -3339,3 +3339,49 @@ select {
   color: var(--accent);
   font-weight: 600;
 }
+
+/* ── Unsupported-environment screen (in-app preview browsers) ─────────────── */
+.unsupported {
+  max-width: 340px;
+  margin: 18px auto 0;
+  text-align: center;
+}
+.unsupported-h {
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.25;
+  margin: 0 0 10px;
+}
+.unsupported-p {
+  color: var(--muted);
+  font-size: 14.5px;
+  line-height: 1.5;
+  margin: 0 0 16px;
+}
+.unsupported-steps {
+  text-align: left;
+  margin: 0 0 18px;
+  padding: 14px 16px 14px 34px;
+  border-radius: var(--r-md);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 14.5px;
+  line-height: 1.5;
+}
+.unsupported-steps li {
+  margin: 4px 0;
+}
+.unsupported-steps li::marker {
+  color: var(--accent);
+  font-weight: 700;
+}
+.unsupported .btn-primary {
+  width: 100%;
+}
+.unsupported-foot {
+  color: var(--faint);
+  font-size: 12.5px;
+  line-height: 1.5;
+  margin: 16px 0 0;
+}

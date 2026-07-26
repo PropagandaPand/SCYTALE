@@ -12,12 +12,13 @@ import {
   biometricEnrolled,
 } from './lib/vaultService';
 import { cryptoSelfTest } from './lib/selftest';
+import { hasWebCrypto, isInAppBrowser, isInstagram } from './lib/environment';
 import { t, useLang } from './lib/i18n';
 import { Messenger } from './Messenger';
 import { ReloadPrompt } from './ReloadPrompt';
 import { IconLock, IconEye, IconEyeOff } from './icons';
 
-type Phase = 'loading' | 'create' | 'unlock' | 'open';
+type Phase = 'loading' | 'create' | 'unlock' | 'open' | 'unsupported';
 type StatusKind = '' | 'ok' | 'err';
 type LockState = 'idle' | 'busy' | 'deny' | 'locked' | 'unlocking' | 'tamper' | 'fatal';
 
@@ -36,6 +37,7 @@ export function App() {
   const [dek, setDek] = useState<CryptoKey | null>(null);
   const [canBiometric, setCanBiometric] = useState(false); // enrolled AND supported on this device
   const [showPass, setShowPass] = useState(false); // reveal the passphrase via the eye toggle
+  const [copied, setCopied] = useState(false); // "copy link" feedback on the unsupported screen
   const lockTimer = useRef<number | null>(null);
   const autoBioTriedRef = useRef(false); // auto-launch Face ID at most once per unlock-screen entry
 
@@ -46,9 +48,18 @@ export function App() {
 
   useEffect(() => {
     void (async () => {
-      if (!(await cryptoSelfTest())) {
-        setLockState('fatal');
-        say(t('CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.'), 'err');
+      // Distinguish "wrong environment" (an app's embedded preview browser with no
+      // usable WebCrypto — e.g. the Instagram in-app browser) from a genuine crypto
+      // failure. The former gets a friendly "open in your browser" screen instead of
+      // a scary CRYPT ERROR — it's the first thing a tester coming from a link sees.
+      const ok = hasWebCrypto() && (await cryptoSelfTest());
+      if (!ok) {
+        if (!hasWebCrypto() || isInAppBrowser()) {
+          setPhase('unsupported');
+        } else {
+          setLockState('fatal');
+          say(t('CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.'), 'err');
+        }
         return;
       }
       setPhase((await hasVault()) ? 'unlock' : 'create');
@@ -234,6 +245,42 @@ export function App() {
         <Messenger dek={dek} onLock={lock} />
         <ReloadPrompt />
       </>
+    );
+  }
+
+  if (phase === 'unsupported') {
+    const copyLink = () => {
+      void navigator.clipboard
+        ?.writeText(location.href)
+        .then(() => {
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 2200);
+        })
+        .catch(() => undefined);
+    };
+    return (
+      <div className="lock">
+        <img className="lock-logo" src="/scytale-icon.svg" alt="SKYTALE" />
+        <div className="lock-brand">SKYTALE</div>
+        <div className="unsupported">
+          <h2 className="unsupported-h">{t('Fast geschafft — im Browser öffnen')}</h2>
+          <p className="unsupported-p">
+            {isInstagram()
+              ? t('Du bist gerade im In-App-Browser von Instagram. Der kann die Verschlüsselung nicht ausführen.')
+              : t('Du bist gerade im Vorschau-Browser einer App. Der kann die Verschlüsselung nicht ausführen.')}
+          </p>
+          <ol className="unsupported-steps">
+            <li>{t('Tippe oben rechts auf ⋯ (oder ⋮).')}</li>
+            <li>{t('Wähle „Im Browser öffnen“ — Safari, Chrome oder Firefox.')}</li>
+          </ol>
+          <button className="btn btn-primary btn-tall" onClick={copyLink}>
+            {copied ? t('Link kopiert ✓') : t('Link kopieren')}
+          </button>
+          <p className="unsupported-foot">
+            {t('SKYTALE verschlüsselt alles direkt auf deinem Gerät — dafür braucht es einen echten Browser.')}
+          </p>
+        </div>
+      </div>
     );
   }
 

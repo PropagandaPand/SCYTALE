@@ -2,12 +2,20 @@ name = "scytale"
 main = "worker/index.ts"
 compatibility_date = "2025-06-01"
 
+# Custom domain. The zone skytale.chat is in this Cloudflare account (bought on CF),
+# so custom_domain = true makes Cloudflare create the proxied DNS record and the TLS
+# cert automatically on deploy — no manual DNS. The worker keeps its internal name
+# ("scytale") so the existing Durable Object and deploy history stay attached.
+routes = [
+  { pattern = "skytale.chat", custom_domain = true },
+]
+
 # Web Push (VAPID). These are PUBLIC and safe to commit. The matching private
 # key is set separately as the secret VAPID_JWK (never in the repo):
 #   npx wrangler secret put VAPID_JWK
 [vars]
 VAPID_PUBLIC = "BCvQuiivhlyNteecWKop_2Jh-cPdK_V8UeiSwgyt8_yPzbduj6dQf6fAJkqOTaVZXMaIsUCb0l8VLLJV8aVuzAo"
-VAPID_SUBJECT = "https://scytale.illogical.workers.dev"
+VAPID_SUBJECT = "https://skytale.chat"
 
 # Serve the built PWA (dist/) directly from the Worker. Non-asset routes fall
 # through to the Worker's fetch handler (which owns /api/relay).

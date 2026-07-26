@@ -6,6 +6,8 @@
  * animation or interaction. Pure client-side, no data leaves the component.
  */
 import { useState } from 'react';
+import { t } from './lib/i18n';
+import { tb } from './lib/tnodes';
 import {
   IconBack,
   IconChevron,
@@ -82,10 +84,10 @@ export function Explainer({ onClose }: { onClose: () => void }) {
 
       <div className="xpl-nav">
         <button className="btn btn-ghost xpl-back" onClick={prev}>
-          {step === 0 ? 'Später' : 'Zurück'}
+          {step === 0 ? t('Später') : t('Zurück')}
         </button>
         <button className="btn btn-primary xpl-next" onClick={next}>
-          {step === STEPS - 1 ? 'Fertig' : 'Weiter'}
+          {step === STEPS - 1 ? t('Fertig') : t('Weiter')}
           {step < STEPS - 1 && <span className="xpl-next-ic"><IconChevron size={15} /></span>}
         </button>
       </div>
@@ -99,54 +101,51 @@ function StepIntro() {
       <div className="xpl-hero">
         <IconShield size={44} filled />
       </div>
-      <h2 className="xpl-title">So schützt dich SKYTALE</h2>
+      <h2 className="xpl-title">{t('So schützt dich SKYTALE')}</h2>
       <p className="xpl-lead">
-        In fünf kurzen Schritten — ohne Fachbegriffe. Du musst uns nicht blind
-        vertrauen: Probier bei jedem Schritt selbst aus, was passiert.
+        {t('In fünf kurzen Schritten — ohne Fachbegriffe. Du musst uns nicht blind vertrauen: Probier bei jedem Schritt selbst aus, was passiert.')}
       </p>
       <ul className="xpl-chips">
-        <li><IconLock size={13} /> Nur ihr zwei lest mit</li>
-        <li><IconKey size={13} /> Der Schlüssel bleibt bei dir</li>
-        <li><IconShield size={13} /> Selbst wir sehen nichts</li>
+        <li><IconLock size={13} /> {t('Nur ihr zwei lest mit')}</li>
+        <li><IconKey size={13} /> {t('Der Schlüssel bleibt bei dir')}</li>
+        <li><IconShield size={13} /> {t('Selbst wir sehen nichts')}</li>
       </ul>
     </div>
   );
 }
 
 function StepE2E() {
-  const [msg, setMsg] = useState('Treffen wir uns um 8?');
+  const [msg, setMsg] = useState(t('Treffen wir uns um 8?'));
   const cipher = serverGibberish(msg);
   return (
     <div className="xpl-step">
-      <span className="xpl-kicker"><IconLock size={12} /> Ende-zu-Ende</span>
-      <h2 className="xpl-title">Nur ihr zwei könnt mitlesen</h2>
+      <span className="xpl-kicker"><IconLock size={12} /> {t('Ende-zu-Ende')}</span>
+      <h2 className="xpl-title">{t('Nur ihr zwei könnt mitlesen')}</h2>
       <p className="xpl-lead">
-        Deine Nachricht wird schon <b>auf deinem Gerät</b> verschlüsselt — bevor sie
-        losgeschickt wird. Tipp etwas ein und sieh den Unterschied:
+        {tb('Deine Nachricht wird schon **auf deinem Gerät** verschlüsselt — bevor sie losgeschickt wird. Tipp etwas ein und sieh den Unterschied:')}
       </p>
 
-      <label className="xpl-input-lbl">Deine Nachricht</label>
+      <label className="xpl-input-lbl">{t('Deine Nachricht')}</label>
       <input
         className="xpl-input"
         value={msg}
         maxLength={40}
         onChange={(e) => setMsg(e.target.value)}
-        placeholder="Schreib etwas…"
+        placeholder={t('Schreib etwas…')}
       />
 
       <div className="xpl-panel ok">
-        <div className="xpl-panel-h"><IconEye size={13} /> Dein Kontakt liest</div>
+        <div className="xpl-panel-h"><IconEye size={13} /> {t('Dein Kontakt liest')}</div>
         <div className="xpl-bubble">{msg || <span className="xpl-dim">…</span>}</div>
       </div>
 
       <div className="xpl-panel bad">
-        <div className="xpl-panel-h"><IconServer size={13} /> Der Server sieht nur</div>
+        <div className="xpl-panel-h"><IconServer size={13} /> {t('Der Server sieht nur')}</div>
         <div className="xpl-cipher">{cipher || <span className="xpl-dim">…</span>}</div>
       </div>
 
       <p className="xpl-note">
-        Der Server transportiert nur einen <b>versiegelten Umschlag</b>. Er hat keinen
-        Schlüssel — und wir auch nicht.
+        {tb('Der Server transportiert nur einen **versiegelten Umschlag**. Er hat keinen Schlüssel — und wir auch nicht.')}
       </p>
     </div>
   );
@@ -155,42 +154,39 @@ function StepE2E() {
 function StepVault() {
   const [open, setOpen] = useState(false);
   const items = [
-    { label: 'Kontakte', icon: <IconGroup size={16} /> },
-    { label: 'Nachrichten', icon: <IconSend size={15} /> },
-    { label: 'Bilder', icon: <IconCamera size={15} /> },
-    { label: 'Schlüssel', icon: <IconKey size={15} /> },
+    { key: 'k', label: t('Kontakte'), icon: <IconGroup size={16} /> },
+    { key: 'm', label: t('Nachrichten'), icon: <IconSend size={15} /> },
+    { key: 'b', label: t('Bilder'), icon: <IconCamera size={15} /> },
+    { key: 's', label: t('Schlüssel'), icon: <IconKey size={15} /> },
   ];
   return (
     <div className="xpl-step">
-      <span className="xpl-kicker"><IconLock size={12} /> Auf deinem Gerät</span>
-      <h2 className="xpl-title">Alles liegt in einem Tresor</h2>
+      <span className="xpl-kicker"><IconLock size={12} /> {t('Auf deinem Gerät')}</span>
+      <h2 className="xpl-title">{t('Alles liegt in einem Tresor')}</h2>
       <p className="xpl-lead">
-        Aus deinem Passwort entsteht auf dem Gerät ein Schlüssel — den kennen nicht mal
-        wir. Ist der Tresor zu (App gesperrt oder Handy verloren), findet ein Fremder nur
-        Buchstabensalat. Tipp auf den Schalter:
+        {t('Aus deinem Passwort entsteht auf dem Gerät ein Schlüssel — den kennen nicht mal wir. Ist der Tresor zu (App gesperrt oder Handy verloren), findet ein Fremder nur Buchstabensalat. Tipp auf den Schalter:')}
       </p>
 
       <button className={`xpl-vault${open ? ' open' : ''}`} onClick={() => setOpen((v) => !v)}>
         <span className="xpl-vault-ic">{open ? <IconKey size={20} /> : <IconLock size={20} />}</span>
         <span className="xpl-vault-tx">
-          <span className="xpl-vault-t1">{open ? 'Tresor offen' : 'Tresor gesperrt'}</span>
-          <span className="xpl-vault-t2">{open ? 'Tippen zum Sperren' : 'Tippen zum Öffnen'}</span>
+          <span className="xpl-vault-t1">{open ? t('Tresor offen') : t('Tresor gesperrt')}</span>
+          <span className="xpl-vault-t2">{open ? t('Tippen zum Sperren') : t('Tippen zum Öffnen')}</span>
         </span>
         <span className={`switch${open ? ' on' : ''}`}><span className="knob" /></span>
       </button>
 
       <div className="xpl-grid">
         {items.map((it, i) => (
-          <div className={`xpl-tile${open ? ' open' : ''}`} key={it.label} style={{ transitionDelay: `${i * 55}ms` }}>
+          <div className={`xpl-tile${open ? ' open' : ''}`} key={it.key} style={{ transitionDelay: `${i * 55}ms` }}>
             <span className="xpl-tile-ic">{open ? it.icon : <IconLock size={13} />}</span>
-            <span className="xpl-tile-tx">{open ? it.label : serverGibberish(it.label + it.label).slice(0, 9)}</span>
+            <span className="xpl-tile-tx">{open ? it.label : serverGibberish(it.key + it.label).slice(0, 9)}</span>
           </div>
         ))}
       </div>
 
       <p className="xpl-note">
-        Und Raten hilft kaum: jeder Rateversuch wird <b>absichtlich langsam</b> gemacht —
-        Millionen pro Sekunde durchprobieren ist unmöglich.
+        {tb('Und Raten hilft kaum: jeder Rateversuch wird **absichtlich langsam** gemacht — Millionen pro Sekunde durchprobieren ist unmöglich.')}
       </p>
     </div>
   );
@@ -247,68 +243,59 @@ function StepRatchet() {
   const [sent, setSent] = useState(0);
   return (
     <div className="xpl-step">
-      <span className="xpl-kicker"><IconKey size={12} /> Frische Schlüssel</span>
-      <h2 className="xpl-title">Für jede Nachricht ein neuer Schlüssel</h2>
+      <span className="xpl-kicker"><IconKey size={12} /> {t('Frische Schlüssel')}</span>
+      <h2 className="xpl-title">{t('Für jede Nachricht ein neuer Schlüssel')}</h2>
       <p className="xpl-lead">
-        Du und dein Kontakt seid wie die zwei Stränge einer DNA. Jede Sprosse dazwischen
-        ist ein Schlüssel für genau <b>eine</b> Nachricht. Tipp auf „senden“: der aktuelle
-        Schlüssel wird benutzt, <b>erlischt</b> und die Kette rückt eine Sprosse weiter.
+        {tb('Du und dein Kontakt seid wie die zwei Stränge einer DNA. Jede Sprosse dazwischen ist ein Schlüssel für genau **eine** Nachricht. Tipp auf „senden“: der aktuelle Schlüssel wird benutzt, **erlischt** und die Kette rückt eine Sprosse weiter.')}
       </p>
 
       <div className="xpl-helix" aria-hidden="true">
         <DnaHelix sent={sent} />
         <span className="xpl-helix-badge" key={sent}>
-          <IconKey size={14} /> Schlüssel #{sent + 1}
+          <IconKey size={14} /> {t('Schlüssel #{n}', { n: sent + 1 })}
         </span>
       </div>
 
       <button className="btn btn-ghost xpl-send" onClick={() => setSent((s) => s + 1)}>
-        <IconDoubleCheck size={13} /> Nächste Nachricht senden
+        <IconDoubleCheck size={13} /> {t('Nächste Nachricht senden')}
       </button>
 
       <p className="xpl-note">
-        Erloschene Schlüssel sind für immer weg — deshalb bleiben alte Nachrichten sicher,
-        selbst wenn später einer gestohlen wird. Und zurück zu einem alten führt kein Weg.
-        {sent > 0 && (
-          <>
-            {' '}Schon <b>{sent}</b> abgefahren und erloschen.
-          </>
-        )}
+        {t('Erloschene Schlüssel sind für immer weg — deshalb bleiben alte Nachrichten sicher, selbst wenn später einer gestohlen wird. Und zurück zu einem alten führt kein Weg.')}
+        {sent > 0 && <>{' '}{tb('Schon **{n}** abgefahren und erloschen.', { n: sent })}</>}
       </p>
     </div>
   );
 }
 
 function StepMetadata() {
-  const sees = ['dass überhaupt etwas ankam', 'wann das war', 'ungefähr wie groß'];
-  const blind = ['wer geschrieben hat', 'was drinsteht', 'an wen es ging'];
+  const sees = [t('dass überhaupt etwas ankam'), t('wann das war'), t('ungefähr wie groß')];
+  const blind = [t('wer geschrieben hat'), t('was drinsteht'), t('an wen es ging')];
   return (
     <div className="xpl-step">
-      <span className="xpl-kicker"><IconServer size={12} /> Ehrlich bleiben</span>
-      <h2 className="xpl-title">Was der Server sieht — und was nicht</h2>
+      <span className="xpl-kicker"><IconServer size={12} /> {t('Ehrlich bleiben')}</span>
+      <h2 className="xpl-title">{t('Was der Server sieht — und was nicht')}</h2>
       <p className="xpl-lead">
-        Wir versprechen nichts Unmögliches. Dass <i>überhaupt</i> Nachrichten fließen,
-        lässt sich nicht ganz verstecken — Inhalt und Absender aber schon.
+        {t('Wir versprechen nichts Unmögliches. Dass überhaupt Nachrichten fließen, lässt sich nicht ganz verstecken — Inhalt und Absender aber schon.')}
       </p>
 
       <div className="xpl-cols">
         <div className="xpl-col bad">
-          <div className="xpl-col-h"><IconEye size={13} /> Sieht</div>
-          {sees.map((t, i) => (
-            <div className="xpl-li" key={t} style={{ animationDelay: `${120 + i * 90}ms` }}>{t}</div>
+          <div className="xpl-col-h"><IconEye size={13} /> {t('Sieht')}</div>
+          {sees.map((line, i) => (
+            <div className="xpl-li" key={line} style={{ animationDelay: `${120 + i * 90}ms` }}>{line}</div>
           ))}
         </div>
         <div className="xpl-col ok">
-          <div className="xpl-col-h"><IconShield size={13} /> Sieht nicht</div>
-          {blind.map((t, i) => (
-            <div className="xpl-li" key={t} style={{ animationDelay: `${300 + i * 90}ms` }}>{t}</div>
+          <div className="xpl-col-h"><IconShield size={13} /> {t('Sieht nicht')}</div>
+          {blind.map((line, i) => (
+            <div className="xpl-li" key={line} style={{ animationDelay: `${300 + i * 90}ms` }}>{line}</div>
           ))}
         </div>
       </div>
 
       <p className="xpl-note">
-        Der Absender ist <b>versiegelt</b>: Selbst wir sehen nicht, wer dir schreibt —
-        nur, dass dein Briefkasten ein Päckchen bekommen hat.
+        {tb('Der Absender ist **versiegelt**: Selbst wir sehen nicht, wer dir schreibt — nur, dass dein Briefkasten ein Päckchen bekommen hat.')}
       </p>
     </div>
   );
@@ -319,16 +306,15 @@ function StepVerify() {
   const code = ['48', '32', '90', '15'];
   return (
     <div className="xpl-step xpl-center">
-      <span className="xpl-kicker"><IconShield size={12} /> Sicher sein</span>
-      <h2 className="xpl-title">Ist es wirklich dein Kontakt?</h2>
+      <span className="xpl-kicker"><IconShield size={12} /> {t('Sicher sein')}</span>
+      <h2 className="xpl-title">{t('Ist es wirklich dein Kontakt?')}</h2>
       <p className="xpl-lead">
-        Einmal kurz eine kleine Zahl vergleichen (oder Emojis) — dann kann sich
-        niemand heimlich dazwischenschummeln. Tipp auf „Vergleichen“:
+        {t('Einmal kurz eine kleine Zahl vergleichen (oder Emojis) — dann kann sich niemand heimlich dazwischenschummeln. Tipp auf „Vergleichen“:')}
       </p>
 
       <div className="xpl-devs">
         <div className="xpl-dev">
-          <div className="xpl-dev-lbl">Du</div>
+          <div className="xpl-dev-lbl">{t('Du')}</div>
           <div className={`xpl-code${matched ? ' match' : ''}`}>
             {code.map((c, i) => (
               <span key={i} style={{ transitionDelay: `${i * 70}ms` }}>{matched ? c : '••'}</span>
@@ -339,7 +325,7 @@ function StepVerify() {
           {matched ? <IconShield size={18} filled /> : <IconLock size={16} />}
         </div>
         <div className="xpl-dev">
-          <div className="xpl-dev-lbl">Kontakt</div>
+          <div className="xpl-dev-lbl">{t('Kontakt')}</div>
           <div className={`xpl-code${matched ? ' match' : ''}`}>
             {code.map((c, i) => (
               <span key={i} style={{ transitionDelay: `${i * 70}ms` }}>{matched ? c : '••'}</span>
@@ -349,16 +335,15 @@ function StepVerify() {
       </div>
 
       {matched ? (
-        <div className="xpl-verified"><IconDoubleCheck size={14} /> Stimmt überein — verifiziert</div>
+        <div className="xpl-verified"><IconDoubleCheck size={14} /> {t('Stimmt überein — verifiziert')}</div>
       ) : (
         <button className="btn btn-ghost xpl-compare" onClick={() => setMatched(true)}>
-          Vergleichen
+          {t('Vergleichen')}
         </button>
       )}
 
       <p className="xpl-note">
-        Das machst du in SKYTALE bei jedem Kontakt über <b>Verifizieren</b>. Danach
-        weißt du sicher: die Leitung gehört wirklich euch beiden.
+        {tb('Das machst du in SKYTALE bei jedem Kontakt über **Verifizieren**. Danach weißt du sicher: die Leitung gehört wirklich euch beiden.')}
       </p>
     </div>
   );

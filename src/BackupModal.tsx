@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { exportBackup, importBackup } from './lib/backup';
 import { unlockBoundVault } from './lib/vaultService';
+import { t } from './lib/i18n';
+import { tb } from './lib/tnodes';
 
 /**
  * Encrypted recovery backup — export/import. SECURITY: export requires a SECOND
@@ -28,8 +30,8 @@ export function BackupModal({
 
   async function doExport() {
     setErr('');
-    if (exportPass.length < 8) return setErr('Export-Passphrase: mindestens 8 Zeichen.');
-    if (exportPass !== exportPass2) return setErr('Export-Passphrasen stimmen nicht überein.');
+    if (exportPass.length < 8) return setErr(t('Export-Passphrase: mindestens 8 Zeichen.'));
+    if (exportPass !== exportPass2) return setErr(t('Export-Passphrasen stimmen nicht überein.'));
     setBusy(true);
     try {
       // Second auth: an unlocked vault is not enough — prove the passphrase now.
@@ -43,9 +45,9 @@ export function BackupModal({
       a.click();
       a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 2000);
-      setDone('Backup exportiert. Bewahre die Datei UND die Export-Passphrase getrennt und sicher auf.');
+      setDone(t('Backup exportiert. Bewahre die Datei UND die Export-Passphrase getrennt und sicher auf.'));
     } catch (e) {
-      setErr(e instanceof Error ? e.message : 'Export fehlgeschlagen.');
+      setErr(e instanceof Error ? e.message : t('Export fehlgeschlagen.'));
     } finally {
       setBusy(false);
     }
@@ -53,7 +55,7 @@ export function BackupModal({
 
   async function doImport() {
     setErr('');
-    if (!file) return setErr('Bitte eine Backup-Datei wählen.');
+    if (!file) return setErr(t('Bitte eine Backup-Datei wählen.'));
     setBusy(true);
     try {
       // Pass the File itself: importBackup reads it section by section, so a large
@@ -61,59 +63,55 @@ export function BackupModal({
       const failed = await importBackup(dek, exportPass, file);
       setDone(
         failed > 0
-          ? `Wiederhergestellt. ${failed} Anhang/Anhänge waren beschädigt und fehlen. Die App lädt gleich neu…`
-          : 'Wiederhergestellt. Die App lädt gleich neu…',
+          ? t('Wiederhergestellt. {n} Anhang/Anhänge waren beschädigt und fehlen. Die App lädt gleich neu…', { n: failed })
+          : t('Wiederhergestellt. Die App lädt gleich neu…'),
       );
       setTimeout(() => location.reload(), 1600);
     } catch (e) {
-      setErr(e instanceof Error ? e.message : 'Import fehlgeschlagen.');
+      setErr(e instanceof Error ? e.message : t('Import fehlgeschlagen.'));
       setBusy(false);
     }
   }
 
   return (
     <div className="crop-modal" role="dialog" aria-label="Backup">
-      <div className="crop-head">{mode === 'export' ? 'Backup exportieren' : 'Backup wiederherstellen'}</div>
+      <div className="crop-head">{mode === 'export' ? t('Backup exportieren') : t('Backup wiederherstellen')}</div>
       <div className="backup-body">
         {mode === 'export' ? (
           <>
             <p className="backup-warn">
-              ⚠ Ein Backup enthält deine <b>Identität und Schlüssel</b>. Es verlässt bewusst die Geräte-Bindung —
-              bewahre Datei und Passphrase <b>getrennt</b> und sicher auf.
+              ⚠ {tb('Ein Backup enthält deine **Identität und Schlüssel**. Es verlässt bewusst die Geräte-Bindung — bewahre Datei und Passphrase **getrennt** und sicher auf.')}
             </p>
             <p className="backup-warn">
-              Nach dem Wiederherstellen auf einem anderen Gerät: <b>dieses hier nicht weiterbenutzen</b>. Von
-              beiden Geräten an denselben Kontakt zu senden zerlegt eure Chats (gemeinsamer Ratchet-Stand) —
-              echtes Parallel-Multi-Device kommt erst mit Stufe 3.
+              {tb('Nach dem Wiederherstellen auf einem anderen Gerät: **dieses hier nicht weiterbenutzen**. Von beiden Geräten an denselben Kontakt zu senden zerlegt eure Chats (gemeinsamer Ratchet-Stand) — echtes Parallel-Multi-Device kommt erst mit Stufe 3.')}
             </p>
             <label className="backup-field">
-              <span>Tresor-Passphrase (zur Bestätigung)</span>
+              <span>{t('Tresor-Passphrase (zur Bestätigung)')}</span>
               <input type="password" value={vaultPass} autoComplete="off" onChange={(e) => setVaultPass(e.target.value)} />
             </label>
             <label className="backup-field">
-              <span>Neue Export-Passphrase (mind. 8)</span>
+              <span>{t('Neue Export-Passphrase (mind. 8)')}</span>
               <input type="password" value={exportPass} autoComplete="new-password" onChange={(e) => setExportPass(e.target.value)} />
             </label>
             <label className="backup-field">
-              <span>Export-Passphrase wiederholen</span>
+              <span>{t('Export-Passphrase wiederholen')}</span>
               <input type="password" value={exportPass2} autoComplete="new-password" onChange={(e) => setExportPass2(e.target.value)} />
             </label>
           </>
         ) : (
           <>
             <p className="backup-warn">
-              Wiederherstellen <b>überschreibt</b> die Identität und alle Daten auf diesem Gerät.
+              {tb('Wiederherstellen **überschreibt** die Identität und alle Daten auf diesem Gerät.')}
             </p>
             <p className="backup-warn">
-              Ein <b>älteres</b> Backup kann bestehende Sessions unbrauchbar machen (zurückgesetzte Zähler → der
-              Empfänger lehnt sie ab). Betroffene Kontakte müssen dann per Code <b>neu verbunden</b> werden.
+              {tb('Ein **älteres** Backup kann bestehende Sessions unbrauchbar machen (zurückgesetzte Zähler → der Empfänger lehnt sie ab). Betroffene Kontakte müssen dann per Code **neu verbunden** werden.')}
             </p>
             <label className="backup-field">
-              <span>Backup-Datei</span>
+              <span>{t('Backup-Datei')}</span>
               <input type="file" accept=".scytale,application/octet-stream" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
             </label>
             <label className="backup-field">
-              <span>Export-Passphrase</span>
+              <span>{t('Export-Passphrase')}</span>
               <input type="password" value={exportPass} autoComplete="off" onChange={(e) => setExportPass(e.target.value)} />
             </label>
           </>
@@ -123,10 +121,10 @@ export function BackupModal({
       </div>
       <div className="crop-actions">
         <button className="btn btn-ghost" onClick={onClose} disabled={busy}>
-          {done && mode === 'export' ? 'Fertig' : 'Abbrechen'}
+          {done && mode === 'export' ? t('Fertig') : t('Abbrechen')}
         </button>
         <button className="btn btn-primary" disabled={busy || !!done} onClick={() => void (mode === 'export' ? doExport() : doImport())}>
-          {busy ? '…' : mode === 'export' ? 'Exportieren' : 'Wiederherstellen'}
+          {busy ? '…' : mode === 'export' ? t('Exportieren') : t('Wiederherstellen')}
         </button>
       </div>
     </div>

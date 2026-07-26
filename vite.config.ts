@@ -24,12 +24,14 @@ function buildHash(): string {
   }
 }
 
-const APP_VERSION = `${pkg.version}+${buildHash()}`;
-
+// __APP_VERSION__ is the clean semver shown in the UI chip. __BUILD_HASH__ is the git
+// short hash — kept OUT of the UI, surfaced only in bug-report diagnostics so a report
+// still maps to an exact commit.
 // https://vite.dev/config/
 export default defineConfig({
   define: {
-    __APP_VERSION__: JSON.stringify(APP_VERSION),
+    __APP_VERSION__: JSON.stringify(pkg.version),
+    __BUILD_HASH__: JSON.stringify(buildHash()),
   },
   plugins: [
     react(),

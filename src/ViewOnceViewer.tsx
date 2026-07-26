@@ -19,9 +19,23 @@ export function ViewOnceViewer({ blob, onClose }: { blob: Blob; onClose: () => v
   const [url, setUrl] = useState('');
   const [held, setHeld] = useState(false);
   const [destroying, setDestroying] = useState(false);
-  const imgRef = useRef<HTMLImageElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const imgRef = useRef<HTMLImageElement>(null); // hidden decode source (never shown → not saveable)
+  const dispRef = useRef<HTMLCanvasElement>(null); // the VISIBLE image, drawn on a canvas
+  const canvasRef = useRef<HTMLCanvasElement>(null); // the disintegration overlay
   const doneRef = useRef(false);
+
+  // Draw the photo onto a canvas rather than an <img>: a canvas offers no "Save Image"
+  // long-press menu, so a view-once photo can't be trivially saved to the camera roll.
+  function drawDisplay() {
+    const img = imgRef.current;
+    const c = dispRef.current;
+    if (!img || !c || !img.naturalWidth) return;
+    const cap = 1600;
+    const s = Math.min(1, cap / Math.max(img.naturalWidth, img.naturalHeight));
+    c.width = Math.max(1, Math.round(img.naturalWidth * s));
+    c.height = Math.max(1, Math.round(img.naturalHeight * s));
+    c.getContext('2d')?.drawImage(img, 0, 0, c.width, c.height);
+  }
 
   useEffect(() => {
     const u = URL.createObjectURL(blob);
@@ -79,7 +93,18 @@ export function ViewOnceViewer({ blob, onClose }: { blob: Blob; onClose: () => v
         onPointerLeave={() => setHeld(false)}
         onContextMenu={(e) => e.preventDefault()}
       >
-        {url && <img ref={imgRef} className="vo-img" src={url} alt="" draggable={false} crossOrigin="anonymous" />}
+        <canvas ref={dispRef} className="vo-img" />
+        {url && (
+          <img
+            ref={imgRef}
+            src={url}
+            alt=""
+            draggable={false}
+            crossOrigin="anonymous"
+            style={{ display: 'none' }}
+            onLoad={drawDisplay}
+          />
+        )}
         {!held && !destroying && (
           <div className="vo-cover">
             <IconBomb size={34} />
@@ -98,8 +123,9 @@ export function ViewOnceViewer({ blob, onClose }: { blob: Blob; onClose: () => v
 }
 
 /**
- * Slice the displayed image into a grid of tiles and blow them apart as glowing embers:
- * each tile rises, drifts, spins, scales down and fades. Runs ~1.1 s, then calls onDone.
+ * Cinematic burn: an organic noise front eats the photo away (destination-out through a
+ * moving threshold mask), the burning edge glows orange, and glowing ash rises off it
+ * with additive light. No chunky tiles. Runs ~1.5 s, then calls onDone.
  */
 function runDisintegrate(img: HTMLImageElement, canvas: HTMLCanvasElement, onDone: () => void) {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -120,62 +146,159 @@ function runDisintegrate(img: HTMLImageElement, canvas: HTMLCanvasElement, onDon
   const ox = (vw - iw) / 2;
   const oy = (vh - ih) / 2;
 
-  const cols = Math.max(10, Math.min(26, Math.round(iw / 26)));
-  const tw = iw / cols;
-  const rows = Math.max(1, Math.round(ih / tw));
-  const th = ih / rows;
-  const sTileW = img.naturalWidth / cols;
-  const sTileH = img.naturalHeight / rows;
+  // Sample the image's actual colours (same-origin blob → not tainted) for the ash.
+  const nat = document.createElement('canvas');
+  nat.width = img.naturalWidth;
+  nat.height = img.naturalHeight;
+  const nctx = nat.getContext('2d');
+  let pix: Uint8ClampedArray | null = null;
+  if (nctx) {
+    nctx.drawImage(img, 0, 0);
+    try {
+      pix = nctx.getImageData(0, 0, nat.width, nat.height).data;
+    } catch {
+      pix = null;
+    }
+  }
 
-  type P = { sx: number; sy: number; x: number; y: number; vx: number; vy: number; rot: number; vr: number; delay: number };
-  const parts: P[] = [];
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      parts.push({
-        sx: c * sTileW,
-        sy: r * sTileH,
-        x: ox + c * tw,
-        y: oy + r * th,
-        vx: (Math.random() - 0.5) * 220,
-        vy: -70 - Math.random() * 220, // rise like embers
-        rot: 0,
-        vr: (Math.random() - 0.5) * 6,
-        delay: (c / cols) * 160 + Math.random() * 130, // sweep left → right
+  // Low-res burn field: a smoothed noise blended with a diagonal sweep (bottom-left →
+  // top-right), so the front is directional but wavy, not a straight wipe.
+  const mw = Math.max(48, Math.min(150, Math.round(iw / 4)));
+  const mh = Math.max(1, Math.round((mw * ih) / iw));
+  const rnd = new Float32Array(mw * mh);
+  for (let i = 0; i < rnd.length; i++) rnd[i] = Math.random();
+  const noise = new Float32Array(mw * mh); // 2 box-blur passes → coherent blobs
+  for (let pass = 0; pass < 2; pass++) {
+    const src = pass === 0 ? rnd : noise;
+    for (let y = 0; y < mh; y++) {
+      for (let x = 0; x < mw; x++) {
+        let s = 0;
+        let n = 0;
+        for (let dy = -1; dy <= 1; dy++)
+          for (let dx = -1; dx <= 1; dx++) {
+            const xx = x + dx;
+            const yy = y + dy;
+            if (xx < 0 || yy < 0 || xx >= mw || yy >= mh) continue;
+            s += src[yy * mw + xx];
+            n++;
+          }
+        noise[y * mw + x] = s / n;
+      }
+    }
+  }
+  const thr = new Float32Array(mw * mh);
+  for (let y = 0; y < mh; y++) {
+    for (let x = 0; x < mw; x++) {
+      const dir = (x / (mw - 1)) * 0.5 + ((mh - 1 - y) / (mh - 1)) * 0.5;
+      thr[y * mw + x] = Math.max(0, Math.min(1, dir * 0.62 + noise[y * mw + x] * 0.55 - 0.08));
+    }
+  }
+
+  // Ash particles, each igniting when the front reaches it.
+  type E = { x: number; y: number; ig: number; life: number; drift: number; vx: number; r: number; g: number; b: number };
+  const embers: E[] = [];
+  const step = Math.max(5, Math.min(60, Math.round(nat.width / 34)));
+  for (let ny = 0; ny < nat.height; ny += step) {
+    for (let nx = 0; nx < nat.width; nx += step) {
+      let r = 255;
+      let g = 210;
+      let b = 150;
+      if (pix) {
+        const o = (ny * nat.width + nx) * 4;
+        if (pix[o + 3] < 24) continue;
+        r = pix[o];
+        g = pix[o + 1];
+        b = pix[o + 2];
+      }
+      const mmx = Math.min(mw - 1, Math.floor((nx / nat.width) * mw));
+      const mmy = Math.min(mh - 1, Math.floor((ny / nat.height) * mh));
+      embers.push({
+        x: ox + (nx / nat.width) * iw,
+        y: oy + (ny / nat.height) * ih,
+        ig: thr[mmy * mw + mmx],
+        life: 0.42 + Math.random() * 0.5,
+        drift: Math.random() * 6.283,
+        vx: (Math.random() - 0.5) * 46,
+        r,
+        g,
+        b,
       });
     }
   }
 
-  const DUR = 1150;
+  // Two tiny reusable buffers: an erase mask + a glowing burn-edge.
+  const eraseC = document.createElement('canvas');
+  eraseC.width = mw;
+  eraseC.height = mh;
+  const eraseCtx = eraseC.getContext('2d')!;
+  const eraseImg = eraseCtx.createImageData(mw, mh);
+  const glowC = document.createElement('canvas');
+  glowC.width = mw;
+  glowC.height = mh;
+  const glowCtx = glowC.getContext('2d')!;
+  const glowImg = glowCtx.createImageData(mw, mh);
+
+  const DUR = 1500;
+  const BAND = 0.1; // width of the glowing burn front
   const start = performance.now();
   function frame(now: number) {
-    const time = now - start;
+    const raw = (now - start) / DUR;
+    if (raw >= 1.28) return onDone();
+    const e = Math.min(1, raw);
+    const p = (e < 0.5 ? 4 * e * e * e : 1 - Math.pow(-2 * e + 2, 3) / 2) * 1.08; // ease-in-out, slight overshoot
+
     ctx!.clearRect(0, 0, vw, vh);
-    let alive = false;
-    for (const p of parts) {
-      const pt = time - p.delay;
-      if (pt <= 0) {
-        // Not launched yet — still part of the intact image.
-        ctx!.globalAlpha = 1;
-        ctx!.drawImage(img, p.sx, p.sy, sTileW, sTileH, p.x, p.y, tw + 0.6, th + 0.6);
-        alive = true;
-        continue;
-      }
-      const s = pt / 1000;
-      const a = 1 - pt / (DUR * 0.72);
-      if (a <= 0) continue;
-      alive = true;
-      const px = p.x + p.vx * s;
-      const py = p.y + p.vy * s + 160 * s * s; // gravity pulls the rise back down
-      const sc = Math.max(0.1, 1 - 0.55 * s);
-      ctx!.globalAlpha = Math.max(0, a);
-      ctx!.save();
-      ctx!.translate(px + tw / 2, py + th / 2);
-      ctx!.rotate(p.rot + p.vr * s);
-      ctx!.drawImage(img, p.sx, p.sy, sTileW, sTileH, (-tw / 2) * sc, (-th / 2) * sc, tw * sc + 0.6, th * sc + 0.6);
-      ctx!.restore();
+
+    // Build the erase mask + the hot edge in one low-res pass.
+    const ed = eraseImg.data;
+    const gd = glowImg.data;
+    for (let i = 0; i < thr.length; i++) {
+      const tv = thr[i];
+      const o = i * 4;
+      ed[o] = 0;
+      ed[o + 1] = 0;
+      ed[o + 2] = 0;
+      ed[o + 3] = tv < p ? 255 : 0; // burned → erase
+      const edge = 1 - Math.min(1, Math.abs(tv - p) / BAND);
+      const on = tv < p + BAND * 0.5 ? edge : 0;
+      gd[o] = 255;
+      gd[o + 1] = 150;
+      gd[o + 2] = 40;
+      gd[o + 3] = Math.round(on * 230);
     }
-    if (alive && time < DUR + 250) requestAnimationFrame(frame);
-    else onDone();
+    eraseCtx.putImageData(eraseImg, 0, 0);
+    glowCtx.putImageData(glowImg, 0, 0);
+
+    // 1. the intact photo
+    ctx!.globalCompositeOperation = 'source-over';
+    ctx!.globalAlpha = 1;
+    ctx!.drawImage(img, ox, oy, iw, ih);
+    // 2. glowing burn edge over it
+    ctx!.imageSmoothingEnabled = true;
+    ctx!.globalCompositeOperation = 'lighter';
+    ctx!.drawImage(glowC, ox, oy, iw, ih);
+    // 3. erase everything already burned
+    ctx!.globalCompositeOperation = 'destination-out';
+    ctx!.drawImage(eraseC, ox, oy, iw, ih);
+    // 4. rising ash, additive
+    ctx!.globalCompositeOperation = 'lighter';
+    for (const em of embers) {
+      const local = p - em.ig;
+      if (local <= 0) continue;
+      const l = local / em.life;
+      if (l >= 1) continue;
+      const x = em.x + Math.sin(em.drift + l * 6) * 13 + em.vx * l;
+      const y = em.y - (70 + 150 * l) * l; // accelerating rise
+      const a = (1 - l) * 0.85;
+      const sz = 1.7 * (1 - 0.35 * l);
+      ctx!.globalAlpha = a;
+      ctx!.fillStyle = `rgb(${Math.min(255, (em.r >> 1) + 150)},${Math.min(255, (em.g * 0.45) | 0) + 90},${(em.b * 0.28) | 0})`;
+      ctx!.fillRect(x - sz, y - sz, sz * 2, sz * 2);
+    }
+
+    ctx!.globalAlpha = 1;
+    ctx!.globalCompositeOperation = 'source-over';
+    requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
 }

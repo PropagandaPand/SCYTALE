@@ -10,6 +10,7 @@ import { t, getLang } from './lib/i18n';
  * user paste it elsewhere.
  */
 declare const __APP_VERSION__: string;
+declare const __BUILD_HASH__: string;
 
 const CATEGORIES: { key: string; label: () => string }[] = [
   { key: 'bug', label: () => t('Etwas funktioniert nicht') },
@@ -21,7 +22,9 @@ const CATEGORIES: { key: string; label: () => string }[] = [
 function diagnostics(): string {
   const L: string[] = [];
   try {
-    L.push(`Version: ${typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '?'}`);
+    L.push(
+      `Version: ${typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '?'}${typeof __BUILD_HASH__ !== 'undefined' ? '+' + __BUILD_HASH__ : ''}`,
+    );
     L.push(`App-Sprache: ${getLang()}`);
     L.push(`Browser: ${navigator.userAgent || '?'}`);
     L.push(`Plattform: ${navigator.platform || '?'}`);

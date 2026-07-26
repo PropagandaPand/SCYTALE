@@ -3822,7 +3822,7 @@ export function Messenger({ dek, onLock }: Props) {
     <div className="sticker-panel">
       {stickers.length === 0 && (
         <p className="sticker-empty">
-          Noch keine Sticker. Mach aus einem Bild einen — er bleibt verschlüsselt auf deinem Gerät.
+          {t('Noch keine Sticker. Mach aus einem Bild einen — er bleibt verschlüsselt auf deinem Gerät.')}
         </p>
       )}
       <div className="sticker-grid">
@@ -3984,7 +3984,7 @@ export function Messenger({ dek, onLock }: Props) {
 
           <div className="enc-line">
             <IconShield size={13} />
-            Alle Nachrichten Ende-zu-Ende verschlüsselt
+            {t('Alle Nachrichten Ende-zu-Ende verschlüsselt')}
           </div>
 
           <div className="conv-scroll">

@@ -40,7 +40,7 @@ function detect(): Lang {
   } catch {
     /* no navigator (tests) */
   }
-  return 'de';
+  return 'en'; // system language not among the 12 → English is the friendlier default
 }
 
 let current: Lang = (() => {

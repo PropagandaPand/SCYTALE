@@ -3677,9 +3677,14 @@ export function Messenger({ dek, onLock }: Props) {
             onClick={() => setPendingVO((v) => !v)}
             aria-pressed={pendingVO}
           >
-            <IconBomb size={17} />
+            <IconBomb size={21} />
             <span>{t('Einmal ansehen')}</span>
           </button>
+        )}
+        {canVO && (
+          <div className={`vo-armhint${pendingVO ? ' on' : ''}`}>
+            {t('Zerstört sich nach dem einmaligen Ansehen selbst — für immer und unwiederbringlich vernichtet.')}
+          </div>
         )}
         <div className="crop-actions">
           <button className="btn btn-outline" onClick={cancelPendingMedia}>

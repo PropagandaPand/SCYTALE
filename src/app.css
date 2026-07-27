@@ -3972,3 +3972,47 @@ select {
   opacity: 1;
   margin-bottom: 12px;
 }
+
+/* ── Large-file (R2) upload progress ─────────────────────────────────────── */
+.r2-upload {
+  position: fixed;
+  left: 50%;
+  bottom: calc(84px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  width: min(92vw, 420px);
+  z-index: 120;
+  padding: 11px 14px;
+  border-radius: var(--r-md);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+}
+.r2-upload-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13.5px;
+  color: var(--text);
+}
+.r2-upload-row svg {
+  color: var(--accent);
+  flex: none;
+}
+.r2-upload-pct {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.r2-upload-bar {
+  margin-top: 8px;
+  height: 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface1, var(--bg)));
+  overflow: hidden;
+}
+.r2-upload-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 200ms var(--ease-out);
+}

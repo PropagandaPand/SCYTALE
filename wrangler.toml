@@ -36,3 +36,13 @@ class_name = "RelayRoom"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RelayRoom"]
+
+# R2 object storage for LARGE attachments (videos) that don't fit the relay mailbox.
+# The client encrypts the file CLIENT-SIDE under a random per-file key before upload, so
+# R2 only ever holds ciphertext; the key travels end-to-end in the sealed message. Upload
+# + download go through this Worker (same origin → CSP connect-src 'self' stays intact).
+# Create the bucket once:  npx wrangler r2 bucket create skytale-blobs
+# and set a lifecycle rule (dashboard) to auto-delete objects after ~14 days.
+[[r2_buckets]]
+binding = "BLOBS"
+bucket_name = "skytale-blobs"

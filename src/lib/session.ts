@@ -820,6 +820,10 @@ export type MessageContent =
   // pull on demand. No data — just the descriptor; the recipient sees a download
   // affordance and requests it deliberately (attreq → chunk stream).
   | { kind: 'attoffer'; tid: string; name: string; mime: string; size: number; total: number }
+  // A LARGE attachment stored encrypted in R2 (videos up to ~1 GB). Carries the R2 object
+  // key + the per-file key (keyB64) end-to-end; the recipient downloads the ciphertext and
+  // decrypts. `chunk` is the plaintext chunk size the blob was sealed with. See crypto/blob.ts.
+  | { kind: 'r2'; key: string; keyB64: string; name: string; mime: string; size: number; chunk: number }
   // PULL request for an offered attachment. The sender streams its chunks in reply —
   // but only for a tid it actually offered to THIS contact (amplification guard).
   | { kind: 'attreq'; tid: string };
@@ -982,6 +986,8 @@ export async function frameContent(c: MessageContent): Promise<Bytes> {
     return prefixed(16, utf8.encode(JSON.stringify({ t: c.tid, n: c.name, m: c.mime, s: c.size, o: c.total })));
   }
   if (c.kind === 'attreq') return prefixed(17, utf8.encode(JSON.stringify({ t: c.tid })));
+  if (c.kind === 'r2')
+    return prefixed(19, utf8.encode(JSON.stringify({ k: c.key, kf: c.keyB64, n: c.name, m: c.mime, s: c.size, c: c.chunk })));
   // ginvite
   return prefixed(4, utf8.encode(JSON.stringify(c.group)));
 }
@@ -1114,6 +1120,18 @@ export async function unframeContent(bytes: Bytes): Promise<MessageContent> {
   if (bytes[0] === 17) {
     const j = JSON.parse(utf8.decode(bytes.slice(1)));
     return { kind: 'attreq', tid: String(j.t) };
+  }
+  if (bytes[0] === 19) {
+    const j = JSON.parse(utf8.decode(bytes.slice(1)));
+    return {
+      kind: 'r2',
+      key: String(j.k),
+      keyB64: String(j.kf),
+      name: String(j.n),
+      mime: String(j.m),
+      size: Number(j.s),
+      chunk: Number(j.c),
+    };
   }
 
   if (bytes[0] !== 1 && bytes[0] !== 18) throw new Error('Unbekannter Frame-Typ: ' + bytes[0]);

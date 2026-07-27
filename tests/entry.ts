@@ -16,3 +16,4 @@ export { aggregateDelivery, hasMessage } from '../src/lib/messages';
 export { derivePrfKek } from '../src/lib/biometric';
 export { isGroupMember, decideInvite } from '../src/lib/groups';
 export { encSection, decSection, backupMetaAad, backupAttAad } from '../src/lib/backupSections';
+export { encryptBlob, decryptBlob, BLOB_CHUNK } from '../src/crypto/blob';

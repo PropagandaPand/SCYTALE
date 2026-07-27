@@ -23,12 +23,37 @@ const CSP = [
   "form-action 'self'",
   "script-src 'self' 'wasm-unsafe-eval'",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data:",
+  // blob: is needed for object-URL media: decrypted photos/videos are shown via
+  // URL.createObjectURL (they never touch the network). Same-origin only, no host widened.
+  "img-src 'self' data: blob:",
+  "media-src 'self' blob:",
   "font-src 'self'",
   "connect-src 'self'",
   "worker-src 'self'",
   "manifest-src 'self'",
 ].join('; ');
+
+// Ceilings for the R2 blob path (bound abuse from the open upload endpoint). The client
+// caps the plaintext at ~1 GB; ciphertext is marginally larger (12+16 B per 1 MiB chunk).
+const MAX_BLOB = 1100 * 1024 * 1024; // ~1.05 GB total object
+const MAX_PART = 32 * 1024 * 1024; // a single multipart part
+// Total-storage brake: stay inside R2's 10 GB free tier. A new upload is refused if it
+// would push the bucket past this. No counter to drift — we sum the (near-empty, thanks
+// to delete-after-download) bucket live. Bounded overshoot: one in-flight file per race.
+const STORAGE_BUDGET = 9 * 1024 * 1024 * 1024; // 9 GB, headroom under the 10 GB free limit
+
+/** Live total of stored object bytes (completed objects; in-progress multipart parts are
+ *  not counted until complete). Cheap because the bucket only holds in-flight transfers. */
+async function bucketBytes(bucket: R2Bucket): Promise<number> {
+  let total = 0;
+  let cursor: string | undefined;
+  do {
+    const l = await bucket.list({ cursor, limit: 1000 });
+    for (const o of l.objects) total += o.size;
+    cursor = l.truncated ? l.cursor : undefined;
+  } while (cursor);
+  return total;
+}
 
 function applySecurityHeaders(headers: Headers): void {
   headers.set('Content-Security-Policy', CSP);
@@ -97,6 +122,79 @@ export default {
         /* sink down — the console.log above still captured it */
       }
       return new Response(null, { status: 204 });
+    }
+
+    // Large encrypted attachments (videos, up to ~1 GB) live in R2, uploaded via
+    // multipart so the client never holds the whole file in memory. The client
+    // uploads/downloads CIPHERTEXT ONLY through this same-origin endpoint (so CSP
+    // connect-src 'self' holds); the per-file key never leaves the E2E envelope, so the
+    // Worker + R2 are zero-knowledge. Key charset is hex (server-generated, unguessable).
+    if (url.pathname.startsWith('/api/blob')) {
+      if (!env.BLOBS) return new Response('R2 not configured', { status: 503 });
+      const okKey = (k: string) => /^[a-f0-9]{16,64}$/.test(k);
+      const json = (o: unknown, status = 200) =>
+        new Response(JSON.stringify(o), { status, headers: { 'content-type': 'application/json' } });
+
+      // Begin a multipart upload → random key + uploadId. Refuse if this file would
+      // push the bucket past the storage budget (the client passes its expected size).
+      if (request.method === 'POST' && url.pathname === '/api/blob/create') {
+        const want = Number(url.searchParams.get('size') || '0');
+        if (want > MAX_BLOB) return new Response('Too large', { status: 413 });
+        if ((await bucketBytes(env.BLOBS)) + Math.max(0, want) > STORAGE_BUDGET) {
+          return json({ error: 'storage_full' }, 507); // Insufficient Storage — try again later
+        }
+        const key = crypto.randomUUID().replace(/-/g, '');
+        const mpu = await env.BLOBS.createMultipartUpload(key);
+        return json({ key, uploadId: mpu.uploadId });
+      }
+      // Upload one part. Part number is 1-based; all parts but the last must be ≥5 MiB.
+      if (request.method === 'PUT' && url.pathname === '/api/blob/part') {
+        const key = url.searchParams.get('key') || '';
+        const uploadId = url.searchParams.get('upload') || '';
+        const n = Number(url.searchParams.get('n') || '0');
+        const len = Number(request.headers.get('content-length') || '0');
+        if (!okKey(key) || !uploadId || n < 1 || !request.body) return new Response('Bad request', { status: 400 });
+        if (len > MAX_PART) return new Response('Part too large', { status: 413 });
+        const mpu = env.BLOBS.resumeMultipartUpload(key, uploadId);
+        const part = await mpu.uploadPart(n, request.body);
+        return json({ etag: part.etag });
+      }
+      // Finish → assemble the parts into the final object.
+      if (request.method === 'POST' && url.pathname === '/api/blob/complete') {
+        const body = (await request.json().catch(() => null)) as { key?: string; upload?: string; parts?: { n: number; etag: string }[] } | null;
+        if (!body || !okKey(body.key || '') || !body.upload || !Array.isArray(body.parts)) return new Response('Bad request', { status: 400 });
+        if (body.parts.length * MAX_PART > MAX_BLOB) return new Response('Too large', { status: 413 });
+        const mpu = env.BLOBS.resumeMultipartUpload(body.key!, body.upload);
+        await mpu.complete(body.parts.map((p) => ({ partNumber: p.n, etag: p.etag })));
+        return new Response(null, { status: 204 });
+      }
+      // Abort a failed upload → free the parts.
+      if (request.method === 'POST' && url.pathname === '/api/blob/abort') {
+        const body = (await request.json().catch(() => null)) as { key?: string; upload?: string } | null;
+        if (body && okKey(body.key || '') && body.upload) {
+          await env.BLOBS.resumeMultipartUpload(body.key!, body.upload).abort().catch(() => undefined);
+        }
+        return new Response(null, { status: 204 });
+      }
+      // GET /api/blob/<key> → stream the ciphertext back (the client decrypts as it reads).
+      if (request.method === 'GET' && url.pathname.startsWith('/api/blob/')) {
+        const key = url.pathname.slice('/api/blob/'.length);
+        if (!okKey(key)) return new Response('Bad key', { status: 400 });
+        const obj = await env.BLOBS.get(key);
+        if (!obj) return new Response('Not found', { status: 404 });
+        const h = new Headers();
+        h.set('content-type', 'application/octet-stream');
+        h.set('content-length', String(obj.size));
+        h.set('cache-control', 'private, no-store');
+        return new Response(obj.body, { status: 200, headers: h });
+      }
+      // DELETE /api/blob/<key> → best-effort cleanup.
+      if (request.method === 'DELETE' && url.pathname.startsWith('/api/blob/')) {
+        const key = url.pathname.slice('/api/blob/'.length);
+        if (okKey(key)) await env.BLOBS.delete(key);
+        return new Response(null, { status: 204 });
+      }
+      return new Response('Method not allowed', { status: 405 });
     }
 
     const res = await env.ASSETS.fetch(request);

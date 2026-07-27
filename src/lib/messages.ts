@@ -29,6 +29,10 @@ export interface FileRef {
   // stored bytes are securely wiped and the message becomes a tombstone. Set on the
   // RECIPIENT's copy (the sender keeps their own). See src/ViewOnceViewer.tsx.
   viewOnce?: boolean;
+  // A LARGE attachment stored (encrypted) in R2: not downloaded yet. The recipient taps
+  // to stream-download + decrypt into the local store (then `attId` is set, `r2` cleared).
+  // Carries the R2 object key + the E2E per-file key. See src/lib/blobtransfer.ts.
+  r2?: { key: string; keyB64: string; chunk: number };
 }
 
 /** A quoted message shown above a reply. Self-contained (a rendered preview + who

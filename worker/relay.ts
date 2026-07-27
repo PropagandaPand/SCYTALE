@@ -23,6 +23,9 @@ import { DurableObject } from 'cloudflare:workers';
 export interface Env {
   RELAY: DurableObjectNamespace<RelayRoom>;
   ASSETS: Fetcher;
+  // R2 bucket for large encrypted attachments (see wrangler.toml). Holds ciphertext
+  // ONLY — the per-file key never leaves the E2E envelope. Absent => big files disabled.
+  BLOBS?: R2Bucket;
   // Web Push (VAPID). PUBLIC + SUBJECT are plain vars; JWK is a secret holding
   // the EC P-256 private key as a JWK JSON string. Absent => push disabled.
   VAPID_PUBLIC?: string;

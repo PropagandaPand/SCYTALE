@@ -540,19 +540,26 @@ export function Messenger({ dek, onLock }: Props) {
     await gossipDeviceList(next);
     bump();
   }
-  // This (linked) device unlinks itself: tell the primary, then wipe. Send first so the
-  // mailbox holds the request even if the primary is offline; wipe regardless.
+  // This (linked) device unlinks itself → same as an account wipe (which already tells the
+  // primary when we're a linked device). Kept as its own action for the manage view.
   async function unlinkSelfAction() {
     setRemoveDev(null);
-    const self = await ensureSelfContact();
-    if (self) await fanoutSend(self, { kind: 'unlinkreq' }, randomMid()).catch(() => undefined);
     await doWipeAccount();
   }
 
-  // Irreversibly wipe this device's crypto container, then reload into onboarding.
+  // Irreversibly wipe this device's crypto container, then reload into onboarding. On a
+  // LINKED device, first ask the primary to revoke us (so the master + contacts stop
+  // fanning out to this now-dead device and it drops out of the device list). Best-effort,
+  // sent BEFORE the wipe so the mailbox holds it even if the primary is offline; we wipe
+  // regardless of whether the notice got through. The primary has no one to notify.
   async function doWipeAccount() {
     setWiping(true);
     try {
+      const id = identityRef.current;
+      if (id && !isPrimaryDevice(id)) {
+        const self = await ensureSelfContact().catch(() => null);
+        if (self) await fanoutSend(self, { kind: 'unlinkreq' }, randomMid()).catch(() => undefined);
+      }
       await wipeAccount();
     } finally {
       location.reload();

@@ -70,8 +70,13 @@ const goodManifest = [
   { url: '/assets/app.js', revision: await revision('export{}') },
   { url: '/assets/app.css', revision: await revision('body') },
 ];
+const cleanShell =
+  '<!doctype html><html lang="de"><head>' +
+  '<script type="module" crossorigin src="/assets/app.js"></script>' +
+  '<link rel="stylesheet" crossorigin href="/assets/app.css"></head>' +
+  '<body><div id="app"></div></body></html>';
 const fetchGood = async (path) => {
-  if (path === '/') return new Response('<!doctype html>', { headers: { 'content-type': 'text/html' } });
+  if (path === '/') return new Response(cleanShell, { headers: { 'content-type': 'text/html' } });
   if (path.endsWith('.js')) return new Response('export{}', { headers: { 'content-type': 'text/javascript' } });
   return new Response('body', { headers: { 'content-type': 'text/css' } });
 };
@@ -113,7 +118,69 @@ try {
 } catch {
   mixedBuildRejected = true;
 }
-ok('Shell eines zwischenzeitlich gewechselten Deployments scheitert an SHA-256', mixedBuildRejected);
+ok('Shell eines zwischenzeitlich gewechselten Deployments wird über die Struktur-Prüfung abgelehnt', mixedBuildRejected);
+
+// REGRESSION (fleet freeze, v0.30): Cloudflare "JavaScript Detections" injects a PER-REQUEST
+// inline challenge script into the HTML shell, so its bytes never match a build-time hash. The
+// old exact-SHA shell check threw on EVERY client → no device could activate the new SW. The
+// structural check must ACCEPT it: the injected inline script is CSP-inert and the shell still
+// boots only the verified module.
+const injectedShell =
+  '<!doctype html><html lang="de"><head>' +
+  '<script type="module" crossorigin src="/assets/app.js"></script>' +
+  '<link rel="stylesheet" crossorigin href="/assets/app.css"></head>' +
+  '<body><div id="app"></div>' +
+  "<script>window.__CF$cv$params={r:'a21e',t:'MTc4NQ=='};(function(){var s=document.createElement('script');s.src='/cdn-cgi/challenge-platform/scripts/precursor/main.js';document.head.appendChild(s);})();</script>" +
+  '</body></html>';
+const injectedStore = new Map();
+let injectedInstalled = false;
+try {
+  await S.populateBuildPrecache(
+    { put: async (key, response) => injectedStore.set(String(key), response) },
+    goodManifest,
+    async (path) => (path === '/'
+      ? new Response(injectedShell, { headers: { 'content-type': 'text/html' } })
+      : fetchGood(path)),
+  );
+  injectedInstalled = injectedStore.has('/index.html') && injectedStore.has('/assets/app.js');
+} catch {
+  injectedInstalled = false;
+}
+ok('Edge-injizierte Shell (CF-Challenge-Script) installiert dennoch — kein Fleet-Freeze', injectedInstalled === true);
+// NEGATIVE CONTROL: the injected shell's bytes differ from the clean shell, so a byte-exact
+// check would have rejected exactly this — the failure that froze every client at v0.30.
+ok('Negativkontrolle: eine byte-genaue Shell-Prüfung hätte die injizierte Shell verworfen',
+  injectedInstalled && (await revision(injectedShell)) !== (await revision(cleanShell)));
+
+// A shell that pulls a CROSS-ORIGIN script is refused (belt-and-suspenders over the CSP).
+let crossOriginRejected = false;
+try {
+  await S.populateBuildPrecache({ put: async () => undefined }, goodManifest,
+    async (path) => (path === '/'
+      ? new Response('<!doctype html><script type="module" src="https://evil.example/x.js"></script>', { headers: { 'content-type': 'text/html' } })
+      : fetchGood(path)));
+} catch { crossOriginRejected = true; }
+ok('Shell mit Fremd-Origin-Script wird abgelehnt', crossOriginRejected);
+
+// A shell that references a same-origin script we did NOT byte-verify is refused.
+let unverifiedRefRejected = false;
+try {
+  await S.populateBuildPrecache({ put: async () => undefined }, goodManifest,
+    async (path) => (path === '/'
+      ? new Response('<!doctype html><script type="module" src="/assets/not-in-manifest.js"></script>', { headers: { 'content-type': 'text/html' } })
+      : fetchGood(path)));
+} catch { unverifiedRefRejected = true; }
+ok('Shell mit nicht verifizierter same-origin Ressource wird abgelehnt', unverifiedRefRejected);
+
+// A shell that boots NO verified module is refused (never cache a shell that can't start).
+let noModuleRejected = false;
+try {
+  await S.populateBuildPrecache({ put: async () => undefined }, goodManifest,
+    async (path) => (path === '/'
+      ? new Response('<!doctype html><link rel="stylesheet" href="/assets/app.css"></head>', { headers: { 'content-type': 'text/html' } })
+      : fetchGood(path)));
+} catch { noModuleRejected = true; }
+ok('Shell ohne verifiziertes App-Modul wird abgelehnt', noModuleRejected);
 
 const swSource = readFileSync(join(root, 'src', 'sw.ts'), 'utf8');
 const attachmentSource = readFileSync(join(root, 'src', 'Attachment.tsx'), 'utf8');

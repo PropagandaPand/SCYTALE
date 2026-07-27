@@ -120,9 +120,55 @@ export async function populateBuildPrecache(
     await cache.put(path, response);
   }
 
-  // `/index.html` redirects to `/` in production. Fetch the non-redirected app
-  // shell and deliberately store that response under the stable shell key.
+  // The app shell is HTML and — unlike the immutable, hash-named assets — can be rewritten
+  // in flight by a CDN. Cloudflare's "JavaScript Detections" (and any managed challenge)
+  // injects a PER-REQUEST inline script into the document, so the shell's bytes differ on
+  // every fetch and can NEVER match a build-time hash. Byte-verifying it therefore bricks
+  // every client the instant the edge injects — a fleet-wide update freeze.
+  //
+  // Integrity of the EXECUTABLE code does not rest on the shell's bytes: the response CSP
+  // (script-src 'self', no 'unsafe-inline') makes any inline or cross-origin script inert,
+  // and this worker's fetch handler only ever serves manifest-verified same-origin assets.
+  // So verify the shell STRUCTURALLY instead — every same-origin script/stylesheet it pulls
+  // must be a byte-verified precache entry, and it must boot a verified module — then cache
+  // the served shell as-is (an injected inline challenge script is inert under the CSP).
   const shell = await fetchAsset('/');
-  await assertCacheable('/index.html', shellEntry.revision, shell);
+  if (!shell.ok || shell.redirected || shell.type === 'error' || shell.type === 'opaque') {
+    throw new Error('Shell-Abruf fehlgeschlagen: /');
+  }
+  if (!/^text\/html\b/.test(shell.headers.get('content-type')?.toLowerCase() ?? '')) {
+    throw new Error('Shell hat unerwarteten Content-Type.');
+  }
+  assertShellReferencesOnlyVerified(await shell.clone().text(), seen);
   await cache.put('/index.html', shell);
+}
+
+/**
+ * Structural integrity of the app shell. The HTML document may be edge-rewritten (a CDN can
+ * inject bot-detection / challenge scripts), so its bytes cannot be pinned. What still holds:
+ * the shell must not pull any same-origin script or stylesheet we did not byte-verify, and it
+ * must boot a verified module. Inline and cross-origin scripts are independently neutralised by
+ * the response CSP (script-src 'self', no 'unsafe-inline') — an injected inline challenge script
+ * is inert and needs no policing here. This is defence in depth over the fetch handler, which
+ * already refuses to serve any non-manifest script/style at runtime.
+ */
+export function assertShellReferencesOnlyVerified(html: string, verified: ReadonlySet<string>): void {
+  const refs: string[] = [];
+  // <script …> that carries a src attribute (inline scripts have none — and are CSP-inert).
+  // `[^>]*?` cannot cross the tag's own '>', so an inline script body's `s.src=…` is ignored.
+  for (const m of html.matchAll(/<script\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']/gi)) refs.push(m[1]);
+  // <link rel="stylesheet"|"modulepreload" … href="…">, attribute order-independent.
+  for (const m of html.matchAll(/<link\b[^>]*>/gi)) {
+    if (!/\brel\s*=\s*["']?(?:stylesheet|modulepreload)\b/i.test(m[0])) continue;
+    const href = /\bhref\s*=\s*["']([^"']+)["']/i.exec(m[0]);
+    if (href) refs.push(href[1]);
+  }
+  let bootsVerifiedModule = false;
+  for (const ref of refs) {
+    const parsed = new URL(ref, 'https://local.invalid');
+    if (parsed.origin !== 'https://local.invalid') throw new Error(`Shell zieht eine fremde Ressource: ${ref}`);
+    if (!verified.has(parsed.pathname)) throw new Error(`Shell referenziert nicht verifizierte Ressource: ${parsed.pathname}`);
+    if (parsed.pathname.endsWith('.js')) bootsVerifiedModule = true;
+  }
+  if (!bootsVerifiedModule) throw new Error('Shell lädt kein verifiziertes App-Modul.');
 }

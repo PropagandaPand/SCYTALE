@@ -7,6 +7,12 @@ proposal).
 Named after the [scytale](https://en.wikipedia.org/wiki/Scytale), the Spartan
 transposition cipher.
 
+<p align="center">
+  <img src="docs/skytale.png" alt="A Spartan warrior reading a message wound around a scytale — a rod of a specific diameter that realigns a strip of scrambled letters into readable text" width="760">
+</p>
+
+<p align="center"><sub><i>Wind a strip of leather around a rod of exactly the right diameter and the scrambled letters line up into the message. Without the matching rod — the shared secret — it's just noise. The same idea, modern cryptography.</i></sub></p>
+
 > **Status:** the cryptographic core (identity, X3DH, Double Ratchet, sealed
 > sender, at-rest vault, multi-device identity + device linking) is implemented
 > and tested. A newly linked device now receives your profile and contacts and is

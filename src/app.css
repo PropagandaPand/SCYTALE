@@ -3785,13 +3785,18 @@ select {
   -webkit-touch-callout: none;
   -webkit-user-select: none;
   user-select: none;
+}
+/* Hold-to-view blur applies ONLY to the photo (a canvas). A view-once VIDEO is not
+   blurred — it just plays once (no hold gesture), so blurring it would leave it
+   permanently blurry. */
+canvas.vo-img {
   /* Not held: heavily blurred + dimmed so the content is not discernible; the slight
      upscale hides the transparent fringe blur leaves at the edges. */
   filter: blur(34px) brightness(0.35);
   transform: scale(1.12);
   transition: filter 180ms var(--ease-out), transform 180ms var(--ease-out);
 }
-.vo-stage.held .vo-img {
+.vo-stage.held canvas.vo-img {
   filter: none;
   transform: none;
 }

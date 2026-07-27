@@ -144,6 +144,7 @@ import { biometricAvailable, biometricEnrolled, disableBiometricUnlock } from '.
 import { Attachment, LightboxImg } from './Attachment';
 import { ViewOnceViewer } from './ViewOnceViewer';
 import { uploadFileToR2, downloadR2ToStore, StorageFullError } from './lib/blobtransfer';
+import { transcodeVideoTo720p } from './lib/transcode';
 import {
   IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach, IconMic, IconTrash, IconDots, IconGroup, IconReply, IconForward, IconCopy,
   IconBell, IconDevices, IconArchive, IconChevron,
@@ -481,6 +482,7 @@ export function Messenger({ dek, onLock }: Props) {
   const [pendingMedia, setPendingMedia] = useState<{ file: File | null; data: Uint8Array<ArrayBuffer> | null; size: number; name: string; mime: string; url: string; isVideo: boolean } | null>(null);
   const [pendingVO, setPendingVO] = useState(false); // the preview's "einmal ansehen" toggle
   const [r2Upload, setR2Upload] = useState<number | null>(null); // 0..1 while a large file uploads to R2, else null
+  const [transcoding, setTranscoding] = useState<number | null>(null); // 0..1 while a video is transcoded to 720p, else null
   const [viewOnce, setViewOnce] = useState<Blob | null>(null); // the currently-open view-once photo (already wiped from storage)
   const [notifOn, setNotifOn] = useState(false);
   const [notifBusy, setNotifBusy] = useState(false);
@@ -3247,6 +3249,7 @@ export function Messenger({ dek, onLock }: Props) {
       let data: Uint8Array<ArrayBuffer> | null = null;
       let mime = file.type || 'application/octet-stream';
       let name = file.name || 'datei';
+      let theFile = file;
       const isImage = mime.startsWith('image/');
       const isVideo = mime.startsWith('video/');
       if (isImage) {
@@ -3254,17 +3257,30 @@ export function Messenger({ dek, onLock }: Props) {
         data = c.data as Uint8Array<ArrayBuffer>;
         mime = c.mime;
         name = name.replace(/\.[^.]+$/, '') + '.jpg';
+      } else if (isVideo) {
+        // Optimise to 720p before anything else (best-effort; original on any failure).
+        setTranscoding(0);
+        try {
+          const smaller = await transcodeVideoTo720p(file, (f) => setTranscoding(f));
+          if (smaller && smaller.size < file.size) {
+            theFile = new File([smaller], name.replace(/\.[^.]+$/, '') + '.mp4', { type: 'video/mp4' });
+            mime = 'video/mp4';
+            name = theFile.name;
+          }
+        } finally {
+          setTranscoding(null);
+        }
       }
       // Non-images are NOT buffered here — a large video/file must stream (a 1 GB read
       // would OOM). The raw File is carried through and sliced during upload.
       if (name === STICKER_FILENAME) name = 'datei';
-      const size = data ? data.length : file.size;
-      const src = { file: data ? null : file, data, size };
+      const size = data ? data.length : theFile.size;
+      const src = { file: data ? null : theFile, data, size };
       // Photos/videos in a 1:1 chat go through a preview sheet that carries the
       // "view once" option — so it lives INSIDE the send flow, not in a side menu.
       if ((isImage || isVideo) && activeRoom && !activeGroup) {
         setPendingVO(false);
-        const url = data ? URL.createObjectURL(new Blob([data], { type: mime })) : URL.createObjectURL(file);
+        const url = data ? URL.createObjectURL(new Blob([data], { type: mime })) : URL.createObjectURL(theFile);
         setPendingMedia({ ...src, name, mime, url, isVideo });
         return;
       }
@@ -3811,6 +3827,19 @@ export function Messenger({ dek, onLock }: Props) {
         </div>
         <div className="r2-upload-bar">
           <div className="r2-upload-fill" style={{ width: `${Math.round(r2Upload * 100)}%` }} />
+        </div>
+      </div>
+    ) : null;
+  const transcodeEl =
+    transcoding !== null ? (
+      <div className="r2-upload" role="status">
+        <div className="r2-upload-row">
+          <IconArchive />
+          <span>{t('Video wird optimiert…')}</span>
+          <span className="r2-upload-pct">{Math.round(transcoding * 100)} %</span>
+        </div>
+        <div className="r2-upload-bar">
+          <div className="r2-upload-fill" style={{ width: `${Math.round(transcoding * 100)}%` }} />
         </div>
       </div>
     ) : null;
@@ -4552,6 +4581,7 @@ export function Messenger({ dek, onLock }: Props) {
         {viewOnceEl}
         {mediaPreviewEl}
         {r2UploadEl}
+        {transcodeEl}
         {stickerViewEl}
       </div>
     );
@@ -4968,6 +4998,7 @@ export function Messenger({ dek, onLock }: Props) {
         {viewOnceEl}
         {mediaPreviewEl}
         {r2UploadEl}
+        {transcodeEl}
         {stickerViewEl}
       </div>
     );

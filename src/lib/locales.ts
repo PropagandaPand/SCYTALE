@@ -344,6 +344,7 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Speicher gerade voll — bitte in ein paar Minuten erneut senden.": "Storage is temporarily full — please resend in a few minutes.",
     "Video": "Video",
     "Video wird hochgeladen…": "Uploading video…",
+    "Video wird optimiert…": "Optimizing video…",
   },
   es: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — Falló la autoprueba de WebCrypto. Bloqueado por seguridad.",
@@ -683,6 +684,7 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Speicher gerade voll — bitte in ein paar Minuten erneut senden.": "El almacenamiento está lleno temporalmente — vuelve a enviar en unos minutos.",
     "Video": "Vídeo",
     "Video wird hochgeladen…": "Subiendo vídeo…",
+    "Video wird optimiert…": "Optimizando vídeo…",
   },
   fr: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — échec de l'autotest WebCrypto. Verrouillé par sécurité.",
@@ -1022,6 +1024,7 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Speicher gerade voll — bitte in ein paar Minuten erneut senden.": "Stockage temporairement plein — réessayez d'envoyer dans quelques minutes.",
     "Video": "Vidéo",
     "Video wird hochgeladen…": "Envoi de la vidéo…",
+    "Video wird optimiert…": "Optimisation de la vidéo…",
   },
   it: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — Autotest WebCrypto fallito. Bloccato per motivi di sicurezza.",
@@ -1361,6 +1364,7 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Speicher gerade voll — bitte in ein paar Minuten erneut senden.": "Spazio di archiviazione temporaneamente pieno — riprova a inviare tra qualche minuto.",
     "Video": "Video",
     "Video wird hochgeladen…": "Caricamento del video…",
+    "Video wird optimiert…": "Ottimizzazione del video…",
   },
   pt: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — Autoteste do WebCrypto falhou. Bloqueado por motivos de segurança.",
@@ -1700,6 +1704,7 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Speicher gerade voll — bitte in ein paar Minuten erneut senden.": "Armazenamento temporariamente cheio — envie novamente dentro de alguns minutos.",
     "Video": "Vídeo",
     "Video wird hochgeladen…": "A carregar vídeo…",
+    "Video wird optimiert…": "A otimizar vídeo…",
   },
   nl: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — WebCrypto-zelftest mislukt. Uit veiligheidsoverwegingen vergrendeld.",
@@ -2039,6 +2044,7 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Speicher gerade voll — bitte in ein paar Minuten erneut senden.": "Opslag is tijdelijk vol — verstuur over een paar minuten opnieuw.",
     "Video": "Video",
     "Video wird hochgeladen…": "Video wordt geüpload…",
+    "Video wird optimiert…": "Video wordt geoptimaliseerd…",
   },
   pl: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — autotest WebCrypto nie powiódł się. Zablokowano ze względów bezpieczeństwa.",
@@ -2378,6 +2384,7 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Speicher gerade voll — bitte in ein paar Minuten erneut senden.": "Pamięć jest chwilowo pełna — wyślij ponownie za kilka minut.",
     "Video": "Wideo",
     "Video wird hochgeladen…": "Przesyłanie wideo…",
+    "Video wird optimiert…": "Optymalizowanie wideo…",
   },
   ru: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — самопроверка WebCrypto не пройдена. Заблокировано в целях безопасности.",
@@ -2717,6 +2724,7 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Speicher gerade voll — bitte in ein paar Minuten erneut senden.": "Хранилище временно заполнено — отправьте ещё раз через несколько минут.",
     "Video": "Видео",
     "Video wird hochgeladen…": "Загрузка видео…",
+    "Video wird optimiert…": "Оптимизация видео…",
   },
   uk: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — самоперевірка WebCrypto не пройдена. Заблоковано з міркувань безпеки.",
@@ -3056,6 +3064,7 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Speicher gerade voll — bitte in ein paar Minuten erneut senden.": "Сховище тимчасово заповнене — надішліть ще раз за кілька хвилин.",
     "Video": "Відео",
     "Video wird hochgeladen…": "Завантаження відео…",
+    "Video wird optimiert…": "Оптимізація відео…",
   },
   tr: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — WebCrypto öz testi başarısız. Güvenlik nedeniyle kilitlendi.",
@@ -3395,6 +3404,7 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Speicher gerade voll — bitte in ein paar Minuten erneut senden.": "Depolama geçici olarak dolu — birkaç dakika içinde yeniden gönderin.",
     "Video": "Video",
     "Video wird hochgeladen…": "Video yükleniyor…",
+    "Video wird optimiert…": "Video optimize ediliyor…",
   },
   zh: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — WebCrypto 自检失败。出于安全原因已锁定。",
@@ -3734,5 +3744,6 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Speicher gerade voll — bitte in ein paar Minuten erneut senden.": "存储空间暂时已满——请在几分钟后重新发送。",
     "Video": "视频",
     "Video wird hochgeladen…": "正在上传视频…",
+    "Video wird optimiert…": "正在优化视频…",
   },
 };

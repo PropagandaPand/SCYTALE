@@ -4021,3 +4021,18 @@ canvas.vo-img {
   background: var(--accent);
   transition: width 200ms var(--ease-out);
 }
+
+/* ── Danger actions (account delete / device removal) ────────────────────── */
+.btn-danger {
+  background: var(--danger);
+  color: #fff;
+}
+.btn-danger:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+.setting-row.danger .setting-title {
+  color: var(--danger);
+}
+.setting-row.danger .setting-ic {
+  color: var(--danger);
+}

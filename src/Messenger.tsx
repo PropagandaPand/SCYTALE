@@ -96,6 +96,7 @@ import { saveContact, loadContacts, removeContact } from './lib/store';
 import { moveContactStorage } from './lib/rekey';
 import { loadRetiredMasters, addRetiredMaster } from './lib/denylist';
 import { loadProfile, saveProfile, type MyProfile } from './lib/profile';
+import { wipeAccount } from './lib/wipe';
 import {
   loadStickers,
   saveStickers,
@@ -510,6 +511,18 @@ export function Messenger({ dek, onLock }: Props) {
   const [bioEnroll, setBioEnroll] = useState(false); // enrollment modal open
   const [langSheet, setLangSheet] = useState(false); // language picker open
   const [bugOpen, setBugOpen] = useState(false); // bug-report modal open
+  const [deleteOpen, setDeleteOpen] = useState(false); // account-delete confirmation open
+  const [wiping, setWiping] = useState(false); // account wipe in progress
+
+  // Irreversibly wipe this device's crypto container, then reload into onboarding.
+  async function doWipeAccount() {
+    setWiping(true);
+    try {
+      await wipeAccount();
+    } finally {
+      location.reload();
+    }
+  }
   // ── Device linking ────────────────────────────────────────────────
   // 'menu'  : choose join-as-new vs add-a-device
   // 'qr'    : N shows its QR, waits for the offer
@@ -5174,7 +5187,40 @@ export function Messenger({ dek, onLock }: Props) {
               </span>
               <span className="setting-go"><IconChevron /></span>
             </button>
+
+            <button className="setting-row danger" onClick={() => setDeleteOpen(true)}>
+              <span className="setting-ic"><IconTrash size={15} /></span>
+              <span className="setting-tx">
+                <span className="setting-title">{t('Account löschen / zurücksetzen')}</span>
+                <span className="setting-sub">{t('Alle Daten auf diesem Gerät unwiderruflich entfernen')}</span>
+              </span>
+              <span className="setting-go"><IconChevron /></span>
+            </button>
           </div>
+
+          {deleteOpen && (
+            <div className="crop-modal" role="dialog" aria-label={t('Account löschen')}>
+              <div className="crop-head">{t('Account löschen / zurücksetzen')}</div>
+              <div className="backup-body">
+                <div className="err-note" style={{ textAlign: 'left' }}>
+                  <p>
+                    {tb(
+                      'Das entfernt **unwiderruflich** deine Identität, alle Chats, Kontakte und Schlüssel von **diesem Gerät**. Ohne ein vorher exportiertes Backup gibt es keine Wiederherstellung.',
+                    )}
+                  </p>
+                  <p style={{ opacity: 0.72 }}>{t('Das erreicht weder deine Kontakte noch den Server — dort gibt es kein Konto.')}</p>
+                </div>
+              </div>
+              <div className="crop-actions">
+                <button className="btn btn-outline" onClick={() => setDeleteOpen(false)} disabled={wiping}>
+                  {t('Abbrechen')}
+                </button>
+                <button className="btn btn-danger" onClick={() => void doWipeAccount()} disabled={wiping}>
+                  {wiping ? '…' : t('Endgültig löschen')}
+                </button>
+              </div>
+            </div>
+          )}
 
           {backupMode && <BackupModal mode={backupMode} dek={dek} onClose={() => setBackupMode(null)} />}
           {bugOpen && <BugReport onClose={() => setBugOpen(false)} />}

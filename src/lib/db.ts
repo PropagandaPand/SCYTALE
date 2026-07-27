@@ -14,8 +14,10 @@ interface ScytaleDB extends DBSchema {
 }
 
 let dbp: Promise<IDBPDatabase<ScytaleDB>> | null = null;
+let wiping = false; // set during an account wipe → refuse to (re)open so deleteDB isn't blocked
 
 function db(): Promise<IDBPDatabase<ScytaleDB>> {
+  if (wiping) return Promise.reject(new Error('database is being wiped'));
   if (!dbp) {
     dbp = openDB<ScytaleDB>('scytale', 2, {
       upgrade(d, oldVersion) {
@@ -45,6 +47,19 @@ function db(): Promise<IDBPDatabase<ScytaleDB>> {
     });
   }
   return dbp;
+}
+
+/** Close the cached DB connection (so it can be deleted) and refuse further opens. Used
+ *  by the account wipe; the app reloads right after, so the permanent block is fine. */
+export async function closeDb(): Promise<void> {
+  wiping = true;
+  const p = dbp;
+  dbp = null;
+  try {
+    (await p)?.close();
+  } catch {
+    /* already closed/terminated */
+  }
 }
 
 /** True for the transient "the database connection is closing" / InvalidState error

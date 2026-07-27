@@ -101,3 +101,26 @@ export async function adoptDeviceList(
   await saveOwnDeviceList(dek, incoming);
   return true;
 }
+
+/**
+ * Remove a device from the OWN list (revocation / unlink). Only the PRIMARY can re-sign.
+ * The removed device is simply absent from a NEWER (version+1) list — its cert stays
+ * epoch-valid, so revocation is "absence from a newer list", propagated via gossip and
+ * protected from rollback by isNewerDeviceList on every receiver. Refuses to remove our
+ * OWN entry (the primary can't revoke itself this way), a device not present, or the last
+ * one. Returns the new signed+stored list, or null if the removal was refused.
+ */
+export async function revokeDevice(
+  dek: CryptoKey,
+  id: IdentityKeys,
+  current: DeviceList,
+  targetSignPub: Uint8Array,
+): Promise<DeviceList | null> {
+  if (!isPrimaryDevice(id)) return null;
+  if (eqSign(targetSignPub, id.sign.publicKey)) return null; // never revoke self here
+  const devices = current.devices.filter((d) => !eqSign(d.signPub, targetSignPub));
+  if (devices.length === current.devices.length || devices.length === 0) return null; // not present / would empty
+  const list = await signDeviceList(id.master.privateKey, id.master.publicKey, id.epoch, current.version + 1, devices);
+  await saveOwnDeviceList(dek, list);
+  return list;
+}

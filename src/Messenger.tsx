@@ -30,6 +30,7 @@ import {
   type SasResult,
   isNewerDeviceList,
   encodeDeviceList,
+  deviceInList,
   type DeviceList,
 } from './crypto';
 import {
@@ -40,7 +41,7 @@ import {
   completeLinkOnP,
   type LinkSession,
 } from './lib/linkflow';
-import { loadOrCreateOwnDeviceList, adoptDeviceList } from './lib/devices';
+import { loadOrCreateOwnDeviceList, adoptDeviceList, revokeDevice } from './lib/devices';
 import {
   makeContact,
   makeContactFromHeader,
@@ -97,6 +98,7 @@ import { moveContactStorage } from './lib/rekey';
 import { loadRetiredMasters, addRetiredMaster } from './lib/denylist';
 import { loadProfile, saveProfile, type MyProfile } from './lib/profile';
 import { wipeAccount } from './lib/wipe';
+import { loadDeviceNames, setDeviceName, type DeviceNames } from './lib/devicenames';
 import {
   loadStickers,
   saveStickers,
@@ -273,7 +275,7 @@ interface Props {
   onLock: () => void;
 }
 
-type View = 'list' | 'chat' | 'add' | 'verify' | 'contact' | 'profile' | 'newgroup' | 'gmanage' | 'learn';
+type View = 'list' | 'chat' | 'add' | 'verify' | 'contact' | 'profile' | 'newgroup' | 'gmanage' | 'learn' | 'devices';
 
 // Navigation tree, so the hardware/gesture Back button steps UP one level inside
 // the app instead of leaving the (standalone) PWA — on Android, leaving meant the
@@ -288,13 +290,14 @@ function viewDepth(v: View): number {
     case 'verify':
     case 'gmanage':
     case 'learn':
+    case 'devices':
       return 2;
     default:
       return 1;
   }
 }
 function parentView(v: View): View {
-  if (v === 'learn') return 'profile';
+  if (v === 'learn' || v === 'devices') return 'profile';
   return v === 'contact' || v === 'verify' || v === 'gmanage' ? 'chat' : 'list';
 }
 
@@ -314,6 +317,7 @@ function isSilentFrame(kind: MessageContent['kind']): boolean {
     case 'bootreq':
     case 'recall':
     case 'attreq':
+    case 'unlinkreq':
     case 'ginvite':
     case 'gremove':
     case 'gleave':
@@ -513,6 +517,37 @@ export function Messenger({ dek, onLock }: Props) {
   const [bugOpen, setBugOpen] = useState(false); // bug-report modal open
   const [deleteOpen, setDeleteOpen] = useState(false); // account-delete confirmation open
   const [wiping, setWiping] = useState(false); // account wipe in progress
+  const [deviceNames, setDeviceNames] = useState<DeviceNames>({}); // b64(signPub) → local name
+  const [removeDev, setRemoveDev] = useState<Uint8Array | null>(null); // device pending remove-confirm
+
+  // Rename one of my devices (local-only name store; never gossiped).
+  async function renameDevice(signPub: Uint8Array, current: string) {
+    const name = window.prompt(t('Gerätename'), current);
+    if (name === null) return;
+    setDeviceNames(await setDeviceName(dek, signPub, name));
+  }
+  // Master removes a device: revoke (re-sign the list without it) + gossip. The removed
+  // device self-wipes when the newer list reaches it.
+  async function removeDeviceAction(signPub: Uint8Array) {
+    setRemoveDev(null);
+    const id = identityRef.current;
+    const cur = ownListRef.current;
+    if (!id || !cur) return;
+    const next = await revokeDevice(dek, id, cur, signPub);
+    if (!next) return;
+    ownListRef.current = next;
+    setMultiDevice(next.devices.length > 1);
+    await gossipDeviceList(next);
+    bump();
+  }
+  // This (linked) device unlinks itself: tell the primary, then wipe. Send first so the
+  // mailbox holds the request even if the primary is offline; wipe regardless.
+  async function unlinkSelfAction() {
+    setRemoveDev(null);
+    const self = await ensureSelfContact();
+    if (self) await fanoutSend(self, { kind: 'unlinkreq' }, randomMid()).catch(() => undefined);
+    await doWipeAccount();
+  }
 
   // Irreversibly wipe this device's crypto container, then reload into onboarding.
   async function doWipeAccount() {
@@ -2273,6 +2308,14 @@ export function Messenger({ dek, onLock }: Props) {
           // adopt it as my stored own list too, so a secondary device's self-sync
           // targets a later-linked sibling as well (Review fund 4).
           if (bytesEqual(contact.peerMasterPub, id.master.publicKey)) {
+            // My primary re-signed MY OWN device list. If this (verified, newer) list no
+            // longer contains THIS device, my primary has revoked/unlinked me → the agreed
+            // outcome is that this container self-destructs. Forgery-safe: applyDeviceListUpdate
+            // already proved it's signed by my own master and is strictly newer.
+            if (!deviceInList(content.list, id.sign.publicKey)) {
+              void doWipeAccount();
+              return;
+            }
             await adoptDeviceList(dek, id, content.list);
             ownListRef.current = content.list;
             setMultiDevice(content.list.devices.length > 1);
@@ -2300,6 +2343,20 @@ export function Messenger({ dek, onLock }: Props) {
           if (!contact.peerAckedListEV || isNewerDeviceList(claimed, contact.peerAckedListEV)) {
             contact.peerAckedListEV = claimed;
             await saveContact(dek, contact);
+          }
+        }
+      } else if (content.kind === 'unlinkreq') {
+        // A linked device of MINE asks to be unlinked. Revoke it (re-sign the list without
+        // it) and gossip. Gated: only my own self-contact, only the primary can re-sign.
+        // The sender device is read off the AUTHENTICATED envelope, so it can't name
+        // another device to revoke. The device wipes itself on its side regardless.
+        if (bytesEqual(contact.peerMasterPub, id.master.publicKey) && isPrimaryDevice(id) && ownListRef.current) {
+          const from = env.type === 'prekey' ? env.x3dh.identitySignPub : env.dev;
+          const next = from ? await revokeDevice(dek, id, ownListRef.current, from) : null;
+          if (next) {
+            ownListRef.current = next;
+            setMultiDevice(next.devices.length > 1);
+            await gossipDeviceList(next);
           }
         }
       } else if (content.kind === 'rotation') {
@@ -2543,6 +2600,7 @@ export function Messenger({ dek, onLock }: Props) {
 
       const prof = await loadProfile(dek);
       myProfileRef.current = prof;
+      setDeviceNames(await loadDeviceNames(dek));
       setStickers(await loadStickers(dek));
       setMyAvatarB64(prof.avatarB64 ?? '');
       setProfileName(prof.name ?? '');
@@ -5042,6 +5100,86 @@ export function Messenger({ dek, onLock }: Props) {
   }
 
   // ── Profile ───────────────────────────────────────────────────────
+  if (view === 'devices') {
+    const idv = identityRef.current;
+    const primary = !!(idv && isPrimaryDevice(idv));
+    const meSign = idv?.sign.publicKey;
+    const devices = ownListRef.current?.devices ?? [];
+    const removingSelf = !!removeDev && (!primary || !!(meSign && bytesEqual(removeDev, meSign)));
+    return (
+      <div className="subview">
+        <div className="subhead">
+          <button className="back" onClick={() => setView('profile')}>
+            <IconBack />
+          </button>
+          <div className="h">{t('Geräte')}</div>
+        </div>
+        <div className="subbody">
+          <p className="share-hint" style={{ textAlign: 'left' }}>
+            {primary
+              ? t('Diese Geräte sind mit deiner Identität verknüpft. Entfernst du eins, wird sein Krypto-Container gelöscht.')
+              : t('Dieses Gerät ist mit deiner Identität verknüpft.')}
+          </p>
+          <div className="card pad16">
+            {devices.map((d, i) => {
+              const b64 = bytesToB64(d.signPub);
+              const isMe = !!(meSign && bytesEqual(d.signPub, meSign));
+              const name = deviceNames[b64] || (isMe ? t('Dieses Gerät') : t('Gerät {n}', { n: i + 1 }));
+              return (
+                <div key={b64} className="dev-row">
+                  <span className="setting-ic"><IconDevices size={15} /></span>
+                  <span className="setting-tx">
+                    <span className="setting-title">{name}</span>
+                    <span className="setting-sub">{isMe ? t('Dieses Gerät') : t('Verknüpftes Gerät')}</span>
+                  </span>
+                  {primary && (
+                    <button className="dev-act" title={t('Umbenennen')} onClick={() => void renameDevice(d.signPub, deviceNames[b64] ?? '')}>
+                      ✎
+                    </button>
+                  )}
+                  {primary && !isMe && (
+                    <button className="dev-act danger" title={t('Entfernen')} onClick={() => setRemoveDev(d.signPub)}>
+                      <IconTrash size={15} />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+            {devices.length <= 1 && <p className="share-hint">{t('Noch keine weiteren Geräte gekoppelt.')}</p>}
+          </div>
+
+          {!primary && (
+            <button className="btn btn-danger" style={{ marginTop: 16 }} onClick={() => setRemoveDev(meSign ?? new Uint8Array())}>
+              {t('Dieses Gerät entkoppeln')}
+            </button>
+          )}
+        </div>
+
+        {removeDev && (
+          <div className="crop-modal" role="dialog" aria-label={t('Gerät entfernen')}>
+            <div className="crop-head">{removingSelf ? t('Dieses Gerät entkoppeln') : t('Gerät entfernen')}</div>
+            <div className="backup-body">
+              <div className="err-note" style={{ textAlign: 'left' }}>
+                <p>{tb('Der Krypto-Container dieses Geräts wird **unwiderruflich gelöscht** — Nachrichten, Kontakte und Schlüssel dort sind dann weg.')}</p>
+              </div>
+            </div>
+            <div className="crop-actions">
+              <button className="btn btn-outline" onClick={() => setRemoveDev(null)}>
+                {t('Abbrechen')}
+              </button>
+              <button
+                className="btn btn-danger"
+                onClick={() => (removingSelf ? void unlinkSelfAction() : void removeDeviceAction(removeDev))}
+              >
+                {t('Entfernen')}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   if (view === 'learn') {
     return <Explainer onClose={() => setView('profile')} />;
   }
@@ -5129,6 +5267,15 @@ export function Messenger({ dek, onLock }: Props) {
               <span className="setting-tx">
                 <span className="setting-title">{t('Gerät koppeln')}</span>
                 <span className="setting-sub">{t('Zweites Gerät per QR + Emoji-Abgleich')}</span>
+              </span>
+              <span className="setting-go"><IconChevron /></span>
+            </button>
+
+            <button className="setting-row" onClick={() => setView('devices')}>
+              <span className="setting-ic"><IconDevices /></span>
+              <span className="setting-tx">
+                <span className="setting-title">{t('Geräte verwalten')}</span>
+                <span className="setting-sub">{t('Verknüpfte Geräte ansehen, benennen, entfernen')}</span>
               </span>
               <span className="setting-go"><IconChevron /></span>
             </button>

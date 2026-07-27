@@ -4036,3 +4036,40 @@ canvas.vo-img {
 .setting-row.danger .setting-ic {
   color: var(--danger);
 }
+
+/* ── Device management rows ──────────────────────────────────────────────── */
+.dev-row {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 11px 2px;
+}
+.dev-row + .dev-row {
+  border-top: 1px solid var(--border);
+}
+.dev-row .setting-tx {
+  flex: 1;
+  min-width: 0;
+}
+.dev-act {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface2);
+  color: var(--muted);
+  font-size: 15px;
+  cursor: pointer;
+  transition: transform 140ms var(--ease-out);
+}
+.dev-act:active {
+  transform: scale(0.92);
+}
+.dev-act.danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
+}

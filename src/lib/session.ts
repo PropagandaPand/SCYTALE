@@ -845,6 +845,10 @@ export type MessageContent =
   // key + the per-file key (keyB64) end-to-end; the recipient downloads the ciphertext and
   // decrypts. `chunk` is the plaintext chunk size the blob was sealed with. See crypto/blob.ts.
   | { kind: 'r2'; key: string; keyB64: string; name: string; mime: string; size: number; chunk: number; viewOnce?: boolean }
+  // A linked device asking its PRIMARY to unlink (revoke) it — sent over the self-contact
+  // just before the device wipes itself. Payload-free; the sender device is read off the
+  // authenticated envelope, so it can't be forged to revoke a different device.
+  | { kind: 'unlinkreq' }
   // PULL request for an offered attachment. The sender streams its chunks in reply —
   // but only for a tid it actually offered to THIS contact (amplification guard).
   | { kind: 'attreq'; tid: string };
@@ -1008,6 +1012,7 @@ export async function frameContent(c: MessageContent): Promise<Bytes> {
     return prefixed(16, utf8.encode(JSON.stringify({ t: c.tid, n: c.name, m: c.mime, s: c.size, o: c.total })));
   }
   if (c.kind === 'attreq') return prefixed(17, utf8.encode(JSON.stringify({ t: c.tid })));
+  if (c.kind === 'unlinkreq') return prefixed(20, new Uint8Array(0));
   if (c.kind === 'r2')
     return prefixed(
       19,
@@ -1148,6 +1153,7 @@ export async function unframeContent(bytes: Bytes): Promise<MessageContent> {
     const j = JSON.parse(utf8.decode(bytes.slice(1)));
     return { kind: 'attreq', tid: String(j.t) };
   }
+  if (bytes[0] === 20) return { kind: 'unlinkreq' };
   if (bytes[0] === 19) {
     const j = JSON.parse(utf8.decode(bytes.slice(1)));
     return {

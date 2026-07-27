@@ -158,6 +158,8 @@ const CHUNK_BYTES = 48 * 1024;
 const AUTOPUSH_CAP = 2 * 1024 * 1024; // at/below → chunks auto-pushed to the mailbox
 const MAX_BIG_ATTACH = 25 * 1024 * 1024; // above AUTOPUSH_CAP and up to here → offer + pull
 const SERVE_COOLDOWN_MS = 30_000; // min gap between serving the SAME offered attachment to a contact (anti-amplification)
+const PULL_RETRY_MS = 33_000; // re-request a stalled pull just past the serve cooldown (re-serve is idempotent → fills gaps)
+const MAX_PULL_ATTEMPTS = 4; // total attreq attempts before a pull gives up (~2 min)
 // RECEIVE caps (sanity bounds; the real flood limit is the relay mailbox byte-cap,
 // which rate-limits what a peer can push before we drain it).
 const RECV_MAX_BYTES = 30 * 1024 * 1024; // largest attachment we'll reassemble
@@ -378,6 +380,8 @@ export function Messenger({ dek, onLock }: Props) {
   // tombstones the original on append.
   const recalledMidsRef = useRef<Set<string>>(new Set());
   const downloadingRef = useRef<Set<string>>(new Set()); // tids currently being pulled (spinner state)
+  const pullProgressRef = useRef<Map<string, number>>(new Map()); // tid → percent received (download progress)
+  const autoPulledRef = useRef<Set<string>>(new Set()); // tids we already auto-pulled once (don't loop)
   const servedRef = useRef<Map<string, number>>(new Map()); // (roomId:tid) → last serve time, to rate-limit re-serves
   const sendRoomRef = useRef<Map<string, string>>(new Map());
   const inboxClientRef = useRef<RelayClient | null>(null);
@@ -916,6 +920,13 @@ export function Messenger({ dek, onLock }: Props) {
       marker.receivedIdx.push(c.idx);
       marker.receivedBytes += c.data.length;
       await putRecvMarker(dek, c.tid, marker); // progress persisted (crash-safe/idempotent)
+      // Surface download progress on the pull chip. Re-render only when the whole
+      // percent changes (not on every one of hundreds of chunks).
+      const pct = Math.floor((marker.receivedIdx.length / marker.total) * 100);
+      if (pct !== pullProgressRef.current.get(c.tid)) {
+        pullProgressRef.current.set(c.tid, pct);
+        if (downloadingRef.current.has(c.tid)) bump();
+      }
     }
 
     if (marker.receivedIdx.length >= marker.total) {
@@ -954,6 +965,7 @@ export function Messenger({ dek, onLock }: Props) {
         }
       }
       downloadingRef.current.delete(c.tid);
+      pullProgressRef.current.delete(c.tid);
       await clearRecvMarker(c.tid);
     }
   }
@@ -1255,12 +1267,40 @@ export function Messenger({ dek, onLock }: Props) {
     if (!contact) return;
     downloadingRef.current.add(tid);
     bump();
-    // Clear the spinner if nothing arrives (sender offline / interrupted) so the chip is
-    // tappable again; a completed pull clears it earlier in receiveChunk.
-    window.setTimeout(() => {
-      if (downloadingRef.current.delete(tid)) bump();
-    }, 60_000);
-    await fanoutSend(contact, { kind: 'attreq', tid }, randomMid());
+
+    // The pulled attachment has fully arrived once its placeholder no longer carries a
+    // `pull` marker (receiveChunk reconciles it on completion).
+    const done = () => !(messagesRef.current[roomId] ?? []).some((x) => x.mid === tid && x.file?.pull);
+
+    // Re-request on stall: a stalled transfer (a dropped/nacked chunk, or the sender
+    // only just came online) is refilled by re-serving — receiveChunk stores each index
+    // once, so re-serving fills only the gaps. Bounded so it can't loop forever.
+    let attempts = 0;
+    const attempt = async () => {
+      attempts++;
+      await fanoutSend(contact, { kind: 'attreq', tid }, randomMid());
+      window.setTimeout(() => {
+        if (done() || !downloadingRef.current.has(tid)) {
+          downloadingRef.current.delete(tid);
+          return;
+        }
+        if (attempts >= MAX_PULL_ATTEMPTS) {
+          if (downloadingRef.current.delete(tid)) bump(); // give up → chip tappable again
+          return;
+        }
+        void attempt();
+      }, PULL_RETRY_MS);
+    };
+    await attempt();
+  }
+
+  /** Auto-download an offer the moment it arrives (no manual tap) — the common case
+   *  where a peer just sent a video. Once per tid; a failed auto-pull still leaves the
+   *  chip for a manual retry. */
+  function autoPull(roomId: string, tid: string, total: number) {
+    if (autoPulledRef.current.has(tid) || downloadingRef.current.has(tid)) return;
+    autoPulledRef.current.add(tid);
+    void pullAttachment(roomId, { mid: tid, mine: false, ts: Date.now(), file: { name: '', mime: '', attId: tid, pull: { total } } });
   }
 
   // The hidden "self" contact: peerMaster == MY master, peerDeviceList == my own
@@ -2292,6 +2332,8 @@ export function Messenger({ dek, onLock }: Props) {
           if (!(viewRef.current === 'chat' && activeRoomRef.current === contact.roomId)) {
             unreadRef.current[contact.roomId] = (unreadRef.current[contact.roomId] ?? 0) + 1;
           }
+          // Start downloading straight away — no manual tap needed.
+          autoPull(contact.roomId, content.tid, content.total);
         }
       } else if (content.kind === 'attreq') {
         // The peer pulls an attachment I offered → stream its chunks (guarded).
@@ -3185,7 +3227,7 @@ export function Messenger({ dek, onLock }: Props) {
         // Auto-push chunked: a 1:1 contact, above the inline cap and within AUTOPUSH_CAP.
         if (target && data.length <= AUTOPUSH_CAP) {
           const sent = await sendChunkedAttachment(target, data, name, mime, viewOnce);
-          if (!sent) setError(t('Empfänger kann große Anhänge noch nicht empfangen — bitte App aktualisieren lassen.'));
+          if (!sent) setError(t('Konnte gerade nicht gesendet werden — Empfänger nicht erreichbar oder App veraltet. Bitte erneut versuchen.'));
           return;
         }
         if (target && data.length <= MAX_BIG_ATTACH) {
@@ -4342,8 +4384,8 @@ export function Messenger({ dek, onLock }: Props) {
                         <span className="pull-name">{m.file.name}</span>
                         <span className="pull-size">
                           {m.file.attId && downloadingRef.current.has(m.file.attId)
-                            ? 'lädt…'
-                            : `${(Math.round(((m.file.size ?? 0) / (1024 * 1024)) * 10) / 10)} MB · laden`}
+                            ? `${pullProgressRef.current.get(m.file.attId) ?? 0} %`
+                            : `${(Math.round(((m.file.size ?? 0) / (1024 * 1024)) * 10) / 10)} MB · ${t('laden')}`}
                         </span>
                       </button>
                     ) : (

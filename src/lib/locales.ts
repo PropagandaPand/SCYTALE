@@ -334,6 +334,8 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Foto senden": "Send photo",
     "Video senden": "Send video",
     "Zerstört sich nach dem einmaligen Ansehen selbst — für immer und unwiederbringlich vernichtet.": "Self-destructs after a single viewing — gone forever, destroyed beyond recovery.",
+    "Konnte gerade nicht gesendet werden — Empfänger nicht erreichbar oder App veraltet. Bitte erneut versuchen.": "Couldn't be sent right now — recipient unreachable or their app is outdated. Please try again.",
+    "laden": "Load",
   },
   es: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — Falló la autoprueba de WebCrypto. Bloqueado por seguridad.",
@@ -663,6 +665,8 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Foto senden": "Enviar foto",
     "Video senden": "Enviar vídeo",
     "Zerstört sich nach dem einmaligen Ansehen selbst — für immer und unwiederbringlich vernichtet.": "Se autodestruye tras verse una sola vez — desaparece para siempre, destruido de forma irrecuperable.",
+    "Konnte gerade nicht gesendet werden — Empfänger nicht erreichbar oder App veraltet. Bitte erneut versuchen.": "No se pudo enviar en este momento — destinatario no disponible o app desactualizada. Inténtalo de nuevo.",
+    "laden": "Cargar",
   },
   fr: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — échec de l'autotest WebCrypto. Verrouillé par sécurité.",
@@ -992,6 +996,8 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Foto senden": "Envoyer la photo",
     "Video senden": "Envoyer la vidéo",
     "Zerstört sich nach dem einmaligen Ansehen selbst — für immer und unwiederbringlich vernichtet.": "S'autodétruit après une seule consultation — perdu à jamais, détruit sans retour.",
+    "Konnte gerade nicht gesendet werden — Empfänger nicht erreichbar oder App veraltet. Bitte erneut versuchen.": "Impossible d'envoyer pour le moment — destinataire injoignable ou application obsolète. Veuillez réessayer.",
+    "laden": "Charger",
   },
   it: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — Autotest WebCrypto fallito. Bloccato per motivi di sicurezza.",
@@ -1321,6 +1327,8 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Foto senden": "Invia foto",
     "Video senden": "Invia video",
     "Zerstört sich nach dem einmaligen Ansehen selbst — für immer und unwiederbringlich vernichtet.": "Si autodistrugge dopo una sola visualizzazione — perso per sempre, distrutto in modo irrecuperabile.",
+    "Konnte gerade nicht gesendet werden — Empfänger nicht erreichbar oder App veraltet. Bitte erneut versuchen.": "Impossibile inviare al momento — destinatario non raggiungibile o app non aggiornata. Riprova.",
+    "laden": "Carica",
   },
   pt: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — Autoteste do WebCrypto falhou. Bloqueado por motivos de segurança.",
@@ -1650,6 +1658,8 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Foto senden": "Enviar foto",
     "Video senden": "Enviar vídeo",
     "Zerstört sich nach dem einmaligen Ansehen selbst — für immer und unwiederbringlich vernichtet.": "Autodestrói-se após ser visto uma única vez — perdido para sempre, destruído de forma irrecuperável.",
+    "Konnte gerade nicht gesendet werden — Empfänger nicht erreichbar oder App veraltet. Bitte erneut versuchen.": "Não foi possível enviar agora — destinatário indisponível ou app desatualizado. Tente novamente.",
+    "laden": "Carregar",
   },
   nl: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — WebCrypto-zelftest mislukt. Uit veiligheidsoverwegingen vergrendeld.",
@@ -1979,6 +1989,8 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Foto senden": "Foto versturen",
     "Video senden": "Video versturen",
     "Zerstört sich nach dem einmaligen Ansehen selbst — für immer und unwiederbringlich vernichtet.": "Vernietigt zichzelf na één keer bekijken — voorgoed weg, onherstelbaar vernietigd.",
+    "Konnte gerade nicht gesendet werden — Empfänger nicht erreichbar oder App veraltet. Bitte erneut versuchen.": "Kon nu niet worden verzonden — ontvanger onbereikbaar of app verouderd. Probeer het opnieuw.",
+    "laden": "Laden",
   },
   pl: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — autotest WebCrypto nie powiódł się. Zablokowano ze względów bezpieczeństwa.",
@@ -2308,6 +2320,8 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Foto senden": "Wyślij zdjęcie",
     "Video senden": "Wyślij film",
     "Zerstört sich nach dem einmaligen Ansehen selbst — für immer und unwiederbringlich vernichtet.": "Niszczy się po jednorazowym obejrzeniu — znika na zawsze, bezpowrotnie zniszczone.",
+    "Konnte gerade nicht gesendet werden — Empfänger nicht erreichbar oder App veraltet. Bitte erneut versuchen.": "Nie udało się teraz wysłać — odbiorca niedostępny lub aplikacja nieaktualna. Spróbuj ponownie.",
+    "laden": "Wczytaj",
   },
   ru: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — самопроверка WebCrypto не пройдена. Заблокировано в целях безопасности.",
@@ -2637,6 +2651,8 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Foto senden": "Отправить фото",
     "Video senden": "Отправить видео",
     "Zerstört sich nach dem einmaligen Ansehen selbst — für immer und unwiederbringlich vernichtet.": "Самоуничтожается после единственного просмотра — исчезает навсегда, уничтожается безвозвратно.",
+    "Konnte gerade nicht gesendet werden — Empfänger nicht erreichbar oder App veraltet. Bitte erneut versuchen.": "Не удалось отправить сейчас — получатель недоступен или приложение устарело. Попробуйте ещё раз.",
+    "laden": "Загрузить",
   },
   uk: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — самоперевірка WebCrypto не пройдена. Заблоковано з міркувань безпеки.",
@@ -2966,6 +2982,8 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Foto senden": "Надіслати фото",
     "Video senden": "Надіслати відео",
     "Zerstört sich nach dem einmaligen Ansehen selbst — für immer und unwiederbringlich vernichtet.": "Самознищується після одного перегляду — зникає назавжди, знищується безповоротно.",
+    "Konnte gerade nicht gesendet werden — Empfänger nicht erreichbar oder App veraltet. Bitte erneut versuchen.": "Не вдалося надіслати зараз — отримувач недоступний або застосунок застарів. Спробуйте ще раз.",
+    "laden": "Завантажити",
   },
   tr: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — WebCrypto öz testi başarısız. Güvenlik nedeniyle kilitlendi.",
@@ -3295,6 +3313,8 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Foto senden": "Fotoğraf gönder",
     "Video senden": "Video gönder",
     "Zerstört sich nach dem einmaligen Ansehen selbst — für immer und unwiederbringlich vernichtet.": "Bir kez görüntülendikten sonra kendini yok eder — sonsuza dek kaybolur, geri döndürülemez biçimde imha edilir.",
+    "Konnte gerade nicht gesendet werden — Empfänger nicht erreichbar oder App veraltet. Bitte erneut versuchen.": "Şu anda gönderilemedi — alıcıya ulaşılamıyor veya uygulaması eski. Lütfen tekrar deneyin.",
+    "laden": "İndir",
   },
   zh: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — WebCrypto 自检失败。出于安全原因已锁定。",
@@ -3624,5 +3644,7 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Foto senden": "发送照片",
     "Video senden": "发送视频",
     "Zerstört sich nach dem einmaligen Ansehen selbst — für immer und unwiederbringlich vernichtet.": "查看一次后即自我销毁——永久消失，无可挽回地彻底摧毁。",
+    "Konnte gerade nicht gesendet werden — Empfänger nicht erreichbar oder App veraltet. Bitte erneut versuchen.": "暂时无法发送 — 无法联系到对方或其应用版本过旧。请重试。",
+    "laden": "加载",
   },
 };

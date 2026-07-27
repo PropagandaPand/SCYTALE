@@ -42,6 +42,21 @@ const MAX_PART = 32 * 1024 * 1024; // a single multipart part
 // to delete-after-download) bucket live. Bounded overshoot: one in-flight file per race.
 const STORAGE_BUDGET = 9 * 1024 * 1024 * 1024; // 9 GB, headroom under the 10 GB free limit
 
+/** Cap a request body to `max` REAL bytes server-side (Content-Length is client-supplied
+ *  and unenforced by R2). The stream errors past the cap, which rejects the uploadPart. */
+function capBody(body: ReadableStream<Uint8Array>, max: number): ReadableStream<Uint8Array> {
+  let seen = 0;
+  return body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, ctrl) {
+        seen += chunk.byteLength;
+        if (seen > max) ctrl.error(new Error('part too large'));
+        else ctrl.enqueue(chunk);
+      },
+    }),
+  );
+}
+
 /** Live total of stored object bytes (completed objects; in-progress multipart parts are
  *  not counted until complete). Cheap because the bucket only holds in-flight transfers. */
 async function bucketBytes(bucket: R2Bucket): Promise<number> {
@@ -139,8 +154,9 @@ export default {
       // push the bucket past the storage budget (the client passes its expected size).
       if (request.method === 'POST' && url.pathname === '/api/blob/create') {
         const want = Number(url.searchParams.get('size') || '0');
-        if (want > MAX_BLOB) return new Response('Too large', { status: 413 });
-        if ((await bucketBytes(env.BLOBS)) + Math.max(0, want) > STORAGE_BUDGET) {
+        // A real, positive declared size (a size=0 lie previously bypassed the budget check).
+        if (!(want > 0) || want > MAX_BLOB) return new Response('Bad size', { status: 413 });
+        if ((await bucketBytes(env.BLOBS)) + want > STORAGE_BUDGET) {
           return json({ error: 'storage_full' }, 507); // Insufficient Storage — try again later
         }
         const key = crypto.randomUUID().replace(/-/g, '');
@@ -148,24 +164,33 @@ export default {
         return json({ key, uploadId: mpu.uploadId });
       }
       // Upload one part. Part number is 1-based; all parts but the last must be ≥5 MiB.
+      // The part body is capped to MAX_PART REAL bytes (Content-Length isn't trusted).
       if (request.method === 'PUT' && url.pathname === '/api/blob/part') {
         const key = url.searchParams.get('key') || '';
         const uploadId = url.searchParams.get('upload') || '';
         const n = Number(url.searchParams.get('n') || '0');
-        const len = Number(request.headers.get('content-length') || '0');
         if (!okKey(key) || !uploadId || n < 1 || !request.body) return new Response('Bad request', { status: 400 });
-        if (len > MAX_PART) return new Response('Part too large', { status: 413 });
         const mpu = env.BLOBS.resumeMultipartUpload(key, uploadId);
-        const part = await mpu.uploadPart(n, request.body);
-        return json({ etag: part.etag });
+        try {
+          const part = await mpu.uploadPart(n, capBody(request.body, MAX_PART));
+          return json({ etag: part.etag });
+        } catch {
+          return new Response('Part too large or upload failed', { status: 413 });
+        }
       }
-      // Finish → assemble the parts into the final object.
+      // Finish → assemble the parts into the final object, then an AUTHORITATIVE budget
+      // check on the now-real bucket size (bounds the concurrent-create race: an upload that
+      // pushed the bucket over budget is deleted and reported full).
       if (request.method === 'POST' && url.pathname === '/api/blob/complete') {
         const body = (await request.json().catch(() => null)) as { key?: string; upload?: string; parts?: { n: number; etag: string }[] } | null;
         if (!body || !okKey(body.key || '') || !body.upload || !Array.isArray(body.parts)) return new Response('Bad request', { status: 400 });
         if (body.parts.length * MAX_PART > MAX_BLOB) return new Response('Too large', { status: 413 });
         const mpu = env.BLOBS.resumeMultipartUpload(body.key!, body.upload);
         await mpu.complete(body.parts.map((p) => ({ partNumber: p.n, etag: p.etag })));
+        if ((await bucketBytes(env.BLOBS)) > STORAGE_BUDGET) {
+          await env.BLOBS.delete(body.key!).catch(() => undefined);
+          return json({ error: 'storage_full' }, 507);
+        }
         return new Response(null, { status: 204 });
       }
       // Abort a failed upload → free the parts.
@@ -188,12 +213,8 @@ export default {
         h.set('cache-control', 'private, no-store');
         return new Response(obj.body, { status: 200, headers: h });
       }
-      // DELETE /api/blob/<key> → best-effort cleanup.
-      if (request.method === 'DELETE' && url.pathname.startsWith('/api/blob/')) {
-        const key = url.pathname.slice('/api/blob/'.length);
-        if (okKey(key)) await env.BLOBS.delete(key);
-        return new Response(null, { status: 204 });
-      }
+      // No client DELETE: an unauthenticated delete lets any key-holder wipe a blob out from
+      // under a co-recipient. Objects are reclaimed by the R2 lifecycle TTL instead.
       return new Response('Method not allowed', { status: 405 });
     }
 

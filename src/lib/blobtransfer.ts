@@ -133,6 +133,7 @@ export async function uploadFileToR2(
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ key, upload: uploadId, parts }),
     });
+    if (done.status === 507) throw new StorageFullError(); // budget re-checked authoritatively at complete
     if (!done.ok) throw new Error('Upload-Abschluss fehlgeschlagen.');
     onProgress?.(1);
     return { key, keyB64: bytesToB64(raw), size, chunk: BLOB_CHUNK };
@@ -190,9 +191,10 @@ export async function downloadR2ToStore(
     if (idx !== totalChunks) throw new Error('Übertragung unvollständig.');
     const meta: AttachmentMeta = { name, mime, size: ref.size, chunks: totalChunks };
     await finalizeAttachment(dek, attId, meta);
-    // Free the R2 object now that it's safely stored locally — R2 only ever holds
-    // in-flight files, so storage stays tiny no matter how many big files are sent.
-    void fetch('/api/blob/' + ref.key, { method: 'DELETE' }).catch(() => undefined);
+    // NB: we deliberately do NOT delete the R2 object here. The SAME descriptor is fanned
+    // out to every recipient device, so a delete-after-download would 404 the object for the
+    // recipient's OTHER devices (co-recipient data loss). The server-side lifecycle TTL
+    // reclaims it instead; the storage brake bounds accumulation.
   } catch (e) {
     await deleteAttachment(attId).catch(() => undefined); // don't leave a half-written attachment
     throw e;

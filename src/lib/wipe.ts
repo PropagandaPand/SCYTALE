@@ -14,12 +14,23 @@
  */
 import { deleteDB } from 'idb';
 import { closeDb } from './db';
+import { disablePush } from './push';
 
 const DB_NAMES = ['scytale', 'scytale-badge'];
 
 export async function wipeAccount(): Promise<void> {
   try {
     await navigator.clearAppBadge?.();
+  } catch {
+    /* ignore */
+  }
+  // Tear down the push subscription and UNREGISTER the service worker BEFORE deleting the
+  // stores — otherwise the SW stays live and a later content-free push re-creates the
+  // scytale-badge DB (its raw open bypasses the db.ts wiping guard) and shows a notice.
+  await disablePush().catch(() => undefined);
+  try {
+    const reg = await navigator.serviceWorker?.getRegistration();
+    await reg?.unregister();
   } catch {
     /* ignore */
   }

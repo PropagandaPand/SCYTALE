@@ -518,23 +518,46 @@ export function Messenger({ dek, onLock }: Props) {
   const [deleteOpen, setDeleteOpen] = useState(false); // account-delete confirmation open
   const [wiping, setWiping] = useState(false); // account wipe in progress
   const [deviceNames, setDeviceNames] = useState<DeviceNames>({}); // b64(signPub) → local name
-  const [removeDev, setRemoveDev] = useState<Uint8Array | null>(null); // device pending remove-confirm
+  const [removeDev, setRemoveDev] = useState<Uint8Array<ArrayBuffer> | null>(null); // device pending remove-confirm
 
   // Rename one of my devices (local-only name store; never gossiped).
-  async function renameDevice(signPub: Uint8Array, current: string) {
+  async function renameDevice(signPub: Uint8Array<ArrayBuffer>, current: string) {
     const name = window.prompt(t('Gerätename'), current);
     if (name === null) return;
     setDeviceNames(await setDeviceName(dek, signPub, name));
   }
   // Master removes a device: revoke (re-sign the list without it) + gossip. The removed
   // device self-wipes when the newer list reaches it.
-  async function removeDeviceAction(signPub: Uint8Array) {
+  async function removeDeviceAction(signPub: Uint8Array<ArrayBuffer>) {
     setRemoveDev(null);
     const id = identityRef.current;
     const cur = ownListRef.current;
     if (!id || !cur) return;
+    // Grab the self-contact WHILE it still holds a session + list entry for the target — the
+    // subsequent gossip prunes it, so this is our one chance to reach that device directly.
+    const self = await ensureSelfContact();
     const next = await revokeDevice(dek, id, cur, signPub);
     if (!next) return;
+    // Deliver the new, revoking list DIRECTLY to the removed device BEFORE it's pruned from
+    // the fan-out set — otherwise it never learns it's gone and its self-wipe never fires
+    // (audit H4). `only: signPub` targets exactly that device; it verifies my master + newer
+    // list, sees it's omitted, and self-wipes.
+    if (self) {
+      try {
+        const { deliveries } = await enqueueInbox(async () => {
+          const r = await fanoutDeliveries(id, self, { kind: 'devlist', list: next }, randomMid(), undefined, signPub);
+          await saveContact(dek, self);
+          return r;
+        });
+        for (const d of deliveries) {
+          const room = await inboxRoom(d.deviceSignPub);
+          connectDeviceInbox(room);
+          relaysRef.current.get(room)?.send(d.sealed, randomMid(), true); // silent
+        }
+      } catch {
+        /* best effort — the device also learns it via normal gossip if it reconnects */
+      }
+    }
     ownListRef.current = next;
     setMultiDevice(next.devices.length > 1);
     await gossipDeviceList(next);
@@ -558,7 +581,7 @@ export function Messenger({ dek, onLock }: Props) {
       const id = identityRef.current;
       if (id && !isPrimaryDevice(id)) {
         const self = await ensureSelfContact().catch(() => null);
-        if (self) await fanoutSend(self, { kind: 'unlinkreq' }, randomMid()).catch(() => undefined);
+        if (self) await fanoutSend(self, { kind: 'unlinkreq' }, randomMid(), 4).catch(() => undefined);
       }
       await wipeAccount();
     } finally {
@@ -868,6 +891,13 @@ export function Messenger({ dek, onLock }: Props) {
     } catch {
       blob = null;
     }
+    // Bail BEFORE consuming: a transient load/decode error must not irreversibly destroy an
+    // item that was never shown. The blob is already in memory, so consuming only after this
+    // check keeps crash-safety (the single viewing still can't be replayed once it succeeds).
+    if (!blob) {
+      setError(t('Foto ist nicht mehr verfügbar.'));
+      return;
+    }
     // Consume + wipe BEFORE display — one viewing, no take-backs.
     if (messagesRef.current[roomId] === undefined) {
       messagesRef.current[roomId] = await loadMessages(dek, roomId);
@@ -882,10 +912,6 @@ export function Messenger({ dek, onLock }: Props) {
     commitMessages();
     await saveMessages(dek, roomId, next);
     void secureWipeAttachment(attId);
-    if (!blob) {
-      setError(t('Foto ist nicht mehr verfügbar.'));
-      return;
-    }
     setViewOnce({ blob, mime });
   }
 
@@ -1224,7 +1250,10 @@ export function Messenger({ dek, onLock }: Props) {
     await putAttachment(dek, tid, data, name, mime);
     const out = await enqueueInbox(async () => {
       // Only the RECIPIENT's chunks are flagged view-once; the sender keeps a normal copy.
-      const r = await fanoutChunks(id, contact, { tid, total, size: data.length, name, mime, viewOnce }, data, CHUNK_BYTES);
+      // View-once chunks carry `vo` in the header, which only a pv>=4 receiver reads — a
+      // pv 2/3 receiver would reassemble a permanent copy. Gate view-once on pv>=4 so such a
+      // device is `incapable` (not silently downgraded); normal chunks stay pv>=2.
+      const r = await fanoutChunks(id, contact, { tid, total, size: data.length, name, mime, viewOnce }, data, CHUNK_BYTES, viewOnce ? 4 : 2);
       await saveContact(dek, contact); // persist ratchet advances BEFORE the wire (Invariant II)
       return r;
     });
@@ -1571,23 +1600,36 @@ export function Messenger({ dek, onLock }: Props) {
     if (!self) return;
     const prof = myProfileRef.current;
     const avatar = prof.avatarB64 && prof.avatarB64.length <= AVATAR_IMPORT_CAP ? prof.avatarB64 : undefined;
-    const contacts: RosterEntry[] = await Promise.all(
-      contactsRef.current
-        .filter((c) => !c.hidden && !c.staleIdentity && !bytesEqual(c.peerMasterPub, id.master.publicKey))
-        .slice(0, ROSTER_MAX)
-        .map(async (c) => ({
-          pm: c.peerMasterPub,
-          pe: c.peerEpoch,
-          psp: c.peerSignPub,
-          pdp: c.peerDhPub,
-          nick: c.nickname ?? null,
-          pn: c.peerName ?? null,
-          vf: c.verified === true, // a SUGGESTION on the far side, never adopted blindly
-          // The peer's master-signed device list → lets the linked device initiate X3DH
-          // (re-verified on the far side). Null for a legacy single-device contact.
-          dl: c.peerDeviceList ? await encodeDeviceList(c.peerDeviceList) : null,
-        })),
-    );
+    // Byte-budget the attached device lists: profile+roster ride in ONE unchunked frame that
+    // must stay under the relay's per-message cap (~1.2 M b64). Include `dl` (which lets the
+    // linked device initiate X3DH) up to a safe budget; any contact past it is sent without a
+    // dl (send-blocked until it re-gossips) rather than risking a too-large, silently-dropped
+    // frame that would break the whole Erst-Sync (audit L3).
+    const DL_BUDGET = 500 * 1024;
+    let dlUsed = 0;
+    const contacts: RosterEntry[] = [];
+    for (const c of contactsRef.current
+      .filter((c) => !c.hidden && !c.staleIdentity && !bytesEqual(c.peerMasterPub, id.master.publicKey))
+      .slice(0, ROSTER_MAX)) {
+      let dl: Uint8Array<ArrayBuffer> | null = null;
+      if (c.peerDeviceList) {
+        const enc = await encodeDeviceList(c.peerDeviceList);
+        if (dlUsed + enc.length <= DL_BUDGET) {
+          dl = enc;
+          dlUsed += enc.length;
+        }
+      }
+      contacts.push({
+        pm: c.peerMasterPub,
+        pe: c.peerEpoch,
+        psp: c.peerSignPub,
+        pdp: c.peerDhPub,
+        nick: c.nickname ?? null,
+        pn: c.peerName ?? null,
+        vf: c.verified === true, // a SUGGESTION on the far side, never adopted blindly
+        dl,
+      });
+    }
     const parts: BootstrapPart[] = [
       { t: 'profile', name: prof.name, avatar },
       { t: 'roster', contacts },
@@ -2402,7 +2444,7 @@ export function Messenger({ dek, onLock }: Props) {
         if (!already && (inner.kind === 'text' || inner.kind === 'file' || inner.kind === 'reply')) {
           const synced: ChatMessage =
             inner.kind === 'file'
-              ? { mine: content.origin === 'sent', ts: content.ts, mid: content.innerMid, file: await fileRefFor(inner.name, inner.mime, inner.data) }
+              ? { mine: content.origin === 'sent', ts: content.ts, mid: content.innerMid, file: await fileRefFor(inner.name, inner.mime, inner.data, inner.viewOnce) }
               : inner.kind === 'reply'
                 ? await replyMessage(inner.quote, inner.inner, content.innerMid, content.origin === 'sent')
                 : { mine: content.origin === 'sent', ts: content.ts, mid: content.innerMid, text: inner.text };
@@ -3446,7 +3488,9 @@ export function Messenger({ dek, onLock }: Props) {
       // Only the RECIPIENT's copy is view-once (byte 18). The sender keeps a normal,
       // re-viewable copy, and self-sync mirrors that normal copy to my own devices —
       // "view once" is a property of what the other side received, not of my own photo.
-      const deliveries = await fanoutSend(contact, { kind: 'file', name, mime, data, viewOnce: viewOnce || undefined }, mid);
+      // A view-once file is a byte-18 frame → gate on pv>=4 so a below-4 device isn't sent
+      // a frame it would throw-and-drop (and never receives a normal, permanent copy either).
+      const deliveries = await fanoutSend(contact, { kind: 'file', name, mime, data, viewOnce: viewOnce || undefined }, mid, viewOnce ? 4 : 0);
       void syncToOwnDevices(contact.peerMasterPub, 'sent', mid, localMsg.ts, { kind: 'file', name, mime, data });
       await appendMessage(contact.roomId, { ...localMsg, deliveries });
       await saveContact(dek, contact);
@@ -3460,6 +3504,14 @@ export function Messenger({ dek, onLock }: Props) {
    *  copy in the same pass), then hand the recipient a tiny E2E descriptor (key + R2 id).
    *  Not self-synced to my own devices in v1 (would race the delete-after-download). */
   async function sendViaR2(contact: Contact, file: File, name: string, mime: string, viewOnce = false): Promise<void> {
+    // The R2 descriptor is a byte-19 frame a pv<4 device can't parse. Check up front that
+    // some device can receive it, so we don't waste a (possibly ~1 GB) upload on an
+    // undeliverable send — and the ciphertext never lingers orphaned in R2.
+    const devs = contact.peerDeviceList?.devices.map((d) => d.signPub) ?? [contact.peerSignPub];
+    if (!devs.some((sp) => deviceProtocolVersion(contact, sp) >= 4)) {
+      setError(t('Konnte gerade nicht gesendet werden — Empfänger nicht erreichbar oder App veraltet. Bitte erneut versuchen.'));
+      return;
+    }
     const attId = newAttachmentId();
     const mid = randomMid();
     setR2Upload(0);
@@ -3471,6 +3523,7 @@ export function Messenger({ dek, onLock }: Props) {
         contact,
         { kind: 'r2', key: ref.key, keyB64: ref.keyB64, name, mime, size: ref.size, chunk: ref.chunk, viewOnce: viewOnce || undefined },
         mid,
+        4,
       );
       await appendMessage(contact.roomId, { ...localMsg, deliveries });
       await saveContact(dek, contact);

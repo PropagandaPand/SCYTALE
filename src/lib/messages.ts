@@ -148,10 +148,16 @@ async function ensureRoomKey(dek: CryptoKey, roomId: string): Promise<CryptoKey>
 }
 
 /** Crypto-erase a whole room: destroy the per-room key (the guarantee), then delete the
- *  message blob. Even a crash between the two leaves the blob unreadable — i.e. gone. */
+ *  message blob. Even a crash between the two leaves the blob unreadable — i.e. gone.
+ *  LEGACY case (a room still sealed under the DEK, no key record — e.g. an idle chat that
+ *  got no new message since the per-room-key upgrade): there is no key to destroy, so
+ *  overwrite the blob best-effort instead of a plain delete, mirroring secureWipeAttachment
+ *  (audit M3 — a plain delete left it DEK-decryptable from an un-reclaimed page). */
 export async function cryptoEraseRoom(roomId: string): Promise<void> {
+  const legacy = !(await loadRecord(roomKeyKey(roomId)));
   await secureDeleteRecord(roomKeyKey(roomId));
-  await deleteRecord(recordKey(roomId));
+  if (legacy) await secureDeleteRecord(recordKey(roomId));
+  else await deleteRecord(recordKey(roomId));
 }
 
 export async function loadMessages(dek: CryptoKey, roomId: string): Promise<ChatMessage[]> {

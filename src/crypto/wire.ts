@@ -80,8 +80,11 @@ export async function decodeInitialHeader(o: InitialHeaderWire): Promise<Initial
  *   1 = envelope versioning present (no new content frames)
  *   2 = can RECEIVE & reassemble chunked attachments (frame byte 14)
  *   3 = can handle large-attachment offer/pull (frame bytes 16/17)
+ *   4 = can receive view-once (byte 18 + chunk `vo`), R2 large files (byte 19) and the
+ *       unlink request (byte 20). Sending any of those to a pv<4 device would make it
+ *       throw-and-drop, so those sends MUST gate on deviceProtocolVersion >= 4.
  */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 export type Envelope =
   | { type: 'prekey'; conv: string; x3dh: InitialMessageHeader; message: RatchetMessage; pv?: number }

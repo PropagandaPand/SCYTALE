@@ -30,9 +30,11 @@ ok('client-spoofable x-real-ip is not an actor source',
 ok('RelayRoom validates actor and persists it in socket attachments',
   /!ACTOR_RE\.test\(actor\)/.test(relay) &&
   /\{ room, owner: false, actor, connectedAt: Date\.now\(\) \}/.test(relay));
-ok('room claim gates durable queue insertion',
-  relay.indexOf("reason: 'unclaimed'") >= 0 &&
-  relay.indexOf("reason: 'unclaimed'") < relay.indexOf('INSERT INTO q (body, ts, silent)'));
+ok('unclaimed inboxes get a tighter backlog cap than claimed ones (audit F-08, non-breaking)',
+  relay.includes('const maxRows = claimed ? MAX_QUEUE : MAX_QUEUE_UNCLAIMED') &&
+  relay.includes('const maxBytes = claimed ? MAX_QUEUE_B64 : MAX_QUEUE_B64_UNCLAIMED') &&
+  // the old hard gate that refused ALL sends to an unclaimed inbox must be gone
+  !relay.includes("reason: 'unclaimed'"));
 ok('durable room and global actor byte/frame budgets are both charged',
   /CREATE TABLE IF NOT EXISTS actor_window/.test(relay) &&
   /chargeRoomActor\(att\.actor, bytes\)/.test(relay) &&

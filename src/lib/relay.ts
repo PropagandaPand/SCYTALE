@@ -26,8 +26,8 @@ export interface RelayOptions {
   onCipher?: (bytes: Uint8Array<ArrayBuffer>, ackId: number) => void;
   /** Sender: the relay durably queued a send (delivery to the mailbox). */
   onAck?: (mid: string | null) => void;
-  /** Sender: the relay rejected a send (recipient's mailbox full). */
-  onNack?: (mid: string | null) => void;
+  /** Sender: the relay rejected a send. `reason` is 'full' | 'toolarge' | other. */
+  onNack?: (mid: string | null, reason?: string) => void;
   /** Present => authenticate as this inbox's owner. */
   auth?: { signPub: Bytes; sign: (nonce: Bytes) => Promise<Bytes> };
 }
@@ -144,7 +144,10 @@ export class RelayClient {
     } else if (m.t === 'sent') {
       this.opts.onAck?.(typeof m.mid === 'string' ? m.mid : null);
     } else if (m.t === 'nack') {
-      this.opts.onNack?.(typeof m.mid === 'string' ? m.mid : null);
+      this.opts.onNack?.(
+        typeof m.mid === 'string' ? m.mid : null,
+        typeof m.reason === 'string' ? m.reason : undefined,
+      );
     } else if (m.t === 'authed' && this.opts.auth) {
       this.ownerAuthed = true;
       for (const resolve of this.authWaiters) resolve(true);

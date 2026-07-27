@@ -260,9 +260,13 @@ const freshRoom = new relay.RelayRoom(freshCtx, { RELAY_GUARD: relayGuard });
 await freshCtx.init;
 const beforeClaim = socket();
 await freshRoom.webSocketMessage(beforeClaim, JSON.stringify({ t: 'send', b64: 'AA==', mid: 'first' }));
-ok('unclaimed inbox rejects storage with an explicit nack',
-  freshCtx.sql.queue.length === 0 &&
-  beforeClaim.sent.some((frame) => frame.t === 'nack' && frame.reason === 'unclaimed'));
+// Store-and-forward is NEVER hard-gated on a prior owner claim (that silently broke delivery
+// to the whole fleet after a relay migration, and to anyone offline / behind a shared CGNAT IP
+// that exhausted the per-IP claim budget). An unclaimed inbox still accepts a send.
+ok('unclaimed inbox still ACCEPTS a send (delivery is never gated on a prior claim)',
+  freshCtx.sql.queue.length === 1 &&
+  beforeClaim.sent.some((frame) => frame.t === 'sent' && frame.mid === 'first') &&
+  !beforeClaim.sent.some((frame) => frame.t === 'nack'));
 
 const badAck = socket(true);
 await room.webSocketMessage(badAck, JSON.stringify({ t: 'ack', id: 1.5 }));
@@ -316,10 +320,26 @@ await freshRoom.webSocketMessage(freshOwner, JSON.stringify({
 const afterClaim = socket(false, inbox);
 await freshRoom.webSocketMessage(afterClaim, JSON.stringify({ t: 'send', b64: 'AA==', mid: 'after-claim' }));
 await freshCtx.drain();
-ok('existing owner auth lazily claims the inbox before later sends',
+ok('owner auth still claims the inbox (best-effort, for per-room accounting) and never blocks delivery',
   freshCtx.sql.claimed &&
   freshOwner.sent.some((frame) => frame.t === 'authed') &&
-  freshCtx.sql.queue.length === 1);
+  freshCtx.sql.queue.length === 2); // 'first' (pre-claim) + 'after-claim' both stored
+
+// SECURITY (audit F-08): an inbox no owner ever claimed is still bounded — much tighter than a
+// claimed one — so spraying random inbox ids can never accumulate meaningful storage. Fill the
+// unclaimed cap and the next send is refused with an explicit 'full'.
+freshCtx.sql.claimed = false; // simulate a never-claimed (e.g. attacker-sprayed) inbox
+for (let i = 0; i < 256; i++) freshCtx.sql.queue.push({ id: 20000 + i, body: 'x', ts: null, silent: 0 });
+const capSock = socket(false, inbox);
+await freshRoom.webSocketMessage(capSock, JSON.stringify({ t: 'send', b64: 'AA==', mid: 'overflow' }));
+ok('unclaimed inbox is bounded by the TIGHTER cap — overflow is nacked full',
+  capSock.sent.some((frame) => frame.t === 'nack' && frame.reason === 'full'));
+// Negative control: the SAME backlog on a CLAIMED inbox is still well under its (larger) cap.
+freshCtx.sql.claimed = true;
+const claimedSock = socket(false, inbox);
+await freshRoom.webSocketMessage(claimedSock, JSON.stringify({ t: 'send', b64: 'AA==', mid: 'stillok' }));
+ok('negative control: same backlog on a CLAIMED inbox is accepted (cap really is claim-dependent)',
+  claimedSock.sent.some((frame) => frame.t === 'sent' && frame.mid === 'stillok'));
 
 await room.webSocketMessage(owner, JSON.stringify({
   t: 'unsubscribe',

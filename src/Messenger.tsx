@@ -1282,7 +1282,9 @@ export function Messenger({ dek, onLock }: Props) {
         if (s === 'open') void ensureListGossiped(contact);
       },
       onAck: (mid) => markStatus(mid, 'sent'),
-      onNack: (mid) => markStatus(mid, 'failed', t('Nicht zugestellt — das Postfach des Empfängers ist voll.')),
+      onNack: (mid, reason) => markStatus(mid, 'failed', reason === 'full'
+        ? t('Nicht zugestellt — das Postfach des Empfängers ist voll.')
+        : t('Keine Bestätigung vom Relay — noch nicht zugestellt (evtl. offline).')),
     });
     relaysRef.current.set(room, client);
     client.connect();
@@ -1374,7 +1376,9 @@ export function Messenger({ dek, onLock }: Props) {
     if (relaysRef.current.has(room)) return;
     const client = new RelayClient(room, {
       onAck: (id) => markStatus(id, 'sent'),
-      onNack: (id) => markStatus(id, 'failed', t('An ein Gerät nicht zugestellt — Postfach voll.')),
+      onNack: (id, reason) => markStatus(id, 'failed', reason === 'full'
+        ? t('An ein Gerät nicht zugestellt — Postfach voll.')
+        : t('Keine Bestätigung vom Relay — noch nicht zugestellt (evtl. offline).')),
     });
     relaysRef.current.set(room, client);
     client.connect();

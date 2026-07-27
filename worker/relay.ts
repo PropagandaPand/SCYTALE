@@ -76,6 +76,13 @@ const MAX_MSG_B64 = 1_200_000; // ~900 KB ciphertext: the relay carries only SMA
 // messages — large attachments transfer out-of-band, so a single oversized send is
 // a misbehaving client and is rejected (see SECURITY.md, groups/attachment limits).
 const MAX_QUEUE_B64 = 20 * 1024 * 1024; // ~15 MB ciphertext backlog cap per inbox
+// Tighter backlog cap for an inbox no owner has claimed yet (never authenticated on this
+// relay instance). Lets a legitimate not-yet-online recipient buffer real traffic — a text
+// ciphertext is ~1 KB, so 256 rows is a generous conversation backlog — while capping what
+// spraying random inbox ids could ever store to ~2 MB apiece (audit F-08). The full cap
+// applies the moment the real owner authenticates and claims the inbox.
+const MAX_QUEUE_UNCLAIMED = 256;
+const MAX_QUEUE_B64_UNCLAIMED = 2 * 1024 * 1024;
 const QUEUE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // sweep undelivered messages after 30 days
 const PUSH_COALESCE_MS = 3000; // collapse a burst of sends into ONE wake-up push
 const MAX_FRAME_CHARS = MAX_MSG_B64 + 8192; // JSON overhead + bounded metadata
@@ -300,7 +307,10 @@ const MAX_ACTOR_FRAMES_PER_MINUTE = 4096;
 const MAX_ACTOR_BYTES_PER_MINUTE = 256 * 1024 * 1024;
 const MAX_ACTOR_FRAMES_PER_DAY = 200_000;
 const MAX_ACTOR_BYTES_PER_DAY = 4 * 1024 * 1024 * 1024;
-const MAX_ACTOR_ROOM_CLAIMS = 8;
+// Distinct inboxes one actor (a hashed client IP) may mark as owner-backed. This only
+// scopes per-room actor accounting now — it never gates auth or delivery — so it must be
+// generous enough for a carrier-grade NAT where thousands of legitimate users share one IP.
+const MAX_ACTOR_ROOM_CLAIMS = 4096;
 const ACTOR_ROOM_CLAIM_TTL_MS = 30 * ACTOR_DAY_MS;
 
 /**
@@ -838,6 +848,11 @@ export class RelayRoom extends DurableObject<Env> {
             return;
           }
           if (!this.isClaimed()) {
+            // Best-effort claim: it only marks the inbox as owner-backed so per-room actor
+            // accounting applies to it. It must NEVER gate authentication or delivery — an
+            // over-tight / IP-shared claim budget previously rejected legitimate owners with
+            // 1013 and, combined with unclaimed inboxes refusing sends, broke messaging fleet-
+            // wide. If the claim is unavailable the owner still authenticates and receives.
             let claimAllowed = false;
             try {
               claimAllowed = await this.env.RELAY_GUARD.getByName(att.actor).claimRoom(att.room);
@@ -845,15 +860,13 @@ export class RelayRoom extends DurableObject<Env> {
               claimAllowed = false;
             }
             const afterClaim = this.attachment(ws);
-            if (!claimAllowed || !afterClaim || afterClaim.nonce !== nonce) {
-              closeSocket(ws, 1013, 'room claim unavailable');
-              return;
+            if (claimAllowed && afterClaim && afterClaim.nonce === nonce) {
+              this.ctx.storage.sql.exec(
+                'INSERT OR IGNORE INTO room_state (id, owner_pub, claimed_at) VALUES (1, ?, ?)',
+                m.signPub,
+                Date.now(),
+              );
             }
-            this.ctx.storage.sql.exec(
-              'INSERT OR IGNORE INTO room_state (id, owner_pub, claimed_at) VALUES (1, ?, ?)',
-              m.signPub,
-              Date.now(),
-            );
           }
           ws.serializeAttachment({
             room: att.room,
@@ -900,21 +913,28 @@ export class RelayRoom extends DurableObject<Env> {
             sendJson(ws, { t: 'nack', mid, reason: 'toolarge' });
             return;
           }
-          if (!this.isClaimed()) {
-            sendJson(ws, { t: 'nack', mid, reason: 'unclaimed' });
-            return;
-          }
+          // Sending to an inbox is NOT hard-gated on a prior owner "claim". Requiring one
+          // silently broke ALL store-and-forward: a recipient that had not (re-)authenticated
+          // on THIS relay instance — the entire fleet after a relay migration, plus anyone
+          // offline or behind a shared CGNAT IP that exhausted the per-IP claim budget — could
+          // receive nothing. Instead an UNCLAIMED inbox gets a much tighter backlog cap: enough
+          // for a legitimate not-yet-online recipient to buffer real traffic, but small enough
+          // that spraying random inbox ids can never accumulate meaningful storage (audit F-08).
+          // Once the real owner authenticates and claims the inbox, the full cap applies.
           this.sweepExpired();
           this.clearPushDueIfIdle();
+          const claimed = this.isClaimed();
+          const maxRows = claimed ? MAX_QUEUE : MAX_QUEUE_UNCLAIMED;
+          const maxBytes = claimed ? MAX_QUEUE_B64 : MAX_QUEUE_B64_UNCLAIMED;
           const stat = this.ctx.storage.sql
             .exec<{ n: number; bytes: number }>(
               'SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(body)), 0) AS bytes FROM q',
             )
             .one();
-          if (stat.n >= MAX_QUEUE || stat.bytes + m.b64.length > MAX_QUEUE_B64) {
+          if (stat.n >= maxRows || stat.bytes + m.b64.length > maxBytes) {
             // Counter only, never the inbox id — Cloudflare logs must not
             // accumulate routing metadata.
-            console.warn(`relay: inbox full (rows=${stat.n}, bytes=${stat.bytes}), rejecting send`);
+            console.warn(`relay: inbox full (rows=${stat.n}, bytes=${stat.bytes}, claimed=${claimed}), rejecting send`);
             sendJson(ws, { t: 'nack', mid, reason: 'full' });
             return;
           }

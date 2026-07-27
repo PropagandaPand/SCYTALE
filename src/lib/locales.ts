@@ -345,6 +345,7 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Video": "Video",
     "Video wird hochgeladen…": "Uploading video…",
     "Video wird optimiert…": "Optimizing video…",
+    "Datei konnte nicht geladen werden — evtl. noch in iCloud. Öffne sie kurz in der Fotos-App und versuch es dann erneut.": "Couldn't load the file — it may still be in iCloud. Open it briefly in the Photos app, then try again.",
   },
   es: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — Falló la autoprueba de WebCrypto. Bloqueado por seguridad.",
@@ -685,6 +686,7 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Video": "Vídeo",
     "Video wird hochgeladen…": "Subiendo vídeo…",
     "Video wird optimiert…": "Optimizando vídeo…",
+    "Datei konnte nicht geladen werden — evtl. noch in iCloud. Öffne sie kurz in der Fotos-App und versuch es dann erneut.": "No se pudo cargar el archivo — puede que aún esté en iCloud. Ábrelo un momento en la app Fotos y vuelve a intentarlo.",
   },
   fr: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — échec de l'autotest WebCrypto. Verrouillé par sécurité.",
@@ -1025,6 +1027,7 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Video": "Vidéo",
     "Video wird hochgeladen…": "Envoi de la vidéo…",
     "Video wird optimiert…": "Optimisation de la vidéo…",
+    "Datei konnte nicht geladen werden — evtl. noch in iCloud. Öffne sie kurz in der Fotos-App und versuch es dann erneut.": "Impossible de charger le fichier — il est peut-être encore dans iCloud. Ouvre-le brièvement dans l'app Photos, puis réessaie.",
   },
   it: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — Autotest WebCrypto fallito. Bloccato per motivi di sicurezza.",
@@ -1365,6 +1368,7 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Video": "Video",
     "Video wird hochgeladen…": "Caricamento del video…",
     "Video wird optimiert…": "Ottimizzazione del video…",
+    "Datei konnte nicht geladen werden — evtl. noch in iCloud. Öffne sie kurz in der Fotos-App und versuch es dann erneut.": "Impossibile caricare il file — potrebbe essere ancora in iCloud. Aprilo un momento nell'app Foto e riprova.",
   },
   pt: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — Autoteste do WebCrypto falhou. Bloqueado por motivos de segurança.",
@@ -1705,6 +1709,7 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Video": "Vídeo",
     "Video wird hochgeladen…": "A carregar vídeo…",
     "Video wird optimiert…": "A otimizar vídeo…",
+    "Datei konnte nicht geladen werden — evtl. noch in iCloud. Öffne sie kurz in der Fotos-App und versuch es dann erneut.": "Não foi possível carregar o arquivo — talvez ainda esteja no iCloud. Abra-o rapidamente no app Fotos e tente novamente.",
   },
   nl: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — WebCrypto-zelftest mislukt. Uit veiligheidsoverwegingen vergrendeld.",
@@ -2045,6 +2050,7 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Video": "Video",
     "Video wird hochgeladen…": "Video wordt geüpload…",
     "Video wird optimiert…": "Video wordt geoptimaliseerd…",
+    "Datei konnte nicht geladen werden — evtl. noch in iCloud. Öffne sie kurz in der Fotos-App und versuch es dann erneut.": "Kan het bestand niet laden — staat mogelijk nog in iCloud. Open het even in de Foto's-app en probeer het opnieuw.",
   },
   pl: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — autotest WebCrypto nie powiódł się. Zablokowano ze względów bezpieczeństwa.",
@@ -2385,6 +2391,7 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Video": "Wideo",
     "Video wird hochgeladen…": "Przesyłanie wideo…",
     "Video wird optimiert…": "Optymalizowanie wideo…",
+    "Datei konnte nicht geladen werden — evtl. noch in iCloud. Öffne sie kurz in der Fotos-App und versuch es dann erneut.": "Nie udało się wczytać pliku — może wciąż być w iCloud. Otwórz go na chwilę w aplikacji Zdjęcia i spróbuj ponownie.",
   },
   ru: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — самопроверка WebCrypto не пройдена. Заблокировано в целях безопасности.",
@@ -2725,6 +2732,7 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Video": "Видео",
     "Video wird hochgeladen…": "Загрузка видео…",
     "Video wird optimiert…": "Оптимизация видео…",
+    "Datei konnte nicht geladen werden — evtl. noch in iCloud. Öffne sie kurz in der Fotos-App und versuch es dann erneut.": "Не удалось загрузить файл — возможно, он ещё в iCloud. Открой его ненадолго в приложении Фото и попробуй снова.",
   },
   uk: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — самоперевірка WebCrypto не пройдена. Заблоковано з міркувань безпеки.",
@@ -3065,6 +3073,7 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Video": "Відео",
     "Video wird hochgeladen…": "Завантаження відео…",
     "Video wird optimiert…": "Оптимізація відео…",
+    "Datei konnte nicht geladen werden — evtl. noch in iCloud. Öffne sie kurz in der Fotos-App und versuch es dann erneut.": "Не вдалося завантажити файл — можливо, він ще в iCloud. Відкрий його ненадовго в застосунку Фото й спробуй ще раз.",
   },
   tr: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — WebCrypto öz testi başarısız. Güvenlik nedeniyle kilitlendi.",
@@ -3405,6 +3414,7 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Video": "Video",
     "Video wird hochgeladen…": "Video yükleniyor…",
     "Video wird optimiert…": "Video optimize ediliyor…",
+    "Datei konnte nicht geladen werden — evtl. noch in iCloud. Öffne sie kurz in der Fotos-App und versuch es dann erneut.": "Dosya yüklenemedi — hâlâ iCloud'da olabilir. Fotoğraflar uygulamasında kısaca açıp tekrar dene.",
   },
   zh: {
     "CRYPT ERROR — WebCrypto-Selbsttest fehlgeschlagen. Aus Sicherheitsgründen gesperrt.": "CRYPT ERROR — WebCrypto 自检失败。出于安全原因已锁定。",
@@ -3745,5 +3755,6 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Video": "视频",
     "Video wird hochgeladen…": "正在上传视频…",
     "Video wird optimiert…": "正在优化视频…",
+    "Datei konnte nicht geladen werden — evtl. noch in iCloud. Öffne sie kurz in der Fotos-App und versuch es dann erneut.": "无法加载文件 — 可能还在 iCloud 中。请在\"照片\"App 中打开一下，然后重试。",
   },
 };

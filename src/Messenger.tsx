@@ -143,7 +143,7 @@ import { applyBadge } from './lib/badge';
 import { biometricAvailable, biometricEnrolled, disableBiometricUnlock } from './lib/vaultService';
 import { Attachment, LightboxImg } from './Attachment';
 import { ViewOnceViewer } from './ViewOnceViewer';
-import { uploadFileToR2, downloadR2ToStore, StorageFullError } from './lib/blobtransfer';
+import { uploadFileToR2, downloadR2ToStore, StorageFullError, FileReadError, readSliceRetry } from './lib/blobtransfer';
 import { transcodeVideoTo720p } from './lib/transcode';
 import {
   IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach, IconMic, IconTrash, IconDots, IconGroup, IconReply, IconForward, IconCopy,
@@ -3248,6 +3248,19 @@ export function Messenger({ dek, onLock }: Props) {
     const id = identityRef.current;
     if (!file || !id || (!activeRoom && !activeGroup)) return;
     setError('');
+    // iCloud probe: an offloaded photo/video (iOS "Optimise Storage") reads as 0 bytes or
+    // fails until iOS fetches it from iCloud. Verify readability up front so we give a clear
+    // hint instead of silently failing deep in the transcode/upload.
+    if (!file.size) {
+      setError(t('Datei konnte nicht geladen werden — evtl. noch in iCloud. Öffne sie kurz in der Fotos-App und versuch es dann erneut.'));
+      return;
+    }
+    try {
+      await readSliceRetry(file, 0, Math.min(file.size, 65536));
+    } catch {
+      setError(t('Datei konnte nicht geladen werden — evtl. noch in iCloud. Öffne sie kurz in der Fotos-App und versuch es dann erneut.'));
+      return;
+    }
     try {
       let data: Uint8Array<ArrayBuffer> | null = null;
       let mime = file.type || 'application/octet-stream';
@@ -3381,6 +3394,8 @@ export function Messenger({ dek, onLock }: Props) {
     } catch (e) {
       await secureWipeAttachment(attId).catch(() => undefined);
       if (e instanceof StorageFullError) setError(t('Speicher gerade voll — bitte in ein paar Minuten erneut senden.'));
+      else if (e instanceof FileReadError)
+        setError(t('Datei konnte nicht geladen werden — evtl. noch in iCloud. Öffne sie kurz in der Fotos-App und versuch es dann erneut.'));
       else setError(t('Senden fehlgeschlagen: {msg}', { msg: (e as Error).message }));
     } finally {
       setR2Upload(null);

@@ -33,8 +33,21 @@ export async function transcodeVideoTo720p(file: File, onProgress?: (frac: numbe
         audio: { codec: 'aac', bitrate: mb.QUALITY_MEDIUM },
       });
       if (!conversion.isValid) return null;
-      if (onProgress) conversion.onProgress = (p) => onProgress(p);
-      await conversion.execute();
+      // Stall watchdog: if there's NO progress for 60 s (e.g. a still-downloading iCloud
+      // file whose reads hang), cancel and fall back to sending the original — never hang.
+      let last = performance.now();
+      conversion.onProgress = (p) => {
+        last = performance.now();
+        onProgress?.(p);
+      };
+      const watchdog = setInterval(() => {
+        if (performance.now() - last > 60_000) void conversion.cancel();
+      }, 5_000);
+      try {
+        await conversion.execute();
+      } finally {
+        clearInterval(watchdog);
+      }
 
       const buf = output.target.buffer;
       if (!buf || buf.byteLength === 0) return null;

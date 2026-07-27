@@ -26,6 +26,34 @@ export class StorageFullError extends Error {
   }
 }
 
+/** Thrown when a File slice can't be read — on iOS this usually means an iCloud-backed
+ *  photo/video that hasn't finished downloading to the device yet. */
+export class FileReadError extends Error {
+  constructor(cause?: unknown) {
+    super('file_read');
+    this.name = 'FileReadError';
+    (this as { cause?: unknown }).cause = cause;
+  }
+}
+
+/** Read a File slice, retrying a few times — an iCloud-offloaded file often fails the
+ *  first read(s) while iOS is still fetching it from iCloud, then succeeds. */
+export async function readSliceRetry(file: Blob, start: number, end: number, tries = 4): Promise<Uint8Array<ArrayBuffer>> {
+  let lastErr: unknown;
+  for (let i = 0; i < tries; i++) {
+    try {
+      const buf = await file.slice(start, end).arrayBuffer();
+      // A 0-byte read of a non-empty range means the bytes aren't materialised yet.
+      if (buf.byteLength === 0 && end > start) throw new Error('empty read');
+      return new Uint8Array(buf) as Uint8Array<ArrayBuffer>;
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 500 * (i + 1))); // 0.5s, 1s, 1.5s backoff
+    }
+  }
+  throw new FileReadError(lastErr);
+}
+
 export interface R2Ref {
   key: string; // R2 object key (the capability)
   keyB64: string; // Kf — the per-file key, carried E2E
@@ -88,7 +116,7 @@ export async function uploadFileToR2(
 
     for (let i = 0; i < chunks; i++) {
       const start = i * BLOB_CHUNK;
-      const slice = new Uint8Array(await file.slice(start, Math.min(start + BLOB_CHUNK, size)).arrayBuffer()) as Uint8Array<ArrayBuffer>;
+      const slice = await readSliceRetry(file, start, Math.min(start + BLOB_CHUNK, size)); // retries iCloud-backed reads
       if (local) await sealAndPutChunk(local.dek, local.attId, i, slice); // sender's local copy, same pass
       const framed = await encryptChunk(cryptoKey, i, slice);
       buf.push(framed);

@@ -13,6 +13,7 @@ import {
 } from './lib/vaultService';
 import { cryptoSelfTest } from './lib/selftest';
 import { hasWebCrypto, isInAppBrowser, isInstagram } from './lib/environment';
+import { backgroundLockExpired } from './lib/backgroundLock';
 import { t, useLang } from './lib/i18n';
 import { Messenger } from './Messenger';
 import { ReloadPrompt } from './ReloadPrompt';
@@ -124,7 +125,16 @@ export function App() {
     }
     setLockState('unlocking');
     setPassphrase('');
+    setShowPass(false);
     window.setTimeout(() => {
+      // A slow passphrase/biometric operation may finish after the OS already
+      // backgrounded the page. Never expose the open tree for even one commit in
+      // that state; the lifecycle effect will reveal it on a visible resume.
+      if (document.visibilityState === 'visible') {
+        document.documentElement.classList.remove('privacy-curtain-on');
+      } else {
+        document.documentElement.classList.add('privacy-curtain-on');
+      }
       setDek(newDek);
       setPhase('open');
       say('');
@@ -189,6 +199,7 @@ export function App() {
     setDek(null);
     setPhase('unlock');
     setLockState('idle');
+    setShowPass(false);
     setBusy(false); // a fresh lock screen must always be interactable, whatever
     // state we came from — never leave the unlock button disabled.
     say(t('Gesperrt.'));
@@ -209,34 +220,65 @@ export function App() {
     };
   }, [phase, lock]);
 
-  // Lock when the app goes to the background (audit N-4): the 5-minute idle timer
-  // alone leaves the vault open if a device is seized while backgrounded. A grace
-  // window covers a brief hide (a file/share picker or Face ID prompt backgrounds
-  // the page) without re-prompting; a longer background — or a full pagehide — locks.
+  // Lock when the app goes to the background. Mobile PWAs suspend timers, so the
+  // timer is only an eager path: the visible/pageshow path ALWAYS compares the
+  // wall clock against hiddenAt before it may reveal the app again.
   useEffect(() => {
     if (phase !== 'open') return;
     let grace: number | null = null;
+    let hiddenAt: number | null = null;
     const clearGrace = () => {
       if (grace !== null) {
         clearTimeout(grace);
         grace = null;
       }
     };
+    const conceal = () => document.documentElement.classList.add('privacy-curtain-on');
+    const reveal = () => document.documentElement.classList.remove('privacy-curtain-on');
+    const lockFromBackground = () => {
+      hiddenAt = null;
+      clearGrace();
+      lock();
+    };
     const onVisibility = () => {
       if (document.visibilityState === 'hidden') {
+        conceal(); // synchronous class toggle: hide content before an OS snapshot
+        hiddenAt = Date.now();
         clearGrace();
-        grace = window.setTimeout(lock, BACKGROUND_LOCK_GRACE_MS);
+        grace = window.setTimeout(() => {
+          grace = null;
+          if (backgroundLockExpired(hiddenAt, Date.now(), BACKGROUND_LOCK_GRACE_MS)) {
+            lockFromBackground();
+          }
+        }, BACKGROUND_LOCK_GRACE_MS);
       } else {
+        const expired = backgroundLockExpired(hiddenAt, Date.now(), BACKGROUND_LOCK_GRACE_MS);
+        hiddenAt = null;
         clearGrace();
+        if (expired) lock();
+        else reveal();
       }
     };
-    const onPageHide = () => lock(); // the page is being suspended/unloaded — drop the DEK now
+    const onPageHide = () => {
+      conceal();
+      lockFromBackground();
+    };
+    // Page Lifecycle freeze is the last reliable callback on Android/Chromium.
+    // Lock immediately: timers will not run while the document is frozen.
+    const onFreeze = () => {
+      conceal();
+      lockFromBackground();
+    };
     document.addEventListener('visibilitychange', onVisibility);
+    document.addEventListener('freeze', onFreeze);
     window.addEventListener('pagehide', onPageHide);
+    onVisibility(); // cover an app that became hidden before this effect mounted
     return () => {
       clearGrace();
       document.removeEventListener('visibilitychange', onVisibility);
+      document.removeEventListener('freeze', onFreeze);
       window.removeEventListener('pagehide', onPageHide);
+      if (document.visibilityState === 'visible') reveal();
     };
   }, [phase, lock]);
 
@@ -246,6 +288,10 @@ export function App() {
         <Messenger dek={dek} onLock={lock} />
         <ReloadPrompt />
         <InstallPrompt />
+        <div className="privacy-curtain" aria-hidden="true">
+          <IconLock size={24} />
+          <span>SKYTALE</span>
+        </div>
       </>
     );
   }

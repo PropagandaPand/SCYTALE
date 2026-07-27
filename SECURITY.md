@@ -4,7 +4,8 @@ SKYTALE is built against **suspicionless mass surveillance** (the EU "Chatkontro
 CSAR proposal). This document is the precise breakdown of every mechanism and states
 honestly what is protected — and what is not. Status: current `main` — on top of Stage
 3d multi-device (fan-out, per-device sessions, self-sync) and link initial-sync, it adds
-**Face ID / Touch ID unlock**, an **attachment blob store**, and **streaming Backup v2**.
+**Face ID / Touch ID unlock**, an **attachment blob store**, and **chunk-authenticated
+Backup v4 with atomic restore**.
 
 **Guiding principles:** never invent our own crypto (vetted primitives + established
 protocols: X3DH, Double Ratchet); the server is a **dumb ciphertext mailbox** with no
@@ -101,13 +102,14 @@ prfKEK --AES-256-GCM wrap--> the SAME DEK  →  header.prf
 
 **Attachment blob store** (`src/lib/attachments.ts`). Attachments do **not** live inline in the
 message log (a single per-room JSON blob) — a large file would make every message append
-absurdly expensive and re-encrypt the whole log. Instead each attachment is stored **out of
-band as per-chunk DEK-sealed records** (`att:<id>:<idx>`, AAD `scytale:att:v1:<id>:<idx>`),
-never a single multi-MB `Uint8Array`; a message carries only a reference `{name, mime, attId,
-size}`. Rendering decrypts chunk-by-chunk into a `Blob` (which the browser may spill to disk)
-and hands out an object URL. GC/refcount and a boot sweep collect orphaned attachments; old
-inline `dataB64` is still read (lazy migration). Stickers stay inline — they are tiny cropped
-squares and the sticker library dedups on their bytes.
+absurdly expensive and re-encrypt the whole log. Instead every attachment has a random
+per-attachment key, sealed under the DEK; metadata and chunks are sealed under that key with
+ID/index-bound AAD. Destroying the small key crypto-erases the whole attachment. A message
+carries only `{name, mime, attId, size}`. At most 32 MiB is materialized as a JavaScript
+`Blob`; larger plaintext is exported one decrypted chunk at a time through the browser's
+File System Access API. Browsers without that API explicitly refuse unsafe materialization.
+GC/refcount and a boot sweep collect orphaned attachments; legacy inline `dataB64` remains
+readable under the same 32 MiB bound. Stickers stay inline because they are small.
 
 **Recovery backup (a deliberate trade-off, `src/lib/backup.ts`).** For multi-device / device
 change there is an **encrypted file export** of the identity (incl. master private key),
@@ -119,12 +121,13 @@ tightly gated:
   export** (`unlockBoundVault`) — an unlocked vault + physical access is not a one-click exfil.
 - **A separate export passphrase** encrypts the file with **full Argon2id**; the `MIN_ARGON2`
   floor is **not** bypassed (AES-256-GCM under the derived key).
-- **Backup v2 streams.** The export is a length-prefixed binary container
-  (`[u32 headerLen][header JSON][meta ciphertext][attachment ciphertext…]`) with **each
-  section encrypted separately** and streamed as a `Blob`, so a large history (incl. videos)
-  never has to be `JSON.stringify`'d and encrypted as one in-memory string. Import reads
-  section by section; **one corrupt attachment no longer sinks the rest** — it is counted and
-  skipped, the rest restores.
+- **Backup v4 bounds and authenticates chunks.** The length-prefixed binary container uses
+  independent 4 MiB AEAD chunks for attachments, with file/attachment/index/count/size in
+  AAD. Header, section count/length, manifest completeness, total size and exact EOF are
+  checked before expensive work. Metadata is still one bounded section (64 MiB ceiling).
+  Import stages a complete replacement generation and switches it in one IndexedDB
+  transaction; any corrupt or incomplete section aborts the whole restore. Legacy formats
+  are separately capped, and legacy backups without an authenticated DeviceList are refused.
 - **Rotation note:** a backup contains the master private key. After a master rotation an
   **old** backup still decrypts the *old* master (it can issue device certs of its epoch for
   not-yet-rotated contacts). **Old backups must be destroyed on rotation** (the rotation flow
@@ -488,17 +491,21 @@ both arrive.
 
 `worker/index.ts`, `src/sw.ts`, `vite.config.ts`
 
-- **CSP `default-src 'self'`**: no external scripts/styles/fonts/**connections** — even a successful XSS can neither
-  inject code into the key-holding context nor exfiltrate to a foreign host. `script-src 'self' 'wasm-unsafe-eval'`
-  (WASM only: libsodium/hash-wasm); `style-src 'self' 'unsafe-inline'`; `connect-src 'self'` is total — there is no
-  third-party analytics or any other outbound destination; the app talks only to its own relay.
-- **Further headers**: HSTS (2 y, incl. subdomains), `nosniff`, `Referrer-Policy: no-referrer`,
+- **CSP `default-src 'self'`** blocks foreign scripts, styles, fonts and direct foreign
+  connections. `script-src 'self' 'wasm-unsafe-eval'` is the narrow WASM allowance used by
+  libsodium/hash-wasm; `connect-src 'self'` permits only same-origin APIs. This is important
+  defense in depth, not an XSS sandbox: compromised same-origin code can read unlocked
+  plaintext and misuse same-origin endpoints.
+- **Further headers**: host-scoped HSTS (2 y; deliberately no `includeSubDomains` until every
+  subdomain has been audited), `nosniff`, `Referrer-Policy: no-referrer`,
   `X-Frame-Options: DENY` / `frame-ancestors 'none'`, COOP+CORP `same-origin`, a restrictive `Permissions-Policy`
   (camera/microphone same-origin only, geo/payment/USB off).
 - **Self-hosted fonts** (no CDN — would break CSP and leak IPs).
-- **Service-worker update mode is `prompt`** (`registerType: 'prompt'`): no unattended code swap on a security
-  tool — the user confirms the reload that activates a new worker. The precached app shell loads from the SW
-  cache.
+- **Service-worker update mode is `prompt`** (`registerType: 'prompt'`). Every build installs
+  into a private cache whose name commits to the build and manifest. Every required asset is
+  fetched with `no-store` and checked against an injected SHA-256 revision; a missing,
+  mismatched or mixed-deployment asset rejects the candidate install. The old active worker
+  continues serving only its old cache until the user accepts the waiting worker.
 - **Non-extractable CryptoKeys throughout** (KEK, DEK, device key, message keys, biometric KEK).
 
 ---
@@ -561,13 +568,15 @@ Node/npm version.)
 - **Voice-message codec is device-dependent (cross-platform gap, issue #13).** `MediaRecorder` yields whatever
   container/codec the recording browser supports (Chrome: webm/opus; iOS Safari: mp4/aac), and iOS cannot play
   webm/opus — so an Android voice message may not play on iOS. To be fixed with the large-attachment work.
-- **Large attachments — hybrid transfer (issue #9).** Up to ~2 MB is chunked and auto-pushed to the recipient's
-  mailbox (works offline). Above that, up to ~25 MB, the sender sends a tiny *offer* and the recipient pulls on
-  demand (a download affordance), which requires the sender to be online at pull time and streams best when both
-  are (the chunks pass through the mailbox rather than filling it). The pull is guarded against amplification: a
-  device serves a pull only for a tid it actually offered to that contact and still holds. Groups remain
-  inline-only. Progress/cancel UI, per-chunk delivery status, a send window, and self-syncing a large attachment
-  to one's own other devices are follow-ups.
+- **Large attachments — hybrid transfer.** Up to ~2 MiB is chunked through the mailbox;
+  automatic receives share a persisted 32 MiB per-contact budget and must preserve origin
+  storage headroom. From 2–25 MiB the recipient explicitly pulls from an online sender.
+  Above 25 MiB and up to 1 GiB, the sender streams client-side encrypted chunks to R2 and
+  sends only the capability plus E2E key inside the encrypted message; download is explicit,
+  exact-length checked and locally reserved. R2 sees ciphertext, size, object capability and
+  timing, and lifecycle expiry—not plaintext or its key. Materializing more than 32 MiB as a
+  JS `Blob` is refused; large local plaintext export requires the File System Access API, so
+  it is unavailable on browsers such as current iOS Safari. Groups remain inline-only.
 - **Residual metadata despite sealed sender**: *who* sends and the `conv` pair id are hidden. What remains is what
   addressing a recipient inherently reveals: **which inbox** (recipient pseudonym), **timing** and **size** — plus
   **network correlation** (sender IP → recipient inbox), which crypto does not cover (would need Tor/a mixnet). The

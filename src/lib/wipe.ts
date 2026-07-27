@@ -14,11 +14,11 @@
  */
 import { deleteDB } from 'idb';
 import { closeDb } from './db';
-import { disablePush } from './push';
+import { disablePush, PUSH_CONTROL_CACHE } from './push';
 
 const DB_NAMES = ['scytale', 'scytale-badge'];
 
-export async function wipeAccount(): Promise<void> {
+export async function wipeAccount(options: { pushTeardownStarted?: boolean } = {}): Promise<void> {
   try {
     await navigator.clearAppBadge?.();
   } catch {
@@ -27,12 +27,35 @@ export async function wipeAccount(): Promise<void> {
   // Tear down the push subscription and UNREGISTER the service worker BEFORE deleting the
   // stores — otherwise the SW stays live and a later content-free push re-creates the
   // scytale-badge DB (its raw open bypasses the db.ts wiping guard) and shows a notice.
-  await disablePush().catch(() => undefined);
+  if (!options.pushTeardownStarted) {
+    // Standalone callers still get a bounded best-effort teardown. The primary
+    // UI path performs the server/local sequence itself and passes true.
+    await Promise.race([
+      disablePush(),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 1500)),
+    ]).catch(() => undefined);
+  }
+  let workerGone = false;
   try {
     const reg = await navigator.serviceWorker?.getRegistration();
-    await reg?.unregister();
+    workerGone = !reg || (await reg.unregister());
   } catch {
-    /* ignore */
+    workerGone = false;
+  }
+  // Delete the opt-out marker only after confirmed unregister. If unregister
+  // failed, the surviving worker must retain that marker and its complete cache;
+  // otherwise push rotation could re-subscribe and navigations would fail closed
+  // to a now-deleted shell.
+  if (workerGone) {
+    try {
+      for (const name of await caches.keys()) {
+        if (name === 'scytale-precache' || name.startsWith('scytale-precache-') || name === PUSH_CONTROL_CACHE) {
+          await caches.delete(name);
+        }
+      }
+    } catch {
+      /* ignore */
+    }
   }
   await closeDb().catch(() => undefined);
   for (const name of DB_NAMES) {

@@ -229,13 +229,22 @@ const deliver = async (sender, senderContact, receiver, content) => {
 // NON-SELF: alice (Master A) schickt bob (Master B) ein bootstrap → Gate wirft.
 const alice = await mkId(), bob = await mkId();
 const aliceForBob = await S.makeContact(S.asMasterPub(alice.id.master.publicKey), bob.bundle);
-let gateThrew = false;
-try { await deliver(alice, aliceForBob, bob, boot); } catch (e) { gateThrew = /Nicht-Selbst-Kontakt/.test(e.message); }
-ok('NON-SELF: bootstrap von fremdem Master wird verworfen (Self-Gate)', gateThrew === true);
+// Post-F-06/F-22: the self-gate returns an authenticated-drop (reason
+// 'unauthorised-self-frame') instead of throwing — the caller must still persist the
+// advanced ratchet. Either way the frame is never surfaced as a processable message.
+let gateDropped = false;
+try {
+  const r = await deliver(alice, aliceForBob, bob, boot);
+  gateDropped = r.outcome === 'authenticated-drop' && r.reason === 'unauthorised-self-frame';
+} catch { gateDropped = false; }
+ok('NON-SELF: bootstrap von fremdem Master wird verworfen (Self-Gate)', gateDropped === true);
 // bootreq ebenso.
-let reqThrew = false;
-try { await deliver(alice, aliceForBob, bob, { kind: 'bootreq', requestId: 'q1' }); } catch (e) { reqThrew = /Nicht-Selbst-Kontakt/.test(e.message); }
-ok('NON-SELF: bootreq von fremdem Master wird verworfen', reqThrew === true);
+let reqDropped = false;
+try {
+  const r = await deliver(alice, aliceForBob, bob, { kind: 'bootreq', requestId: 'q1' });
+  reqDropped = r.outcome === 'authenticated-drop' && r.reason === 'unauthorised-self-frame';
+} catch { reqDropped = false; }
+ok('NON-SELF: bootreq von fremdem Master wird verworfen', reqDropped === true);
 
 // SELF: zwei Geräte unter DEMSELBEN Master M → bootstrap kommt durch.
 const sharedMaster = sodium.crypto_sign_keypair();

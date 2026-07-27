@@ -126,6 +126,16 @@ const recordKey = (roomId: string) => `msgs:${roomId}`;
 // ATTACHMENT in a deleted message IS crypto-erased on its own (secureWipeAttachment).
 const roomKeyKey = (roomId: string) => `roomkey:${roomId}`;
 const roomKeyAad = (roomId: string) => utf8.encode(`scytale:room-key:v1:${roomId}`);
+const corruptRooms = new Set<string>();
+
+/** A stored ciphertext exists but cannot be authenticated/deserialized. Treating
+ *  this as an empty history would let the next save destroy the only recoverable copy. */
+export class MessageCorruptionError extends Error {
+  constructor(readonly roomId: string) {
+    super('Der gespeicherte Nachrichtenverlauf ist beschädigt und wurde nicht überschrieben.');
+    this.name = 'MessageCorruptionError';
+  }
+}
 
 function importRoomKey(raw: Bytes): Promise<CryptoKey> {
   return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
@@ -158,22 +168,35 @@ export async function cryptoEraseRoom(roomId: string): Promise<void> {
   await secureDeleteRecord(roomKeyKey(roomId));
   if (legacy) await secureDeleteRecord(recordKey(roomId));
   else await deleteRecord(recordKey(roomId));
+  corruptRooms.delete(roomId);
 }
 
-export async function loadMessages(dek: CryptoKey, roomId: string): Promise<ChatMessage[]> {
-  const rec = await loadRecord(recordKey(roomId));
+async function openMessageRecord(
+  dek: CryptoKey,
+  roomId: string,
+  rec: Awaited<ReturnType<typeof loadRecord>>,
+): Promise<ChatMessage[]> {
   if (!rec) return [];
   // Try the room key first, then the DEK (legacy, or a crash between key-write and
   // blob-write left the blob still sealed under the DEK).
   const k = await roomKey(dek, roomId);
   for (const key of k ? [k, dek] : [dek]) {
     try {
-      return JSON.parse(utf8.decode(await open(key, rec, aad(roomId)))) as ChatMessage[];
+      const parsed: unknown = JSON.parse(utf8.decode(await open(key, rec, aad(roomId))));
+      if (!Array.isArray(parsed)) throw new Error('message record is not an array');
+      corruptRooms.delete(roomId);
+      return parsed as ChatMessage[];
     } catch {
       /* try the next candidate key */
     }
   }
-  return [];
+  corruptRooms.add(roomId);
+  throw new MessageCorruptionError(roomId);
+}
+
+export async function loadMessages(dek: CryptoKey, roomId: string): Promise<ChatMessage[]> {
+  const rec = await loadRecord(recordKey(roomId));
+  return openMessageRecord(dek, roomId, rec);
 }
 
 export async function saveMessages(
@@ -181,6 +204,11 @@ export async function saveMessages(
   roomId: string,
   messages: ChatMessage[],
 ): Promise<void> {
+  if (corruptRooms.has(roomId)) throw new MessageCorruptionError(roomId);
+  const existing = await loadRecord(recordKey(roomId));
+  // Authenticate the previous generation before replacing it. This makes the
+  // fail-closed rule hold even for callers that skipped an explicit load.
+  if (existing) await openMessageRecord(dek, roomId, existing);
   const k = await ensureRoomKey(dek, roomId);
   await saveRecord(recordKey(roomId), await seal(k, utf8.encode(JSON.stringify(messages)), aad(roomId)));
 }

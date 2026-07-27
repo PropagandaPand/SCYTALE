@@ -16,21 +16,36 @@
  * lingers in old backups and on discarded devices, which is usually why it was
  * left. It is never accepted again on any path; the way back is a fresh identity.
  */
-import { seal, open, utf8 } from '../crypto';
+import { seal, open, utf8, b64decode, b64encode } from '../crypto';
 import { loadRecord, saveRecord } from './db';
 
 const AAD = utf8.encode('scytale:retired-masters:v1');
 const KEY = 'retired-masters';
 
-/** Load the denylist as a Set of base64 master pubs (empty if none/undecodable). */
+export class RetiredMasterListCorruptError extends Error {
+  constructor() {
+    super('Die lokale Liste aufgegebener Identitäten ist beschädigt.');
+    this.name = 'RetiredMasterListCorruptError';
+  }
+}
+
+/** Load the denylist as a Set of canonical base64 master pubs. */
 export async function loadRetiredMasters(dek: CryptoKey): Promise<Set<string>> {
   const rec = await loadRecord(KEY);
   if (!rec) return new Set();
   try {
-    const arr = JSON.parse(utf8.decode(await open(dek, rec, AAD))) as string[];
-    return new Set(Array.isArray(arr) ? arr : []);
+    const arr: unknown = JSON.parse(utf8.decode(await open(dek, rec, AAD)));
+    if (!Array.isArray(arr) || arr.length > 10_000) throw new Error('schema');
+    const result = new Set<string>();
+    for (const value of arr) {
+      if (typeof value !== 'string' || value.length > 128) throw new Error('schema');
+      const bytes = await b64decode(value);
+      if (bytes.length !== 32 || (await b64encode(bytes)) !== value) throw new Error('schema');
+      result.add(value);
+    }
+    return result;
   } catch {
-    return new Set();
+    throw new RetiredMasterListCorruptError();
   }
 }
 

@@ -8,3 +8,6 @@ __pycache__/
 
 # Local-only German copy of SECURITY.md (English is the committed source of truth)
 SECURITY.de.md
+
+# Local-only point-in-time security audit reports (never committed)
+SECURITY_AUDIT_*.md

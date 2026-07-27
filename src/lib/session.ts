@@ -268,7 +268,11 @@ export class MasterChangedError extends Error {
 /** Responder-side lookup into the local prekey store. */
 export interface PreKeyLookup {
   signedPreKey(id: number): KeyPair | undefined;
-  consumeOneTimePreKey(id: number | undefined): Bytes | undefined;
+  /** Speculative, NON-MUTATING lookup. Required for envelopes that name an OPK. */
+  oneTimePreKey?(id: number): Bytes | undefined;
+  /** @deprecated Unsafe destructive lookup retained only for source compatibility.
+   * receiveEnvelope never calls it. */
+  consumeOneTimePreKey?(id: number | undefined): Bytes | undefined;
 }
 
 function cmp(a: Uint8Array, b: Uint8Array): number {
@@ -854,10 +858,32 @@ export type MessageContent =
   | { kind: 'attreq'; tid: string };
 
 /** A decrypted inbound message plus its sender-stamped E2E dedup id. */
-export interface ReceivedMessage {
-  mid: string;
-  content: MessageContent;
-}
+/**
+ * A successfully authenticated ratchet message either carries an application
+ * frame we may dispatch, or is an authenticated drop. The latter is deliberately
+ * a normal result rather than an exception: the caller must still durably commit
+ * the advanced ratchet and (for a first X3DH message) the OPK removal before
+ * acknowledging and discarding an invalid/unauthorised frame.
+ */
+export type ReceivedMessage =
+  | {
+      outcome: 'message';
+      mid: string;
+      content: MessageContent;
+      /**
+       * Present only after an OPK-backed X3DH header and the first message AEAD
+       * authenticated. The storage boundary must atomically persist this OPK
+       * removal together with the newly committed contact session.
+       */
+      authenticatedOneTimePreKeyId?: number;
+    }
+  | {
+      outcome: 'authenticated-drop';
+      reason: 'invalid-frame' | 'unauthorised-self-frame';
+      /** Available when the authenticated plaintext contained a complete mid. */
+      mid?: string;
+      authenticatedOneTimePreKeyId?: number;
+    };
 
 // ── E2E message id (Stage 3d dedup) ─────────────────────────────────────
 // A random 16-byte id the SENDER stamps into the AEAD-protected plaintext, the
@@ -1538,17 +1564,23 @@ export async function receiveEnvelope(
   const freshHandshake = buildFresh;
 
   let ratchet = existing?.ratchet ?? null;
+  let authenticatedOpkId: number | undefined;
   if (buildFresh) {
     if (envelope.type !== 'prekey') {
       throw new Error('Erste Nachricht ohne X3DH-Header — Session kann nicht aufgebaut werden.');
     }
     const spk = lookup.signedPreKey(envelope.x3dh.signedPreKeyId);
     if (!spk) throw new Error('Passender Signed Prekey nicht gefunden (vermutlich rotiert).');
-    const opkPriv = lookup.consumeOneTimePreKey(envelope.x3dh.oneTimePreKeyId);
+    const opkId = envelope.x3dh.oneTimePreKeyId;
+    if (opkId !== undefined && !lookup.oneTimePreKey) {
+      throw new Error('Sicherer One-Time-Prekey-Lookup nicht verfügbar — Handshake abgebrochen.');
+    }
+    const opkPriv = opkId === undefined ? undefined : lookup.oneTimePreKey!(opkId);
     // respondX3DH verifies the sender's device cert — throws X3DHError on a forgery
     // BEFORE we touch any live state.
     const x3dh = await respondX3DH(me, spk.privateKey, opkPriv, envelope.x3dh);
     ratchet = await initRatchetResponder(x3dh.sharedSecret, spk, x3dh.associatedData);
+    if (opkPriv && opkId !== undefined) authenticatedOpkId = opkId;
   }
   if (!ratchet) {
     // Unreachable: buildFresh either set ratchet or threw. Kept as a type guard.
@@ -1577,9 +1609,38 @@ export async function receiveEnvelope(
   // the pv rode inside the (now-verified) envelope, so it's as trustworthy as the
   // message itself. Latest wins (it reflects the version currently running there).
   contact.sessions.set(sessKey, { ratchet, pendingHeader: null, deviceSignPub, pv: envelope.pv });
-  // Split off the sender-stamped E2E mid (16 bytes) from the front of the plaintext.
-  const mid = bytesToMid(plaintext.slice(0, MID_LEN));
-  const content = await unframeContent(plaintext.slice(MID_LEN));
+  // Everything below happens AFTER the ratchet AEAD authenticated. Invalid
+  // application framing must therefore be reported as an authenticated drop,
+  // not thrown: the caller still has to persist the advanced ratchet and consume
+  // an authenticated OPK. Throwing here would skip that storage boundary and
+  // make the message key (and OPK) reusable after reload.
+  const mid = plaintext.length >= MID_LEN ? bytesToMid(plaintext.slice(0, MID_LEN)) : undefined;
+  let content: MessageContent;
+  try {
+    if (plaintext.length <= MID_LEN) throw new Error('Frame fehlt.');
+    content = await unframeContent(plaintext.slice(MID_LEN));
+  } catch {
+    return {
+      outcome: 'authenticated-drop',
+      reason: 'invalid-frame',
+      ...(mid === undefined ? {} : { mid }),
+      ...(authenticatedOpkId === undefined
+        ? {}
+        : { authenticatedOneTimePreKeyId: authenticatedOpkId }),
+    };
+  }
+  // `unframeContent` can only have succeeded when at least one frame byte
+  // followed the complete MID. Keep this explicit so the discriminated result
+  // never exposes an optional MID on the dispatchable branch.
+  if (mid === undefined) {
+    return {
+      outcome: 'authenticated-drop',
+      reason: 'invalid-frame',
+      ...(authenticatedOpkId === undefined
+        ? {}
+        : { authenticatedOneTimePreKeyId: authenticatedOpkId }),
+    };
+  }
   // A 'sync' frame is ONLY legitimate from one of MY OWN devices — the hidden self-
   // contact, whose peerMaster is my own master. Rejecting it here (at the source)
   // stops a malicious peer from framing a byte-9 'sync' over their authenticated
@@ -1594,9 +1655,23 @@ export async function receiveEnvelope(
     (content.kind === 'sync' || content.kind === 'bootstrap' || content.kind === 'bootreq') &&
     !bytesEqual(contact.peerMasterPub, me.master.publicKey)
   ) {
-    throw new Error('Selbst-Frame von einem Nicht-Selbst-Kontakt — verworfen.');
+    return {
+      outcome: 'authenticated-drop',
+      reason: 'unauthorised-self-frame',
+      ...(mid === undefined ? {} : { mid }),
+      ...(authenticatedOpkId === undefined
+        ? {}
+        : { authenticatedOneTimePreKeyId: authenticatedOpkId }),
+    };
   }
-  return { mid, content };
+  return {
+    outcome: 'message',
+    mid,
+    content,
+    ...(authenticatedOpkId === undefined
+      ? {}
+      : { authenticatedOneTimePreKeyId: authenticatedOpkId }),
+  };
 }
 
 // --- Contact (de)serialisation for the vault (produces plaintext bytes only) ---

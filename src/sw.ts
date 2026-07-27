@@ -21,13 +21,17 @@
  */
 /// <reference lib="webworker" />
 import { bumpBadge } from './lib/badge';
+import {
+  isScytalePrecache,
+  populateBuildPrecache,
+  versionedPrecacheName,
+  type PrecacheManifestEntry,
+} from './lib/swPrecache';
+import { PUSH_CONTROL_CACHE, PUSH_DISABLED_PATH, VAPID_PUBLIC } from './lib/push';
 
 const sw = self as unknown as ServiceWorkerGlobalScope;
+declare const __BUILD_HASH__: string;
 
-// VAPID public key (public by design) — needed to re-subscribe from the SW when
-// the browser rotates the endpoint (pushsubscriptionchange).
-const VAPID_PUBLIC =
-  'BCvQuiivhlyNteecWKop_2Jh-cPdK_V8UeiSwgyt8_yPzbduj6dQf6fAJkqOTaVZXMaIsUCb0l8VLLJV8aVuzAo';
 function vapidKeyBytes(): Uint8Array {
   const s = VAPID_PUBLIC;
   const pad = '='.repeat((4 - (s.length % 4)) % 4);
@@ -38,31 +42,31 @@ function vapidKeyBytes(): Uint8Array {
 }
 
 // vite-plugin-pwa replaces `self.__WB_MANIFEST` with the precache list at build.
-const manifest = (self as unknown as { __WB_MANIFEST: { url: string; revision: string | null }[] })
-  .__WB_MANIFEST;
+const manifest = (self as unknown as { __WB_MANIFEST: PrecacheManifestEntry[] }).__WB_MANIFEST;
 
-const PRECACHE = 'scytale-precache';
 const ASSETS = manifest.map((e) => new URL(e.url, sw.location.origin).pathname);
 const ASSET_SET = new Set(ASSETS);
+const PRECACHE = versionedPrecacheName(__BUILD_HASH__, manifest);
+
+const fetchBuildAsset = (path: string) =>
+  fetch(path, {
+    cache: 'no-store',
+    credentials: 'same-origin',
+    redirect: 'error',
+  });
 
 sw.addEventListener('install', (event) => {
   event.waitUntil(
     (async () => {
-      const cache = await caches.open(PRECACHE);
-      // Best-effort, per asset: a single failing request must NOT abort the whole
-      // install (that would leave the SW forever un-activated). Skip index.html
-      // here — it 307-redirects to '/', and the Cache API refuses to store a
-      // redirected response, which is exactly what broke activation before.
-      await Promise.all(
-        ASSETS.filter((u) => u !== '/index.html').map((u) => cache.add(u).catch(() => undefined)),
-      );
-      // Cache the app shell under '/index.html' by fetching '/' (200, no redirect)
-      // and storing a fresh, non-redirected Response ourselves.
+      const cacheName = await PRECACHE;
       try {
-        const shell = await fetch('/', { cache: 'no-store' });
-        if (shell.ok) await cache.put('/index.html', new Response(await shell.blob(), { headers: shell.headers }));
-      } catch {
-        /* offline during install — navigation will fall back to network later */
+        const cache = await caches.open(cacheName);
+        await populateBuildPrecache(cache, manifest, fetchBuildAsset);
+      } catch (error) {
+        // Install is transactional at build granularity: never leave an incomplete
+        // candidate around, and never activate it.
+        await caches.delete(cacheName).catch(() => false);
+        throw error;
       }
       // NOTE: no skipWaiting() here. In 'prompt' mode the new SW waits until the
       // user taps "Aktualisieren", which posts SKIP_WAITING (below). Activating
@@ -79,12 +83,14 @@ sw.addEventListener('message', (event) => {
 sw.addEventListener('activate', (event) => {
   event.waitUntil(
     (async () => {
-      const cache = await caches.open(PRECACHE);
-      // Drop entries from previous builds (hashed filenames change each deploy).
-      for (const req of await cache.keys()) {
-        if (!ASSET_SET.has(new URL(req.url).pathname)) await cache.delete(req);
+      const cacheName = await PRECACHE;
+      // A successful install populated this exact cache. Refuse activation if it
+      // vanished rather than claiming clients with an empty/broken shell.
+      if (!(await caches.has(cacheName))) throw new Error('Precache fehlt bei Aktivierung.');
+      // Only after the complete new build activates may old SKYTALE build caches go.
+      for (const name of await caches.keys()) {
+        if (isScytalePrecache(name) && name !== cacheName) await caches.delete(name);
       }
-      for (const name of await caches.keys()) if (name !== PRECACHE) await caches.delete(name);
       await sw.clients.claim();
     })(),
   );
@@ -93,27 +99,20 @@ sw.addEventListener('activate', (event) => {
 // Serve the app shell CACHE-FIRST: the running code changes only when the user
 // accepts an update (which activates a new SW → a new precache). The server
 // cannot swap the shell out from under a live session on a security tool. The
-// network is touched only on a COLD cache — the very first launch, where the
-// install couldn't reach the network — so we still bootstrap offline capability.
-async function cachedShell(cache: Cache): Promise<Response> {
+// A missing active cache fails closed. Fetching `/` here would silently execute
+// the server's newer shell before the user accepted its waiting worker.
+function cacheUnavailable(): Response {
+  return new Response('SKYTALE-App-Cache fehlt. Bitte die App neu laden oder neu installieren.', {
+    status: 503,
+    headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
+  });
+}
+
+async function cachedShell(): Promise<Response> {
+  const cache = await caches.open(await PRECACHE);
   const cached = await cache.match('/index.html');
   if (cached) return cached;
-  try {
-    // Cold cache only. Fetch '/' (200), NOT '/index.html' (which 307-redirects —
-    // a redirected response can't be cached and would throw on cache.put).
-    const fresh = await fetch('/', { cache: 'no-store' });
-    if (fresh.ok) {
-      try {
-        await cache.put('/index.html', fresh.clone());
-      } catch {
-        /* keep serving even if caching fails */
-      }
-      return fresh;
-    }
-  } catch {
-    /* offline with an empty cache — nothing we can serve */
-  }
-  return (await cache.match('/index.html')) ?? Response.error();
+  return cacheUnavailable();
 }
 
 sw.addEventListener('fetch', (event) => {
@@ -125,20 +124,24 @@ sw.addEventListener('fetch', (event) => {
 
   // Navigations → cache-first (a new shell arrives only via an accepted update).
   if (req.mode === 'navigate') {
-    event.respondWith(caches.open(PRECACHE).then(cachedShell));
+    event.respondWith(cachedShell());
     return;
   }
 
-  // Hashed static assets are immutable → cache-first; cache on first network hit
-  // so the app also works fully offline after it's been loaded once online.
+  // Only build-manifest assets belong to the immutable app shell. A miss fails
+  // closed instead of fetching a possibly newer/mismatched script from the server.
+  if (!ASSET_SET.has(url.pathname)) {
+    // Executable build resources must never fall through to the live deployment:
+    // that would combine a consented shell with unconsented script/style bytes.
+    if (req.destination === 'script' || req.destination === 'style' || req.destination === 'worker') {
+      event.respondWith(cacheUnavailable());
+    }
+    return;
+  }
   event.respondWith(
     (async () => {
-      const cache = await caches.open(PRECACHE);
-      const cached = await cache.match(req);
-      if (cached) return cached;
-      const res = await fetch(req);
-      if (res.ok && res.type === 'basic') await cache.put(req, res.clone());
-      return res;
+      const cache = await caches.open(await PRECACHE);
+      return (await cache.match(req)) ?? cacheUnavailable();
     })(),
   );
 });
@@ -172,10 +175,18 @@ sw.addEventListener('push', (event) => {
 // launch (currentSubscription → setPush).
 sw.addEventListener('pushsubscriptionchange', (event) => {
   (event as ExtendableEvent).waitUntil(
-    sw.registration.pushManager
-      .subscribe({ userVisibleOnly: true, applicationServerKey: vapidKeyBytes() as BufferSource })
-      .then(() => undefined)
-      .catch(() => undefined),
+    (async () => {
+      // disablePush writes this intent marker BEFORE unsubscribing. Endpoint
+      // rotation (or an unsubscribe-triggered change event) must never overturn
+      // an explicit disable/account wipe by silently minting a new subscription.
+      const control = await caches.open(PUSH_CONTROL_CACHE);
+      const disabledKey = new URL(PUSH_DISABLED_PATH, sw.location.origin).toString();
+      if (await control.match(disabledKey)) return;
+      await sw.registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: vapidKeyBytes() as BufferSource,
+      });
+    })().catch(() => undefined),
   );
 });
 

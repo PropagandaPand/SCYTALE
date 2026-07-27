@@ -20,13 +20,13 @@ ok('roundtrip erhält alle Keys + Signed Prekey',
   sodium.to_hex(rt.sasEphPub) === sodium.to_hex(eph.publicKey) &&
   rt.signedPreKey.id === 7 && sodium.to_hex(rt.signedPreKey.pub) === sodium.to_hex(dh.publicKey));
 
-// A future "v3" payload: different version byte → version error, not "invalid".
-const v3 = new Uint8Array(1 + 32 + 32 + 32 + 16);
-v3[0] = 3;
-const v3tok = sodium.to_base64(v3, sodium.base64_variants.URLSAFE_NO_PADDING);
+// A future "v4" payload: different version byte → version error, not "invalid".
+const v4 = new Uint8Array(1 + 32 + 32 + 32 + 16);
+v4[0] = 4;
+const v4tok = sodium.to_base64(v4, sodium.base64_variants.URLSAFE_NO_PADDING);
 let msg = '';
-try { await L.decodeLinkRequest(v3tok); } catch (e) { msg = e.message; }
-ok('v3-Payload meldet Versions-Fehler, nicht "ungültig"', /Format-Version 3/.test(msg));
+try { await L.decodeLinkRequest(v4tok); } catch (e) { msg = e.message; }
+ok('v4-Payload meldet Versions-Fehler, nicht "ungültig"', /Format-Version 4/.test(msg));
 ok('Versions-Fehler nennt Update als Ausweg', /aktualisieren/i.test(msg));
 
 let msg2 = '';
@@ -34,7 +34,7 @@ try { await L.decodeLinkRequest('!!!not base64!!!'); } catch (e) { msg2 = e.mess
 ok('echter Müll bleibt "Ungültiger Kopplungs-Code"', /Ungültiger Kopplungs-Code/.test(msg2));
 
 let msg3 = '';
-const short = new Uint8Array([2, 1, 2, 3]); // current version byte, wrong length
+const short = new Uint8Array([3, 1, 2, 3]); // current version byte, wrong length
 try { await L.decodeLinkRequest(sodium.to_base64(short, sodium.base64_variants.URLSAFE_NO_PADDING)); }
 catch (e) { msg3 = e.message; }
 ok('richtige Version, falsche Länge -> ungültig', /Ungültiger Kopplungs-Code/.test(msg3));
@@ -42,7 +42,7 @@ ok('richtige Version, falsche Länge -> ungültig', /Ungültiger Kopplungs-Code/
 // --- Offer ------------------------------------------------------------------
 console.log('\n[LinkOffer: SAS vor Credential]');
 const pEph = sodium.crypto_box_keypair();
-// v2 offer: ephemeral + master public + epoch. The master is here on purpose —
+// v3 offer: ephemeral + master public + epoch. The master is here on purpose —
 // the SAS is derived over it, so N needs it BEFORE the human confirms. It is
 // public material, not a credential (issuing certs needs the private half).
 const pMaster = sodium.crypto_sign_keypair();
@@ -72,12 +72,14 @@ const list0 = await L.signDeviceList(master.privateKey, master.publicKey, epoch,
   { signPub: pDev.publicKey, dhPub: pDh.publicKey, deviceCert: cert0 },
 ]);
 
+// createLinkGrant now also binds P's offer transcript (F-04), so pass a matching offer.
+const grantOffer = { sasEphPub: pEph.publicKey, masterPub: master.publicKey, epoch };
 const { grant, newList } = await L.createLinkGrant(
-  master.privateKey, master.publicKey, epoch, list0, req,
+  master.privateKey, master.publicKey, epoch, list0, req, grantOffer,
 );
-ok('createLinkGrant nimmt kein SAS-Ephemeral mehr entgegen', L.createLinkGrant.length === 5);
+ok('createLinkGrant bindet Request UND Offer (Arity 6, F-04)', L.createLinkGrant.length === 6);
 ok('Grant hat kein sasEphPub-Feld', grant.sasEphPub === undefined);
-ok('Grant verifiziert für N', await L.verifyLinkGrant(grant, dev.publicKey, dh.publicKey));
+ok('Grant verifiziert für N', await L.verifyLinkGrant(grant, dev.publicKey, dh.publicKey, req.signedPreKey, req, grantOffer));
 ok('neue Liste hat Version 2', newList.version === 2);
 ok('neue Liste enthält N', L.deviceInList(newList, dev.publicKey));
 

@@ -60,6 +60,9 @@ export function QrScanner({
             const code = jsQR(img.data, img.width, img.height, { inversionAttempts: 'attemptBoth' });
             if (code?.data) {
               active = false;
+              cancelAnimationFrame(raf);
+              stream?.getTracks().forEach((track) => track.stop());
+              video.srcObject = null;
               onResultRef.current(code.data);
               return;
             }

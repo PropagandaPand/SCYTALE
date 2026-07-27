@@ -26,6 +26,18 @@ import { bytesToB64 } from './bytes';
 /** Raw bytes per stored chunk. Independent of the wire chunk size — this only
  *  bounds how much plaintext a single decrypt handles. */
 const STORE_CHUNK = 256 * 1024;
+const MAX_ATTACHMENT_BYTES = 1024 * 1024 * 1024;
+const MAX_ATTACHMENT_CHUNKS = Math.ceil(MAX_ATTACHMENT_BYTES / STORE_CHUNK);
+
+/** Creating one JS Blob from more than this is not safe on memory-constrained PWAs. */
+export const MAX_MATERIALIZED_ATTACHMENT_BYTES = 32 * 1024 * 1024;
+
+export class AttachmentMaterializationLimitError extends Error {
+  constructor() {
+    super('Anhang ist zu groß für eine sichere In-Memory-Darstellung.');
+    this.name = 'AttachmentMaterializationLimitError';
+  }
+}
 
 export interface AttachmentMeta {
   name: string;
@@ -45,6 +57,8 @@ export interface RecvMarker {
   ts: number; // when the transfer started — a stale one (sender vanished) is swept
   receivedIdx: number[]; // distinct chunk indices stored so far (completion = length === total)
   receivedBytes: number; // bytes stored so far — bounded by `size` so a peer can't over-store
+  roomId: string; // quota owner; binds the transfer to the admitting contact
+  automatic: boolean; // true consumes the per-contact automatic receive budget
   viewOnce?: boolean; // a view-once video/photo — the completed message self-destructs on first open
 }
 
@@ -187,7 +201,22 @@ export async function getAttachmentMeta(dek: CryptoKey, id: string): Promise<Att
   const pt = await openUnder(await attKeys(dek, id), rec, metaAad(id));
   if (!pt) return null;
   try {
-    return JSON.parse(utf8.decode(pt)) as AttachmentMeta;
+    const meta: unknown = JSON.parse(utf8.decode(pt));
+    if (
+      !meta ||
+      typeof meta !== 'object' ||
+      typeof (meta as AttachmentMeta).name !== 'string' ||
+      typeof (meta as AttachmentMeta).mime !== 'string' ||
+      !Number.isSafeInteger((meta as AttachmentMeta).size) ||
+      (meta as AttachmentMeta).size < 0 ||
+      (meta as AttachmentMeta).size > MAX_ATTACHMENT_BYTES ||
+      !Number.isSafeInteger((meta as AttachmentMeta).chunks) ||
+      (meta as AttachmentMeta).chunks < 1 ||
+      (meta as AttachmentMeta).chunks > MAX_ATTACHMENT_CHUNKS
+    ) {
+      return null;
+    }
+    return meta as AttachmentMeta;
   } catch {
     return null;
   }
@@ -203,19 +232,87 @@ export async function attachmentComplete(dek: CryptoKey, id: string): Promise<bo
 
 /** Reassemble the attachment as a Blob, decrypting one chunk at a time. Returns
  *  null if the meta or any chunk is missing (an incomplete or GC'd attachment). */
-export async function getAttachmentBlob(dek: CryptoKey, id: string): Promise<Blob | null> {
+export async function getAttachmentBlob(
+  dek: CryptoKey,
+  id: string,
+  maxBytes = MAX_MATERIALIZED_ATTACHMENT_BYTES,
+): Promise<Blob | null> {
   const meta = await getAttachmentMeta(dek, id);
   if (!meta) return null;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || meta.size > maxBytes) {
+    throw new AttachmentMaterializationLimitError();
+  }
   const keys = await attKeys(dek, id); // resolve once, reuse for every chunk
   const parts: BlobPart[] = [];
+  let total = 0;
   for (let i = 0; i < meta.chunks; i++) {
     const rec = await loadRecord(chunkKey(id, i));
     if (!rec) return null;
     const pt = await openUnder(keys, rec, chunkAad(id, i));
     if (!pt) return null;
+    total += pt.length;
+    if (total > meta.size || total > maxBytes) throw new AttachmentMaterializationLimitError();
     parts.push(pt);
   }
+  if (total !== meta.size) return null;
   return new Blob(parts, { type: meta.mime });
+}
+
+interface WritableAttachmentFile {
+  write(data: Uint8Array<ArrayBuffer>): Promise<void>;
+  close(): Promise<void>;
+  abort(reason?: unknown): Promise<void>;
+}
+
+interface AttachmentFileHandle {
+  createWritable(): Promise<WritableAttachmentFile>;
+}
+
+type SavePickerWindow = Window & {
+  showSaveFilePicker?: (options: { suggestedName: string }) => Promise<AttachmentFileHandle>;
+};
+
+export function supportsStreamingAttachmentSave(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    typeof (window as SavePickerWindow).showSaveFilePicker === 'function'
+  );
+}
+
+/**
+ * Explicitly export a large plaintext attachment straight to a user-selected
+ * file. Only one decrypted chunk exists in JS memory at a time; plaintext is
+ * written nowhere until the user grants a destination.
+ */
+export async function saveAttachmentToDisk(
+  dek: CryptoKey,
+  id: string,
+  suggestedName: string,
+): Promise<void> {
+  const picker = typeof window === 'undefined' ? undefined : (window as SavePickerWindow).showSaveFilePicker;
+  if (!picker) throw new Error('Dieser Browser unterstützt keinen sicheren Streaming-Export großer Anhänge.');
+  const meta = await getAttachmentMeta(dek, id);
+  if (!meta) throw new Error('Anhang ist unvollständig oder beschädigt.');
+  const handle = await picker.call(window, { suggestedName: suggestedName || meta.name || 'anhang' });
+  const writable = await handle.createWritable();
+  const keys = await attKeys(dek, id);
+  let total = 0;
+  try {
+    for (let i = 0; i < meta.chunks; i++) {
+      const rec = await loadRecord(chunkKey(id, i));
+      if (!rec) throw new Error('Anhang ist unvollständig.');
+      const plain = await openUnder(keys, rec, chunkAad(id, i));
+      if (!plain) throw new Error('Anhang ist beschädigt.');
+      total += plain.length;
+      if (total > meta.size) throw new Error('Anhang ist größer als seine Metadaten.');
+      await writable.write(plain);
+    }
+    if (total !== meta.size) throw new Error('Anhang ist unvollständig.');
+    await writable.close();
+  } catch (error) {
+    await writable.abort(error).catch(() => undefined);
+    throw error;
+  }
 }
 
 /** Delete every record of an attachment. Enumeration-based, so it also cleans up a

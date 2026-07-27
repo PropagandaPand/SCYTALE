@@ -39,6 +39,12 @@ export class RelayClient {
   private heartbeat: ReturnType<typeof setInterval> | null = null;
   private pongTimer: ReturnType<typeof setTimeout> | null = null;
   private pushSub: PushSub | null = null; // owner inbox: re-registered after each auth
+  private ownerAuthed = false;
+  private authWaiters = new Set<(ok: boolean) => void>();
+  private unsubscribeWaiters = new Map<
+    string,
+    { resolve: (ok: boolean) => void; timer: ReturnType<typeof setTimeout> }
+  >();
   status: RelayStatus = 'closed';
 
   constructor(
@@ -59,6 +65,7 @@ export class RelayClient {
     const ws = new WebSocket(url);
     ws.onopen = () => {
       if (this.ws !== ws) return; // superseded by a newer socket
+      this.ownerAuthed = false;
       this.setStatus('open');
       if (this.opts.auth) ws.send(JSON.stringify({ t: 'hello' }));
       // Flush anything queued while we were connecting / reconnecting.
@@ -73,6 +80,7 @@ export class RelayClient {
     };
     ws.onclose = () => {
       if (this.ws !== ws) return; // an old, replaced socket closing — ignore
+      this.ownerAuthed = false;
       this.stopHeartbeat();
       this.setStatus('closed');
       if (!this.closedByUs) setTimeout(() => this.connect(), 1500);
@@ -122,7 +130,9 @@ export class RelayClient {
     if (typeof ev.data !== 'string') return;
     let m: Record<string, unknown>;
     try {
-      m = JSON.parse(ev.data);
+      const parsed: unknown = JSON.parse(ev.data);
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return;
+      m = parsed as Record<string, unknown>;
     } catch {
       return;
     }
@@ -135,16 +145,47 @@ export class RelayClient {
       this.opts.onAck?.(typeof m.mid === 'string' ? m.mid : null);
     } else if (m.t === 'nack') {
       this.opts.onNack?.(typeof m.mid === 'string' ? m.mid : null);
-    } else if (m.t === 'challenge' && this.opts.auth && typeof m.nonce === 'string') {
-      const sig = await this.opts.auth.sign(b64ToBytes(m.nonce));
-      this.ws?.send(
-        JSON.stringify({ t: 'auth', signPub: bytesToB64(this.opts.auth.signPub), sig: bytesToB64(sig) }),
-      );
-      // Re-register our push subscription now that this socket is authed as owner
-      // (the DO only accepts it from an authenticated owner). Ordered after auth.
+    } else if (m.t === 'authed' && this.opts.auth) {
+      this.ownerAuthed = true;
+      for (const resolve of this.authWaiters) resolve(true);
+      this.authWaiters.clear();
+      // New servers explicitly acknowledge auth. Re-send idempotently here so a
+      // subscription can never race ahead of the authenticated state.
       if (this.pushSub) this.ws?.send(JSON.stringify({ t: 'subscribe', sub: this.pushSub }));
-    } else if (m.t === 'msg' && typeof m.b64 === 'string' && typeof m.id === 'number') {
-      this.opts.onCipher?.(b64ToBytes(m.b64), m.id);
+    } else if (m.t === 'unsubscribed' && typeof m.rid === 'string') {
+      const waiter = this.unsubscribeWaiters.get(m.rid);
+      if (waiter) {
+        clearTimeout(waiter.timer);
+        this.unsubscribeWaiters.delete(m.rid);
+        waiter.resolve(true);
+      }
+    } else if (m.t === 'challenge' && this.opts.auth && typeof m.nonce === 'string') {
+      try {
+        const nonce = b64ToBytes(m.nonce);
+        const sig = await this.opts.auth.sign(nonce);
+        this.ws?.send(
+          JSON.stringify({ t: 'auth', signPub: bytesToB64(this.opts.auth.signPub), sig: bytesToB64(sig) }),
+        );
+        // Legacy servers do not emit `authed`; ordered WebSocket frames still
+        // make this safe, while new servers send an idempotent second subscribe.
+        if (this.pushSub) this.ws?.send(JSON.stringify({ t: 'subscribe', sub: this.pushSub }));
+      } catch {
+        this.ws?.close(1007, 'invalid auth challenge');
+      }
+    } else if (
+      m.t === 'msg' &&
+      typeof m.b64 === 'string' &&
+      typeof m.id === 'number' &&
+      Number.isSafeInteger(m.id) &&
+      m.id > 0
+    ) {
+      try {
+        this.opts.onCipher?.(b64ToBytes(m.b64), m.id);
+      } catch {
+        // Purge malformed legacy rows. New relay versions reject non-canonical
+        // base64 before INSERT, but an old poisoned row must not block the inbox.
+        this.ack(m.id);
+      }
     }
   }
 
@@ -169,12 +210,44 @@ export class RelayClient {
     }
   }
 
-  /** Owner: tell the DO to forget a push endpoint (user disabled notifications). */
-  unsubscribePush(endpoint: string): void {
+  private waitForOwnerAuth(ms: number): Promise<boolean> {
+    if (this.ownerAuthed) return Promise.resolve(true);
+    if (!this.opts.auth) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (ok: boolean) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        this.authWaiters.delete(finish);
+        resolve(ok);
+      };
+      const timer = setTimeout(() => finish(false), ms);
+      this.authWaiters.add(finish);
+    });
+  }
+
+  /** Owner: tell the DO to forget a push endpoint and wait for its durable DELETE.
+   *  The boolean distinguishes a confirmed removal from an offline/best-effort one. */
+  async unsubscribePush(endpoint: string): Promise<boolean> {
     this.pushSub = null;
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ t: 'unsubscribe', endpoint }));
-    }
+    if (!(await this.waitForOwnerAuth(2500)) || this.ws?.readyState !== WebSocket.OPEN) return false;
+    const words = crypto.getRandomValues(new Uint32Array(4));
+    const rid = [...words].map((word) => word.toString(16).padStart(8, '0')).join('');
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.unsubscribeWaiters.delete(rid);
+        resolve(false);
+      }, 2500);
+      this.unsubscribeWaiters.set(rid, { resolve, timer });
+      try {
+        this.ws?.send(JSON.stringify({ t: 'unsubscribe', endpoint, rid }));
+      } catch {
+        clearTimeout(timer);
+        this.unsubscribeWaiters.delete(rid);
+        resolve(false);
+      }
+    });
   }
 
   /** Owner: confirm a delivered message so the DO drops it from the queue. */
@@ -186,6 +259,14 @@ export class RelayClient {
 
   close(): void {
     this.closedByUs = true;
+    this.ownerAuthed = false;
+    for (const resolve of this.authWaiters) resolve(false);
+    this.authWaiters.clear();
+    for (const [rid, waiter] of this.unsubscribeWaiters) {
+      clearTimeout(waiter.timer);
+      this.unsubscribeWaiters.delete(rid);
+      waiter.resolve(false);
+    }
     this.stopHeartbeat();
     this.ws?.close();
   }

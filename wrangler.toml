@@ -1,15 +1,14 @@
 name = "scytale"
 main = "worker/index.ts"
-compatibility_date = "2025-06-01"
+compatibility_date = "2026-07-27"
 
 # Custom domain. The zone skytale.chat is in this Cloudflare account (bought on CF),
 # so custom_domain = true makes Cloudflare create the proxied DNS record and the TLS
 # cert automatically on deploy — no manual DNS. The worker keeps its internal name
 # ("scytale") so the existing Durable Object and deploy history stay attached.
 #
-# workers_dev = true is REQUIRED here: specifying routes otherwise disables the
-# *.workers.dev URL, which would take the app offline until the custom domain is live.
-workers_dev = true
+# Do not expose a second production origin that bypasses the canonical hostname.
+workers_dev = false
 routes = [
   { pattern = "skytale.chat", custom_domain = true },
 ]
@@ -27,22 +26,63 @@ VAPID_SUBJECT = "https://skytale.chat"
 directory = "./dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
+# Every asset response must pass through worker/index.ts so security headers,
+# HTTPS redirects, and service-worker cache policy cannot be bypassed.
+run_worker_first = true
 
 # The relay lives in a Durable Object. SQLite-backed DOs run on the free tier.
 [[durable_objects.bindings]]
 name = "RELAY"
 class_name = "RelayRoom"
 
+[[durable_objects.bindings]]
+name = "BLOB_QUOTA"
+class_name = "BlobQuota"
+
+[[durable_objects.bindings]]
+name = "RELAY_GUARD"
+class_name = "RelayActorGuard"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RelayRoom"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["BlobQuota"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["RelayActorGuard"]
 
 # R2 object storage for LARGE attachments (videos) that don't fit the relay mailbox.
 # The client encrypts the file CLIENT-SIDE under a random per-file key before upload, so
 # R2 only ever holds ciphertext; the key travels end-to-end in the sealed message. Upload
 # + download go through this Worker (same origin → CSP connect-src 'self' stays intact).
 # Create the bucket once:  npx wrangler r2 bucket create skytale-blobs
-# and set a lifecycle rule (dashboard) to auto-delete objects after ~14 days.
+# Apply the repository-controlled retention policy:
+#   npx wrangler r2 bucket lifecycle set skytale-blobs --file ./r2-lifecycle.json
 [[r2_buckets]]
 binding = "BLOBS"
 bucket_name = "skytale-blobs"
+
+# Coarse edge brakes. Security-critical mailbox and storage limits are additionally
+# enforced inside their strongly-consistent Durable Objects.
+[[ratelimits]]
+name = "RELAY_RATE"
+namespace_id = "290001"
+simple = { limit = 120, period = 60 }
+
+[[ratelimits]]
+name = "UPLOAD_RATE"
+namespace_id = "290002"
+simple = { limit = 240, period = 60 }
+
+[[ratelimits]]
+name = "BUG_RATE"
+namespace_id = "290003"
+simple = { limit = 5, period = 60 }
+
+[observability]
+enabled = true
+head_sampling_rate = 0.1

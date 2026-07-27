@@ -5,8 +5,9 @@
  */
 import { seal, open, utf8 } from '../crypto';
 import { serializeContact, deserializeContact, type Contact } from './session';
-import { loadRecord, saveRecord, secureDeleteRecord } from './db';
+import { loadRecord, saveRecord, saveRecordsAtomically, secureDeleteRecord } from './db';
 import { cryptoEraseRoom } from './messages';
+import { sealPreKeysRecord, type PreKeyState } from './prekeys';
 
 const INDEX_AAD = utf8.encode('scytale:contact-index:v1');
 const contactAad = (roomId: string) => utf8.encode(`scytale:contact:v1:${roomId}`);
@@ -28,6 +29,39 @@ export async function saveContact(dek: CryptoKey, c: Contact): Promise<void> {
     ids.push(c.roomId);
     await saveIndex(dek, ids);
   }
+}
+
+/**
+ * Persist a newly authenticated OPK-backed session and remove that OPK in one
+ * IndexedDB transaction. Mutate the in-memory prekey state only after the
+ * transaction commits, so a crash leaves either both old records or both new.
+ */
+export async function saveContactAndConsumeOneTimePreKey(
+  dek: CryptoKey,
+  c: Contact,
+  prekeys: PreKeyState,
+  opkId: number,
+): Promise<void> {
+  const index = prekeys.oneTimePreKeys.findIndex((opk) => opk.id === opkId);
+  if (index < 0) throw new Error('Authentisierter One-Time-Prekey ist nicht mehr verfügbar.');
+  const remaining = prekeys.oneTimePreKeys.filter((_, i) => i !== index);
+  const nextPrekeys: PreKeyState = { ...prekeys, oneTimePreKeys: remaining };
+  const ids = await loadIndex(dek);
+  const entries: Array<readonly [string, Awaited<ReturnType<typeof seal>>]> = [
+    [
+      `contact:${c.roomId}`,
+      await seal(dek, await serializeContact(c), contactAad(c.roomId)),
+    ],
+    ['prekeys', await sealPreKeysRecord(dek, nextPrekeys)],
+  ];
+  if (!ids.includes(c.roomId)) {
+    entries.push([
+      'contact-index',
+      await seal(dek, utf8.encode(JSON.stringify([...ids, c.roomId])), INDEX_AAD),
+    ]);
+  }
+  await saveRecordsAtomically(entries);
+  prekeys.oneTimePreKeys = remaining;
 }
 
 export async function removeContact(dek: CryptoKey, roomId: string): Promise<void> {

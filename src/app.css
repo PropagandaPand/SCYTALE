@@ -310,6 +310,35 @@ select {
   background: var(--verified);
   flex: none;
 }
+
+/* Immediate privacy cover for OS app-switcher snapshots. The lifecycle handler
+   toggles the html class synchronously before React work or timer suspension. */
+.privacy-curtain {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: #0b0c0e;
+  color: #d5ff52;
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.28em;
+  padding-left: 0.28em;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: none;
+}
+html.privacy-curtain-on .privacy-curtain {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
 /* ==== CONTACT LIST ==================================================== */
 .list {
   flex: 1;

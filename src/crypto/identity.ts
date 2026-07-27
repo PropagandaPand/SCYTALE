@@ -10,8 +10,8 @@
  * the human-verifiable safety number.
  */
 import { getSodium } from './sodium';
-import { b64encode, b64decode, concatBytes } from './codec';
-import { signDeviceCert } from './master';
+import { b64encode, b64decode, concatBytes, bytesEqual } from './codec';
+import { signDeviceCert, verifyDeviceCert } from './master';
 import type { Bytes } from './types';
 
 export interface KeyPair {
@@ -89,6 +89,20 @@ interface IdentityWire {
   previousMasterPub?: string | null;
 }
 
+export class LegacyIdentityFormatError extends Error {
+  constructor() {
+    super('Veraltetes Identitätsformat — Neuaufbau nötig.');
+    this.name = 'LegacyIdentityFormatError';
+  }
+}
+
+export class IdentityCorruptError extends Error {
+  constructor(what: string) {
+    super(`Identitätsdatensatz beschädigt (${what}).`);
+    this.name = 'IdentityCorruptError';
+  }
+}
+
 export async function serializeIdentity(id: IdentityKeys): Promise<Bytes> {
   const wire: IdentityWire = {
     v: 2,
@@ -107,12 +121,19 @@ export async function serializeIdentity(id: IdentityKeys): Promise<Bytes> {
 }
 
 export async function deserializeIdentity(bytes: Bytes): Promise<IdentityKeys> {
-  const wire = JSON.parse(utf8Decode(bytes)) as IdentityWire;
+  let wire: IdentityWire;
+  try {
+    wire = JSON.parse(utf8Decode(bytes)) as IdentityWire;
+  } catch {
+    throw new IdentityCorruptError('JSON');
+  }
   // v2 introduced the master/cross-signing model. A v1 identity predates it and
   // is not upgradable in place (its contacts pin device keys, not a master) — a
   // clean regenerate is expected during the multi-device format break.
-  if (wire.v !== 2) throw new Error('Veraltetes Identitätsformat — Neuaufbau nötig.');
-  return {
+  const version = (wire as { v?: unknown } | null)?.v;
+  if (version === 1) throw new LegacyIdentityFormatError();
+  if (version !== 2) throw new IdentityCorruptError('unbekannte Version');
+  const id: IdentityKeys = {
     createdAt: wire.createdAt,
     epoch: wire.epoch,
     master: { publicKey: await b64decode(wire.masterPub), privateKey: await b64decode(wire.masterPriv) },
@@ -121,6 +142,39 @@ export async function deserializeIdentity(bytes: Bytes): Promise<IdentityKeys> {
     dh: { publicKey: await b64decode(wire.dhPub), privateKey: await b64decode(wire.dhPriv) },
     previousMasterPub: wire.previousMasterPub ? await b64decode(wire.previousMasterPub) : undefined,
   };
+  if (!Number.isFinite(id.createdAt)) throw new IdentityCorruptError('Zeitstempel');
+  if (!Number.isSafeInteger(id.epoch) || id.epoch < 1) throw new IdentityCorruptError('Epoch');
+  if (id.master.publicKey.length !== 32) throw new IdentityCorruptError('Master-Public-Key');
+  if (id.master.privateKey.length !== 0 && id.master.privateKey.length !== 64) {
+    throw new IdentityCorruptError('Master-Private-Key');
+  }
+  if (id.sign.publicKey.length !== 32 || id.sign.privateKey.length !== 64) {
+    throw new IdentityCorruptError('Device-Sign-Keypair');
+  }
+  if (id.dh.publicKey.length !== 32 || id.dh.privateKey.length !== 32) {
+    throw new IdentityCorruptError('Device-DH-Keypair');
+  }
+  if (id.deviceCert.length !== 64) throw new IdentityCorruptError('Device-Zertifikat');
+  if (id.previousMasterPub && id.previousMasterPub.length !== 32) {
+    throw new IdentityCorruptError('Previous-Master');
+  }
+  const s = await getSodium();
+  if (!bytesEqual(new Uint8Array(s.crypto_sign_ed25519_sk_to_pk(id.sign.privateKey)), id.sign.publicKey)) {
+    throw new IdentityCorruptError('Device-Sign-Keypair passt nicht zusammen');
+  }
+  if (!bytesEqual(new Uint8Array(s.crypto_scalarmult_base(id.dh.privateKey)), id.dh.publicKey)) {
+    throw new IdentityCorruptError('Device-DH-Keypair passt nicht zusammen');
+  }
+  if (
+    id.master.privateKey.length === 64 &&
+    !bytesEqual(new Uint8Array(s.crypto_sign_ed25519_sk_to_pk(id.master.privateKey)), id.master.publicKey)
+  ) {
+    throw new IdentityCorruptError('Master-Keypair passt nicht zusammen');
+  }
+  if (!(await verifyDeviceCert(id.master.publicKey, id.epoch, id.sign.publicKey, id.dh.publicKey, id.deviceCert))) {
+    throw new IdentityCorruptError('Device-Zertifikat ungültig');
+  }
+  return id;
 }
 
 /**

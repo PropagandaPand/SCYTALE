@@ -18,6 +18,26 @@ export interface PushSub {
 
 export type PushState = 'unsupported' | 'default' | 'granted' | 'denied';
 
+export const PUSH_CONTROL_CACHE = 'scytale-control-v1';
+export const PUSH_DISABLED_PATH = '/__scytale_push_disabled__';
+
+async function setPushDisabled(disabled: boolean): Promise<void> {
+  if (!('caches' in globalThis)) return;
+  const cache = await caches.open(PUSH_CONTROL_CACHE);
+  const key = new URL(PUSH_DISABLED_PATH, location.origin).toString();
+  if (disabled) {
+    await cache.put(
+      key,
+      new Response(null, {
+        status: 204,
+        headers: { 'cache-control': 'no-store' },
+      }),
+    );
+  } else {
+    await cache.delete(key);
+  }
+}
+
 function b64urlToBytes(s: string): Uint8Array {
   const pad = '='.repeat((4 - (s.length % 4)) % 4);
   const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/') + pad);
@@ -64,6 +84,7 @@ export async function enablePush(): Promise<PushSub> {
   }
   const perm = await Notification.requestPermission();
   if (perm !== 'granted') throw new Error('Benachrichtigungen wurden nicht erlaubt.');
+  await setPushDisabled(false);
 
   const reg = await withTimeout(navigator.serviceWorker.ready, 8000, 'Service Worker nicht bereit (Timeout).');
   let sub = await reg.pushManager.getSubscription();
@@ -92,8 +113,14 @@ export async function currentSubscription(): Promise<PushSub | null> {
 
 /** Unsubscribe locally. Returns the endpoint that was removed (to tell the DO). */
 export async function disablePush(): Promise<string | null> {
+  // Persist intent before unsubscribe: `pushsubscriptionchange` may run between
+  // unsubscribe and service-worker unregister during an account wipe.
+  // Failure is security-relevant: unsubscribing without this marker lets the
+  // worker's rotation handler silently create a replacement subscription.
+  await setPushDisabled(true);
   if (!pushSupported()) return null;
-  const reg = await navigator.serviceWorker.ready;
+  const reg = await navigator.serviceWorker.getRegistration();
+  if (!reg) return null;
   const sub = await reg.pushManager.getSubscription();
   if (!sub) return null;
   const endpoint = sub.endpoint;

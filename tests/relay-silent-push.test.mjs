@@ -1,7 +1,5 @@
-// Phantom-push fix: a frame the sender marks `silent` (profile/devlist/sync/recall/…)
-// is delivered like any other but must never arm a wake-up push. Verified at the
-// source level, matching the style of relay-ack-auth (the worker runs under the
-// Cloudflare runtime, not Node).
+// A remote sender may not suppress an owner's wake-up by setting `silent`.
+// Only an authenticated owner/self-sync receives silent semantics.
 import { readFileSync } from 'node:fs';
 
 let pass = 0, fail = 0;
@@ -11,11 +9,13 @@ const relay = readFileSync(new URL('../worker/relay.ts', import.meta.url), 'utf8
 const wire = readFileSync(new URL('../src/lib/relay.ts', import.meta.url), 'utf8');
 const msgr = readFileSync(new URL('../src/Messenger.tsx', import.meta.url), 'utf8');
 
-console.log('\n[relay: silent frames never arm a push]');
+console.log('\n[relay: only owner-authenticated silent frames suppress push]');
 
 // The queue carries a silent column (migrated on existing mailboxes too).
 ok('q gains a silent column', /ALTER TABLE q ADD COLUMN silent INTEGER DEFAULT 0/.test(relay));
 ok('send stores the silent flag', /INSERT INTO q \(body, ts, silent\)/.test(relay));
+ok('unauthenticated sender cannot assert silent',
+  /const silent = att\.owner && m\.silent === true \? 1 : 0/.test(relay));
 // A send only arms the coalescing alarm when it is NOT silent.
 ok('scheduleWake gated by !silent', /!ownerOnline && !silent\)\s*this\.ctx\.waitUntil\(this\.scheduleWake\(\)\)/.test(relay));
 // The alarm only pushes when a NON-silent message is actually pending.

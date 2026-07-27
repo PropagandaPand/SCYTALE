@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { IconPlay, IconPause } from './icons';
+import { mayAnalyzeAudio } from './lib/mediaPolicy';
 
 const BARS = 34;
 // Fallback shape when the browser can't decode this codec for analysis.
@@ -54,17 +55,19 @@ export function AudioPlayer({ blob, mime }: { blob: Blob; mime: string }) {
     const objUrl = URL.createObjectURL(blob);
     setUrl(objUrl);
     let cancelled = false;
-    void (async () => {
-      try {
-        const buf = await getCtx().decodeAudioData(await blob.arrayBuffer());
-        if (!cancelled) {
-          setPeaks(computePeaks(buf, BARS));
-          setDur(buf.duration);
+    if (mayAnalyzeAudio(blob.size)) {
+      void (async () => {
+        try {
+          const buf = await getCtx().decodeAudioData(await blob.arrayBuffer());
+          if (!cancelled) {
+            setPeaks(computePeaks(buf, BARS));
+            setDur(buf.duration);
+          }
+        } catch {
+          /* codec not decodable here — keep fallback peaks + <audio> duration */
         }
-      } catch {
-        /* codec not decodable here — keep fallback peaks + <audio> duration */
-      }
-    })();
+      })();
+    }
     return () => {
       cancelled = true;
       URL.revokeObjectURL(objUrl);

@@ -36,11 +36,10 @@
  * never over this QR channel.
  */
 import { verifyDeviceCert, signDeviceCert } from './master';
-import { verify } from './identity';
+import { sign, verify } from './identity';
 import {
   signDeviceList,
   verifyDeviceList,
-  deviceInList,
   encodeDeviceList,
   decodeDeviceList,
   type DeviceList,
@@ -48,8 +47,9 @@ import {
   type SignedPreKeyPublic,
 } from './devicelist';
 import { getSodium } from './sodium';
-import { utf8 } from './codec';
-import type { Bytes } from './types';
+import { concatBytes, utf8 } from './codec';
+import { linkingTranscriptBytes } from './sas';
+import { asMasterPub, type Bytes } from './types';
 
 /** N → P, carried in a QR code. */
 export interface LinkRequest {
@@ -87,14 +87,20 @@ export interface LinkGrant {
   epoch: number;
   deviceCert: Bytes; // master sig over (epoch, N.signPub, N.dhPub)
   deviceList: DeviceList; // updated list (version+1) that INCLUDES N
+  /** Master signature over this exact request+offer and issued cert/list.
+   * Prevents a captured grant from an older, separately confirmed attempt from
+   * being replayed into a fresh attempt with the same long-term device keys. */
+  proof: Bytes;
 }
 
-const REQ_VERSION = 2; // v2 (Stage 3d): the QR gained N's signed prekey
+// v3 has the same byte layout as v2, but changes the security semantics: every
+// field below is now bound into the human-confirmed SAS transcript.
+const REQ_VERSION = 3;
 const REQ_LEN = 1 + 32 + 32 + 32 + 4 + 32 + 64; // version | signPub | dhPub | sasEph | spkId | spkPub | spkSig
-// v2: gained masterPub + epoch, because the SAS must commit to the master
-// before the user confirms. A v1 decoder sees the new length and reports a
-// version mismatch ("update both devices") rather than a bogus parse.
-const OFFER_VERSION = 2;
+// v2 gained masterPub + epoch; v3 makes the complete offer/request pair the
+// canonical SAS transcript. Older decoders report a version mismatch instead
+// of accepting a payload with weaker semantics.
+const OFFER_VERSION = 3;
 const OFFER_LEN = 1 + 32 + 32 + 4;
 
 /** Offer wire: version(1) | sasEphPub(32) | masterPub(32) | epoch(4, BE). */
@@ -146,7 +152,7 @@ export async function decodeLinkRequest(token: string): Promise<LinkRequest> {
     throw new Error('Ungültiger Kopplungs-Code.');
   }
   if (buf.length < 1) throw new Error('Ungültiger Kopplungs-Code.');
-  // Dispatch on the version byte BEFORE the length check. A future v2 payload
+  // Dispatch on the version byte BEFORE the length check. A future payload
   // will have a different length, so checking length first would report "invalid
   // code" for what is really "your app is too old" — the user would hunt a
   // scanner bug instead of updating. The version byte only pays off if the
@@ -181,16 +187,45 @@ export async function createLinkGrant(
   epoch: number,
   currentList: DeviceList,
   req: LinkRequest,
+  offer: LinkOffer,
 ): Promise<{ grant: LinkGrant; newList: DeviceList }> {
-  if (deviceInList(currentList, req.deviceSignPub)) {
-    throw new Error('Dieses Gerät ist bereits gekoppelt.');
+  if (!sameBytes(offer.masterPub, masterPub) || offer.epoch !== epoch) {
+    throw new Error('Kopplungs-Angebot gehört nicht zur aktuellen Hauptidentität.');
   }
-  // Verify N's signed-prekey self-signature BEFORE the master vouches for it. The
-  // linking SAS binds only the two masters + ephemerals, not the SPK, so a QR-tamper
-  // could otherwise splice an attacker's SPK into a master-signed list (peers would
-  // then fail to initiate to N → silent inbound reachability DoS). (Review fund 3.)
+  if (!(await verifyDeviceList(currentList, masterPub, epoch))) {
+    throw new Error('Aktuelle Geräteliste ungültig — Kopplung abgebrochen.');
+  }
+  // Verify N's signed-prekey self-signature before the master vouches for it.
+  // The SAS binds the SPK bytes, but this signature proves that the requested
+  // device signing key actually authorized them.
   if (!(await verify(req.signedPreKey.pub, req.signedPreKey.signature, req.deviceSignPub))) {
     throw new Error('Signed-Prekey-Signatur des neuen Geräts ungültig — Kopplung abgebrochen.');
+  }
+  // Idempotent retry after persist-before-send: if the first delivery failed, the
+  // durable list already contains exactly this request. Reuse its cert and version
+  // rather than minting a duplicate entry or bumping the version again.
+  const existing = currentList.devices.find((d) => sameBytes(d.signPub, req.deviceSignPub));
+  if (existing) {
+    const sameRequest =
+      sameBytes(existing.dhPub, req.deviceDhPub) &&
+      !!existing.signedPreKey &&
+      existing.signedPreKey.id === req.signedPreKey.id &&
+      sameBytes(existing.signedPreKey.pub, req.signedPreKey.pub) &&
+      sameBytes(existing.signedPreKey.signature, req.signedPreKey.signature);
+    if (!sameRequest) throw new Error('Geräte-ID ist bereits mit anderen Schlüsseln gekoppelt.');
+    const grantBase = {
+      masterPub,
+      epoch,
+      deviceCert: existing.deviceCert,
+      deviceList: currentList,
+    };
+    return {
+      grant: {
+        ...grantBase,
+        proof: await sign(await linkGrantProofMessage(req, offer, grantBase), masterPriv),
+      },
+      newList: currentList,
+    };
   }
   const deviceCert = await signDeviceCert(masterPriv, epoch, req.deviceSignPub, req.deviceDhPub);
   const entry: DeviceEntry = {
@@ -203,7 +238,48 @@ export async function createLinkGrant(
     ...currentList.devices,
     entry,
   ]);
-  return { grant: { masterPub, epoch, deviceCert, deviceList: newList }, newList };
+  const grantBase = { masterPub, epoch, deviceCert, deviceList: newList };
+  return {
+    grant: {
+      ...grantBase,
+      proof: await sign(await linkGrantProofMessage(req, offer, grantBase), masterPriv),
+    },
+    newList,
+  };
+}
+
+function sameBytes(a: Bytes, b: Bytes): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
+}
+
+const LINK_GRANT_PROOF_CTX = utf8.encode('SCYTALE-LINK-GRANT-PROOF-v2');
+
+async function linkGrantProofMessage(
+  request: LinkRequest,
+  offer: LinkOffer,
+  grant: Pick<LinkGrant, 'masterPub' | 'epoch' | 'deviceCert' | 'deviceList'>,
+): Promise<Bytes> {
+  if (
+    !sameBytes(offer.masterPub, grant.masterPub) ||
+    offer.epoch !== grant.epoch ||
+    grant.deviceCert.length !== 64
+  ) {
+    throw new Error('Kopplungs-Nachweis und bestätigtes Transcript widersprechen sich.');
+  }
+  const encodedList = await encodeDeviceList(grant.deviceList);
+  const listDigest = new Uint8Array(await crypto.subtle.digest('SHA-256', encodedList));
+  return concatBytes(
+    LINK_GRANT_PROOF_CTX,
+    linkingTranscriptBytes(request, {
+      ...offer,
+      masterPub: asMasterPub(offer.masterPub),
+    }),
+    grant.deviceCert,
+    listDigest,
+  );
 }
 
 /**
@@ -225,7 +301,19 @@ export async function verifyLinkGrant(
   grant: LinkGrant,
   myDeviceSignPub: Bytes,
   myDeviceDhPub: Bytes,
+  expectedSpk: SignedPreKeyPublic | undefined,
+  request: LinkRequest,
+  offer: LinkOffer,
 ): Promise<boolean> {
+  if (
+    !sameBytes(request.deviceSignPub, myDeviceSignPub) ||
+    !sameBytes(request.deviceDhPub, myDeviceDhPub) ||
+    !sameBytes(offer.masterPub, grant.masterPub) ||
+    offer.epoch !== grant.epoch ||
+    grant.proof.length !== 64
+  ) {
+    return false;
+  }
   // The cert must cover exactly our keys, under the claimed master + epoch.
   if (!(await verifyDeviceCert(grant.masterPub, grant.epoch, myDeviceSignPub, myDeviceDhPub, grant.deviceCert))) {
     return false;
@@ -241,12 +329,33 @@ export async function verifyLinkGrant(
   // the emoji must be derived over P's masterPub, so a substituted master
   // produces different emoji. See the SAS requirement in verifyLinkGrant's doc.
   if (!(await verifyDeviceList(list, grant.masterPub, grant.epoch))) return false;
-  return deviceInList(list, myDeviceSignPub);
+  const mine = list.devices.find((d) => sameBytes(d.signPub, myDeviceSignPub));
+  if (!mine || !sameBytes(mine.dhPub, myDeviceDhPub) || !sameBytes(mine.deviceCert, grant.deviceCert)) {
+    return false;
+  }
+  if (
+    expectedSpk &&
+    (!mine.signedPreKey ||
+      mine.signedPreKey.id !== expectedSpk.id ||
+      !sameBytes(mine.signedPreKey.pub, expectedSpk.pub) ||
+      !sameBytes(mine.signedPreKey.signature, expectedSpk.signature))
+  ) {
+    return false;
+  }
+  try {
+    return verify(
+      await linkGrantProofMessage(request, offer, grant),
+      grant.proof,
+      grant.masterPub,
+    );
+  } catch {
+    return false;
+  }
 }
 
 // --- Grant wire format ------------------------------------------------------
 
-const GRANT_VERSION = 1;
+const GRANT_VERSION = 2;
 
 interface GrantWire {
   v: number;
@@ -254,6 +363,7 @@ interface GrantWire {
   epoch: number;
   deviceCert: string;
   deviceList: string; // b64 of encodeDeviceList
+  proof: string;
 }
 
 /** Sealed to the new device's X25519 key and dropped in its inbox. */
@@ -266,6 +376,7 @@ export async function encodeLinkGrant(grant: LinkGrant): Promise<Bytes> {
     epoch: grant.epoch,
     deviceCert: b64(grant.deviceCert),
     deviceList: b64(await encodeDeviceList(grant.deviceList)),
+    proof: b64(grant.proof),
   };
   return utf8.encode(JSON.stringify(wire));
 }
@@ -291,5 +402,6 @@ export async function decodeLinkGrant(bytes: Bytes): Promise<LinkGrant> {
     epoch: wire.epoch,
     deviceCert: unb64(wire.deviceCert),
     deviceList: await decodeDeviceList(unb64(wire.deviceList)),
+    proof: unb64(wire.proof),
   };
 }

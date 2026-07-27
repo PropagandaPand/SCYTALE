@@ -20,6 +20,7 @@ import {
   type OneTimePreKey,
   type PreKeyBundle,
   type SignedPreKeyPublic,
+  type SealedRecord,
 } from '../crypto';
 import { loadRecord, saveRecord } from './db';
 
@@ -119,7 +120,12 @@ export async function loadOrCreatePreKeys(dek: CryptoKey, identity: IdentityKeys
 }
 
 export async function savePreKeys(dek: CryptoKey, st: PreKeyState): Promise<void> {
-  await saveRecord(KEY, await seal(dek, await serialize(st), AAD));
+  await saveRecord(KEY, await sealPreKeysRecord(dek, st));
+}
+
+/** Prepare a prekey record for a larger atomic records transaction. */
+export async function sealPreKeysRecord(dek: CryptoKey, st: PreKeyState): Promise<SealedRecord> {
+  return seal(dek, await serialize(st), AAD);
 }
 
 /**
@@ -159,7 +165,13 @@ export function findSignedPreKey(st: PreKeyState, id: number): SignedPreKey | un
   return st.signedPreKey.id === id ? st.signedPreKey : undefined;
 }
 
-/** Remove and return a one-time prekey by id — it must never be reused. */
+/** Non-mutating OPK lookup for the speculative X3DH/AEAD verification phase. */
+export function findOneTimePreKey(st: PreKeyState, id: number): OneTimePreKey | undefined {
+  return st.oneTimePreKeys.find((o) => o.id === id);
+}
+
+/** Commit a successfully authenticated OPK use. Never call before the first
+ * message's AEAD has verified. */
 export function consumeOneTimePreKey(st: PreKeyState, id: number): OneTimePreKey | undefined {
   const idx = st.oneTimePreKeys.findIndex((o) => o.id === id);
   if (idx === -1) return undefined;

@@ -2,8 +2,15 @@ import { useEffect, useRef, useState } from 'react';
 import { AudioPlayer } from './AudioPlayer';
 import { IconAttach } from './icons';
 import { b64ToBytes } from './lib/bytes';
-import { getAttachmentBlob } from './lib/attachments';
+import {
+  AttachmentMaterializationLimitError,
+  MAX_MATERIALIZED_ATTACHMENT_BYTES,
+  getAttachmentBlob,
+  saveAttachmentToDisk,
+  supportsStreamingAttachmentSave,
+} from './lib/attachments';
 import { isSticker } from './lib/stickers';
+import { mayRenderInlineImage } from './lib/mediaPolicy';
 import { t } from './lib/i18n';
 import type { FileRef } from './lib/messages';
 
@@ -12,7 +19,16 @@ import type { FileRef } from './lib/messages';
  *  sync as a bare reference, or was garbage-collected). `attId` wins over inline. */
 export async function resolveFileBlob(dek: CryptoKey, file: FileRef): Promise<Blob | null> {
   if (file.attId) return getAttachmentBlob(dek, file.attId);
-  if (file.dataB64 !== undefined) return new Blob([b64ToBytes(file.dataB64)], { type: file.mime });
+  if (file.dataB64 !== undefined) {
+    if (file.dataB64.length > Math.ceil((MAX_MATERIALIZED_ATTACHMENT_BYTES * 4) / 3) + 4) {
+      throw new AttachmentMaterializationLimitError();
+    }
+    const bytes = b64ToBytes(file.dataB64);
+    if (bytes.length > MAX_MATERIALIZED_ATTACHMENT_BYTES) {
+      throw new AttachmentMaterializationLimitError();
+    }
+    return new Blob([bytes], { type: file.mime });
+  }
   return null;
 }
 
@@ -61,7 +77,8 @@ export function Attachment({
   onStickerZoom: (file: FileRef) => void;
 }) {
   const [blob, setBlob] = useState<Blob | null>(null);
-  const [state, setState] = useState<'idle' | 'loading' | 'ready' | 'missing'>('idle');
+  const [state, setState] = useState<'idle' | 'loading' | 'ready' | 'large' | 'exporting' | 'missing'>('idle');
+  const [exportError, setExportError] = useState('');
 
   // Lazy decrypt: a long or image-heavy chat (especially a group) used to decrypt
   // EVERY attachment the moment it opened — the main source of the lag. Only decrypt
@@ -93,8 +110,9 @@ export function Attachment({
         if (!alive) return;
         setBlob(b);
         setState(b ? 'ready' : 'missing');
-      } catch {
-        if (alive) setState('missing');
+      } catch (error) {
+        if (!alive) return;
+        setState(error instanceof AttachmentMaterializationLimitError ? 'large' : 'missing');
       }
     })();
     return () => {
@@ -117,6 +135,40 @@ export function Attachment({
   if (state === 'missing') {
     return <div className="file-missing">{t('Anhang auf diesem Gerät nicht verfügbar')}</div>;
   }
+  if (state === 'large' || state === 'exporting') {
+    const canStream = !!file.attId && supportsStreamingAttachmentSave();
+    return (
+      <div ref={anchorRef}>
+        <button
+          className="file-chip"
+          disabled={!canStream || state === 'exporting'}
+          onClick={() => {
+            if (!file.attId || !canStream) return;
+            setExportError('');
+            setState('exporting');
+            void saveAttachmentToDisk(dek, file.attId, file.name)
+              .catch((error: unknown) => {
+                if (!(error instanceof DOMException && error.name === 'AbortError')) {
+                  setExportError(error instanceof Error ? error.message : t('Export fehlgeschlagen.'));
+                }
+              })
+              .finally(() => setState('large'));
+          }}
+        >
+          <IconAttach size={15} />
+          <span className="fn">
+            {state === 'exporting' ? t('Anhang wird exportiert…') : file.name}
+          </span>
+        </button>
+        {!canStream && (
+          <div className="file-missing">
+            {t('Großer Anhang: Dieser Browser unterstützt keinen sicheren Streaming-Export.')}
+          </div>
+        )}
+        {exportError && <div className="file-missing">{exportError}</div>}
+      </div>
+    );
+  }
   if (state !== 'ready' || !url || !blob) {
     // Reserve some space for still-media so lazy loading doesn't jump the scroll.
     const media = file.mime.startsWith('image/') || file.mime.startsWith('video/');
@@ -132,13 +184,13 @@ export function Attachment({
     );
   }
 
-  if (isSticker(file)) {
+  if (isSticker(file) && mayRenderInlineImage(file.mime, blob.size)) {
     return <img className="bubble-sticker" src={url} alt="Sticker" draggable={false} onClick={() => onStickerZoom(file)} />;
   }
   if (file.mime.startsWith('video/')) {
     return <video className="bubble-video" src={url} controls playsInline preload="metadata" />;
   }
-  if (file.mime.startsWith('image/')) {
+  if (mayRenderInlineImage(file.mime, blob.size)) {
     return <img className="bubble-img" src={url} alt={file.name} draggable={false} onClick={() => onImageZoom(blob)} />;
   }
   if (file.mime.startsWith('audio/')) {

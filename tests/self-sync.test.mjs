@@ -84,7 +84,13 @@ const injSealed = (await S.fanoutDeliveries(A.id, mContactForV, inject, S.random
 const mEnv = await S.decodeEnvelope((await S.openPayload(victim, injSealed)).payload);
 const vContactForM = await S.makeContactFromHeader(S.asMasterPub(victim.master.publicKey), mEnv.x3dh);
 let rejected = false;
-try { await S.receiveEnvelope(victim, vContactForM, mEnv, vLookup); } catch { rejected = true; }
+try {
+  // Post-F-06/F-22: an unauthorised self-frame is reported as an authenticated-drop
+  // (the caller still has to persist the advanced ratchet), NOT thrown. Either way it
+  // is never surfaced as a processable message — that is what stops the injection.
+  const r = await S.receiveEnvelope(victim, vContactForM, mEnv, vLookup);
+  rejected = r.outcome === 'authenticated-drop' && r.reason === 'unauthorised-self-frame';
+} catch { rejected = true; }
 ok('sync von fremdem Master abgewiesen — Injektion verhindert', rejected === true);
 
 console.log(`\n${pass} ok, ${fail} fail`);

@@ -41,7 +41,9 @@ function diagnostics(): string {
 export function BugReport({ onClose }: { onClose: () => void }) {
   const [cat, setCat] = useState('bug');
   const [msg, setMsg] = useState('');
-  const [diag, setDiag] = useState(true);
+  // Diagnostics are genuinely opt-in; opening the dialog must not preselect
+  // device/browser metadata for transmission.
+  const [diag, setDiag] = useState(false);
   const [state, setState] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
 
   async function send() {

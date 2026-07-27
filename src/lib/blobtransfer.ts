@@ -13,8 +13,23 @@ import {
   encryptChunk,
   decryptChunk,
 } from '../crypto/blob';
-import { bytesToB64, b64ToBytes } from './bytes';
+import { bytesToB64 } from './bytes';
 import { sealAndPutChunk, finalizeAttachment, deleteAttachment, type AttachmentMeta } from './attachments';
+import { consumeExactByteStream } from './exactStream';
+import {
+  assertExactR2ContentLength,
+  validateR2Descriptor,
+  validateR2UploadSession,
+  type R2Ref,
+} from './r2Descriptor';
+
+export {
+  assertExactR2ContentLength,
+  tryValidateR2Descriptor,
+  validateR2Descriptor,
+  validateR2UploadSession,
+} from './r2Descriptor';
+export type { R2Ref } from './r2Descriptor';
 
 const PART_SIZE = 8 * 1024 * 1024; // ciphertext bytes per multipart part (R2 needs ≥5 MiB, except the last)
 
@@ -54,13 +69,6 @@ export async function readSliceRetry(file: Blob, start: number, end: number, tri
   throw new FileReadError(lastErr);
 }
 
-export interface R2Ref {
-  key: string; // R2 object key (the capability)
-  keyB64: string; // Kf — the per-file key, carried E2E
-  size: number; // plaintext byte length
-  chunk: number; // plaintext chunk size
-}
-
 function concat(parts: Uint8Array[], len: number): Uint8Array<ArrayBuffer> {
   const out = new Uint8Array(len) as Uint8Array<ArrayBuffer>;
   let o = 0;
@@ -85,7 +93,8 @@ export async function uploadFileToR2(
   const created = await fetch(`/api/blob/create?size=${file.size}`, { method: 'POST' });
   if (created.status === 507) throw new StorageFullError();
   if (!created.ok) throw new Error('Upload konnte nicht gestartet werden.');
-  const { key, uploadId } = (await created.json()) as { key: string; uploadId: string };
+  const { key, uploadId, token } = validateR2UploadSession(await created.json().catch(() => null));
+  const authorization = `Bearer ${token}`;
 
   try {
     const raw = newBlobKeyRaw();
@@ -104,11 +113,14 @@ export async function uploadFileToR2(
       const body = concat(buf, bufLen);
       buf = [];
       bufLen = 0;
-      const r = await fetch(`/api/blob/part?key=${key}&upload=${uploadId}&n=${partNum}`, {
-        method: 'PUT',
-        headers: { 'content-type': 'application/octet-stream' },
-        body,
-      });
+      const r = await fetch(
+        `/api/blob/part?key=${encodeURIComponent(key)}&upload=${encodeURIComponent(uploadId)}&n=${partNum}&bytes=${body.byteLength}`,
+        {
+          method: 'PUT',
+          headers: { authorization, 'content-type': 'application/octet-stream' },
+          body,
+        },
+      );
       if (!r.ok) throw new Error('Teil-Upload fehlgeschlagen.');
       const { etag } = (await r.json()) as { etag: string };
       parts.push({ n: partNum, etag });
@@ -130,7 +142,7 @@ export async function uploadFileToR2(
 
     const done = await fetch('/api/blob/complete', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { authorization, 'content-type': 'application/json' },
       body: JSON.stringify({ key, upload: uploadId, parts }),
     });
     if (done.status === 507) throw new StorageFullError(); // budget re-checked authoritatively at complete
@@ -140,7 +152,7 @@ export async function uploadFileToR2(
   } catch (e) {
     await fetch('/api/blob/abort', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { authorization, 'content-type': 'application/json' },
       body: JSON.stringify({ key, upload: uploadId }),
     }).catch(() => undefined);
     throw e;
@@ -158,38 +170,44 @@ export async function downloadR2ToStore(
   mime: string,
   onProgress?: (frac: number) => void,
 ): Promise<void> {
-  const res = await fetch('/api/blob/' + ref.key);
+  // Validate before touching the network or allocating crypto/stream state. This
+  // is repeated even when the message-ingest path already checked the descriptor:
+  // persisted legacy/corrupt records must not bypass the boundary.
+  const valid = validateR2Descriptor(ref);
+  const res = await fetch('/api/blob/' + valid.key);
   if (!res.ok || !res.body) throw new Error(res.status === 404 ? 'Datei nicht mehr verfügbar (abgelaufen?).' : 'Download fehlgeschlagen.');
-  const cryptoKey = await importBlobKey(b64ToBytes(ref.keyB64) as Uint8Array<ArrayBuffer>);
-  const totalChunks = Math.max(1, Math.ceil(ref.size / ref.chunk));
-  const ctLenAt = (i: number) => ctChunkLen(Math.min(ref.chunk, ref.size - i * ref.chunk));
+  assertExactR2ContentLength(res.headers.get('content-length'), valid.ciphertextBytes);
+  const cryptoKey = await importBlobKey(valid.keyBytes);
+  const ctLenAt = (i: number) => ctChunkLen(Math.min(valid.chunk, valid.size - i * valid.chunk));
 
   const reader = res.body.getReader();
   let leftover = new Uint8Array(0) as Uint8Array<ArrayBuffer>;
   let idx = 0;
   let donePlain = 0;
   try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (value && value.length) {
+    await consumeExactByteStream(reader, valid.ciphertextBytes, async (value) => {
+      if (value.length) {
         const merged = new Uint8Array(leftover.length + value.length) as Uint8Array<ArrayBuffer>;
         merged.set(leftover, 0);
         merged.set(value, leftover.length);
         leftover = merged;
       }
-      while (idx < totalChunks && leftover.length >= ctLenAt(idx)) {
+      while (idx < valid.totalChunks && leftover.length >= ctLenAt(idx)) {
         const clen = ctLenAt(idx);
         const pt = await decryptChunk(cryptoKey, idx, leftover.subarray(0, clen) as Uint8Array<ArrayBuffer>);
+        const expectedPlain = Math.min(valid.chunk, valid.size - idx * valid.chunk);
+        if (pt.length !== expectedPlain) throw new Error('Ungültige entschlüsselte Chunk-Länge.');
         await sealAndPutChunk(dek, attId, idx, pt);
         leftover = leftover.subarray(clen) as Uint8Array<ArrayBuffer>;
         idx++;
         donePlain += pt.length;
-        onProgress?.(donePlain / Math.max(1, ref.size));
+        onProgress?.(donePlain / valid.size);
       }
-      if (done) break;
+    });
+    if (idx !== valid.totalChunks || leftover.length !== 0 || donePlain !== valid.size) {
+      throw new Error('Übertragung unvollständig.');
     }
-    if (idx !== totalChunks) throw new Error('Übertragung unvollständig.');
-    const meta: AttachmentMeta = { name, mime, size: ref.size, chunks: totalChunks };
+    const meta: AttachmentMeta = { name, mime, size: valid.size, chunks: valid.totalChunks };
     await finalizeAttachment(dek, attId, meta);
     // NB: we deliberately do NOT delete the R2 object here. The SAME descriptor is fanned
     // out to every recipient device, so a delete-after-download would 404 the object for the

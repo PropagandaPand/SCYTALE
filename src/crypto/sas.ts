@@ -107,31 +107,99 @@ export async function computeSas(
   return { emoji: emojiIndices(sas).map((i) => SAS_EMOJI[i]), decimal: decimals(sas) };
 }
 
+/** The complete credential subject carried by N's QR. Kept structural here to
+ * avoid a runtime import cycle with linking.ts. */
+export interface LinkingRequestTranscript {
+  deviceSignPub: Bytes;
+  deviceDhPub: Bytes;
+  sasEphPub: Bytes;
+  signedPreKey: { id: number; pub: Bytes; signature: Bytes };
+}
+
+/** The inert offer P sends before either side confirms. */
+export interface LinkingOfferTranscript {
+  sasEphPub: Bytes;
+  masterPub: MasterPub;
+  epoch: number;
+}
+
+const LINK_SAS_CTX = utf8.encode('SCYTALE-LINK-SAS-v2');
+
+function uint32(v: number, what: string): Bytes {
+  if (!Number.isSafeInteger(v) || v < 0 || v > 0xffffffff) {
+    throw new Error(`Ungültiger ${what} im Kopplungs-Transcript.`);
+  }
+  const out = new Uint8Array(4);
+  new DataView(out.buffer).setUint32(0, v, false);
+  return out;
+}
+
+function exact(b2: Bytes, len: number, what: string): Bytes {
+  if (b2.length !== len) throw new Error(`Ungültige ${what}-Länge im Kopplungs-Transcript.`);
+  return b2;
+}
+
+/** Canonical, role-independent bytes for one complete linking attempt.
+ *
+ * This is shared by the human SAS and the master-signed LinkGrant proof. Keeping
+ * one encoder prevents a field from being shown to the human but omitted from
+ * the credential that is issued after confirmation (or vice versa).
+ */
+export function linkingTranscriptBytes(
+  r: LinkingRequestTranscript,
+  o: LinkingOfferTranscript,
+): Bytes {
+  exact(r.deviceSignPub, 32, 'Device-Sign-Key');
+  exact(r.deviceDhPub, 32, 'Device-DH-Key');
+  exact(r.sasEphPub, 32, 'Request-Ephemeral');
+  exact(r.signedPreKey.pub, 32, 'Signed-Prekey');
+  exact(r.signedPreKey.signature, 64, 'Signed-Prekey-Signatur');
+  exact(o.sasEphPub, 32, 'Offer-Ephemeral');
+  exact(o.masterPub, 32, 'Master-Key');
+  return concatBytes(
+    LINK_SAS_CTX,
+    r.deviceSignPub,
+    r.deviceDhPub,
+    r.sasEphPub,
+    uint32(r.signedPreKey.id, 'Signed-Prekey-ID'),
+    r.signedPreKey.pub,
+    r.signedPreKey.signature,
+    o.sasEphPub,
+    o.masterPub,
+    uint32(o.epoch, 'Epoch'),
+  );
+}
+
 /**
- * The SAS for DEVICE LINKING — bound to the two MASTER keys, not the device keys.
+ * Device-linking SAS over one canonical, role-ordered transcript:
  *
- * This is the single point where the emoji comparison gets its meaning.
- * `verifyLinkGrant` is necessarily self-referential: the new device has no
- * pinned master yet, it is *learning* one, so every check there is relative to
- * the master the grant asserts. A wholly forged grant passes all of them. The
- * only thing that actually authenticates the master is the human comparing
- * emoji — and that only works if the master is what the emoji are derived from.
+ *   request(N sign, N dh, N eph, SPK id/pub/signature)
+ *   offer(P eph, P master, epoch)
  *
- * Hence `MasterPub` rather than `Bytes`: a UI that passed a device key here
- * would compile fine, produce matching emoji on both sides, and authenticate
- * nothing. The brand turns that from a silent hole into a compile error.
+ * Both endpoints encode N first and P second, so no caller-controlled sorting can
+ * accidentally omit or reinterpret a credential field. In particular, keeping
+ * the ephemerals/master fixed while replacing N's certified keys now changes the
+ * SAS the human sees.
  */
 export async function linkingSas(args: {
+  role: 'new' | 'primary';
   myEph: KeyPair;
-  theirEphPub: Bytes;
-  myMasterPub: MasterPub;
-  theirMasterPub: MasterPub;
+  request: LinkingRequestTranscript;
+  offer: LinkingOfferTranscript;
 }): Promise<SasResult> {
-  return computeSas(
-    args.myEph.privateKey,
-    args.myEph.publicKey,
-    args.theirEphPub,
-    args.myMasterPub,
-    args.theirMasterPub,
-  );
+  const r = args.request;
+  const o = args.offer;
+  exact(args.myEph.publicKey, 32, 'eigenes SAS-Ephemeral');
+  exact(args.myEph.privateKey, 32, 'privates SAS-Ephemeral');
+
+  const expectedMine = args.role === 'new' ? r.sasEphPub : o.sasEphPub;
+  if (cmpBytes(args.myEph.publicKey, expectedMine) !== 0) {
+    throw new Error('Kopplungs-Session und Transcript gehören nicht zusammen.');
+  }
+  const theirEph = args.role === 'new' ? o.sasEphPub : r.sasEphPub;
+  const s = await getSodium();
+  const shared = b(s.crypto_scalarmult(args.myEph.privateKey, theirEph));
+  const info = linkingTranscriptBytes(r, o);
+  const sas = await hkdfSha256(shared, new Uint8Array(0), info, 18);
+  return { emoji: emojiIndices(sas).map((i) => SAS_EMOJI[i]), decimal: decimals(sas) };
 }

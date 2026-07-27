@@ -37,12 +37,10 @@ ok('Offer trägt P-Ephemeral', sodium.to_hex(offer.sasEphPub) === sodium.to_hex(
 
 // 3. Both derive the SAS. N over the offered master, P over its own — same key.
 const sasN = await S.linkingSas({
-  myEph: nEph, theirEphPub: offer.sasEphPub,
-  myMasterPub: S.asMasterPub(offer.masterPub), theirMasterPub: S.asMasterPub(offer.masterPub),
+  role: 'new', myEph: nEph, request: req, offer,
 });
 const sasP = await S.linkingSas({
-  myEph: pEph, theirEphPub: req.sasEphPub,
-  myMasterPub: S.asMasterPub(master.publicKey), theirMasterPub: S.asMasterPub(master.publicKey),
+  role: 'primary', myEph: pEph, request: req, offer,
 });
 ok('beide Seiten sehen dieselben Emoji', chars(sasN) === chars(sasP));
 
@@ -50,26 +48,43 @@ ok('beide Seiten sehen dieselben Emoji', chars(sasN) === chars(sasP));
 // the human sees it. This is the entire security of the flow.
 const evil = sodium.crypto_sign_keypair();
 const sasEvil = await S.linkingSas({
-  myEph: nEph, theirEphPub: offer.sasEphPub,
-  myMasterPub: S.asMasterPub(evil.publicKey), theirMasterPub: S.asMasterPub(evil.publicKey),
+  role: 'new', myEph: nEph, request: req, offer: { ...offer, masterPub: evil.publicKey },
 });
 ok('untergeschobener Master -> andere Emoji', chars(sasEvil) !== chars(sasN));
+
+// NEGATIVE CONTROL: the exact device/SPK subject P will certify is part of the
+// transcript. Keeping both ephemerals + master fixed while changing a credential
+// field must therefore change the human comparison.
+const otherDh = sodium.crypto_box_keypair();
+const sasOtherDevice = await S.linkingSas({
+  role: 'new',
+  myEph: nEph,
+  request: { ...req, deviceDhPub: otherDh.publicKey },
+  offer,
+});
+ok('untergeschobener Device-DH-Key -> andere Emoji', chars(sasOtherDevice) !== chars(sasN));
 
 // 4. P issues the grant. It cross-signs N's keys and carries the v+1 list.
 const list0 = await S.signDeviceList(master.privateKey, master.publicKey, epoch, 1, [
   { signPub: pSign.publicKey, dhPub: pDh.publicKey, deviceCert: pCert },
 ]);
 const { grant, newList } = await S.createLinkGrant(
-  master.privateKey, master.publicKey, epoch, list0, gotReq,
+  master.privateKey, master.publicKey, epoch, list0, gotReq, offer,
 );
-ok('Grant cross-signt N', await S.verifyLinkGrant(grant, nSign.publicKey, nDh.publicKey));
+ok('Grant cross-signt N', await S.verifyLinkGrant(grant, nSign.publicKey, nDh.publicKey, gotReq.signedPreKey, gotReq, offer));
 ok('neue Liste v2 enthält N', newList.version === 2 && S.deviceInList(newList, nSign.publicKey));
+
+// Persist-before-send retries reuse the already-issued cert/list verbatim.
+const retried = await S.createLinkGrant(master.privateKey, master.publicKey, epoch, newList, gotReq, offer);
+ok('Retry ist idempotent (kein weiterer Versionssprung)', retried.newList.version === newList.version);
+ok('Retry verwendet denselben Device-Cert',
+  sodium.to_hex(retried.grant.deviceCert) === sodium.to_hex(grant.deviceCert));
 
 // 5. Grant wire roundtrip (sealed transport carries these bytes).
 const grantBytes = await S.encodeLinkGrant(grant);
 const grant2 = await S.decodeLinkGrant(grantBytes);
 ok('Grant-Roundtrip verifiziert weiterhin für N',
-  await S.verifyLinkGrant(grant2, nSign.publicKey, nDh.publicKey));
+  await S.verifyLinkGrant(grant2, nSign.publicKey, nDh.publicKey, gotReq.signedPreKey, gotReq, offer));
 
 // 6. THE binding property N enforces: grant.masterPub must equal the approved one.
 ok('Grant nennt den bestätigten Master', sodium.to_hex(grant2.masterPub) === sodium.to_hex(offer.masterPub));

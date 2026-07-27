@@ -33,11 +33,10 @@ import {
   encodeLinkOffer,
   decodeLinkOffer,
   encodeLinkGrant,
-  createLinkGrant,
+  verifyLinkGrant,
   generateSasEphemeral,
   linkingSas,
   sealPayload,
-  asMasterPub,
   SEALED_LINK_OFFER,
   SEALED_LINK_GRANT,
   isPrimaryDevice,
@@ -45,6 +44,7 @@ import {
   type SignedPreKeyPublic,
   type LinkGrant,
   type LinkOffer,
+  type MasterPub,
   type SasResult,
   type KeyPair,
   type IdentityKeys,
@@ -53,7 +53,7 @@ import {
   type Bytes,
 } from '../crypto';
 import { installLinkedIdentity } from './identity';
-import { saveOwnDeviceList } from './devices';
+import { issueAndSaveLinkGrant } from './devices';
 
 /** Everything a linking attempt holds before it commits. Discard = full abort. */
 export interface LinkSession {
@@ -72,6 +72,61 @@ export interface LinkSession {
    * confirmed one identity and would install another.
    */
   approvedMasterPub?: Bytes;
+  /** The exact offer used in the canonical SAS transcript. */
+  offer?: LinkOffer;
+}
+
+/**
+ * Opaque confirmation registry bound to an immutable snapshot of the complete
+ * transcript. A boolean/WeakSet alone is insufficient: a second offer (or any
+ * accidental object mutation) after the user's tap would otherwise inherit the
+ * earlier approval.
+ */
+const confirmedSessions = new WeakMap<LinkSession, string>();
+
+function bytesSnapshot(value: Bytes): string {
+  let out = '';
+  for (const byte of value) out += byte.toString(16).padStart(2, '0');
+  return out;
+}
+
+function confirmationSnapshot(session: LinkSession): string {
+  if (!session.sas || !session.offer) throw new Error('SAS wurde noch nicht vollständig berechnet.');
+  const request = session.request;
+  return JSON.stringify({
+    role: session.role,
+    myEph: bytesSnapshot(session.myEph.publicKey),
+    request: {
+      sign: bytesSnapshot(request.deviceSignPub),
+      dh: bytesSnapshot(request.deviceDhPub),
+      eph: bytesSnapshot(request.sasEphPub),
+      spkId: request.signedPreKey.id,
+      spk: bytesSnapshot(request.signedPreKey.pub),
+      spkSig: bytesSnapshot(request.signedPreKey.signature),
+    },
+    offer: {
+      eph: bytesSnapshot(session.offer.sasEphPub),
+      master: bytesSnapshot(session.offer.masterPub),
+      epoch: session.offer.epoch,
+    },
+    approvedMaster: session.approvedMasterPub ? bytesSnapshot(session.approvedMasterPub) : null,
+    peerSign: bytesSnapshot(session.peerSignPub),
+    peerDh: bytesSnapshot(session.peerDhPub),
+    sas: { emoji: session.sas.emoji, decimal: session.sas.decimal },
+  });
+}
+
+export function confirmLinkSession(session: LinkSession): LinkSession {
+  confirmedSessions.set(session, confirmationSnapshot(session));
+  return session;
+}
+
+function requireConfirmed(session: LinkSession, role: LinkSession['role']): void {
+  if (session.role !== role) throw new Error('Falsche Rolle für diesen Schritt.');
+  const approved = confirmedSessions.get(session);
+  if (!approved || approved !== confirmationSnapshot(session)) {
+    throw new Error('SAS wurde nicht ausdrücklich bestätigt — Kopplung abgebrochen.');
+  }
 }
 
 // ── N (new device) ─────────────────────────────────────────────────────────
@@ -110,14 +165,16 @@ export async function offerReceivedOnN(session: LinkSession, offerBytes: Bytes):
   // Decoding lives here, not in the UI: the version-mismatch message ("app too
   // old") is part of the flow's contract, and a second decode site would drift.
   const offer: LinkOffer = decodeLinkOffer(offerBytes);
+  if (session.role !== 'new') throw new Error('Falsche Rolle für diese Kopplungs-Antwort.');
+  // A new transcript always requires a fresh human comparison.
+  confirmedSessions.delete(session);
   session.approvedMasterPub = offer.masterPub;
-  // Same user on both ends, so both master arguments are the offered master —
-  // what matters is that the emoji COMMIT to it.
+  session.offer = offer;
   const sas = await linkingSas({
+    role: 'new',
     myEph: session.myEph,
-    theirEphPub: offer.sasEphPub,
-    myMasterPub: asMasterPub(offer.masterPub),
-    theirMasterPub: asMasterPub(offer.masterPub),
+    request: session.request,
+    offer: { ...offer, masterPub: offer.masterPub as MasterPub },
   });
   session.sas = sas;
   return sas;
@@ -141,11 +198,29 @@ export async function completeLinkOnN(
   grant: LinkGrant,
   farewell?: () => Promise<void>,
 ): Promise<IdentityKeys> {
+  requireConfirmed(session, 'new');
   // The grant must carry the very master the emoji committed to. verifyLinkGrant
   // alone cannot catch a swap here — it validates everything relative to the
   // master the grant itself asserts.
   if (!session.approvedMasterPub || !bytesEqual(session.approvedMasterPub, grant.masterPub)) {
     throw new Error('Der Kopplungs-Nachweis nennt einen anderen Schlüssel als den bestätigten — abgebrochen.');
+  }
+  if (!session.offer || grant.epoch !== session.offer.epoch) {
+    throw new Error('Der Kopplungs-Nachweis nennt eine andere Epoche als den bestätigten — abgebrochen.');
+  }
+  // Verify the complete credential before the courtesy farewell mutates any
+  // existing ratchet or tells contacts that this identity is leaving.
+  if (
+    !(await verifyLinkGrant(
+      grant,
+      id.sign.publicKey,
+      id.dh.publicKey,
+      session.request.signedPreKey,
+      session.request,
+      session.offer,
+    ))
+  ) {
+    throw new Error('Kopplungs-Nachweis ungültig — Identität unverändert.');
   }
   if (farewell) {
     try {
@@ -155,7 +230,14 @@ export async function completeLinkOnN(
       // security step. Swallowed deliberately, and only here.
     }
   }
-  return installLinkedIdentity(dek, id, grant);
+  return installLinkedIdentity(
+    dek,
+    id,
+    grant,
+    session.request.signedPreKey,
+    session.request,
+    session.offer,
+  );
 }
 
 // ── P (primary device) ─────────────────────────────────────────────────────
@@ -185,51 +267,58 @@ export async function beginLinkOnP(
     await sealPayload(request.deviceDhPub, SEALED_LINK_OFFER, encodeLinkOffer(offer)),
   );
 
-  // Both sides are our own user, so both masters in the SAS are the same key —
-  // and that is the point: the emoji commit to the master N is about to adopt.
+  // Both sides encode the exact same request and offer, including the master N
+  // is about to adopt and every key/certification field from N's request.
   const sas = await linkingSas({
+    role: 'primary',
     myEph,
-    theirEphPub: request.sasEphPub,
-    myMasterPub: asMasterPub(id.master.publicKey),
-    theirMasterPub: asMasterPub(id.master.publicKey),
+    request,
+    offer: { ...offer, masterPub: offer.masterPub as MasterPub },
   });
   return {
-    session: { role: 'primary', myEph, sas, request, peerSignPub: request.deviceSignPub, peerDhPub: request.deviceDhPub },
+    session: {
+      role: 'primary',
+      myEph,
+      sas,
+      request,
+      offer,
+      peerSignPub: request.deviceSignPub,
+      peerDhPub: request.deviceDhPub,
+    },
     sas,
   };
 }
 
 /**
- * P finishes: issue the cert, send the grant, and only THEN persist the list.
+ * P finishes: issue the cert, persist the authoritative list, and only THEN send.
  *
- * ⚠️ COMMIT IS THE LAST ACTION. If the send fails, the new list is never stored,
- * so P's state still describes the world before this attempt — the user simply
- * retries. Persisting first would leave a device in our published list that
- * never received its credential, and removing it again is a rollback path that
- * nobody would ever exercise.
+ * A credential cannot be recalled once sent. Therefore durable state must describe
+ * it before publication. A failed send is retried idempotently from the same list
+ * entry/cert; createLinkGrant does not bump the version again.
  */
 export async function completeLinkOnP(
   dek: CryptoKey,
   id: IdentityKeys,
   session: LinkSession,
-  currentList: DeviceList,
   send: (recipientSignPub: Bytes, sealedPayload: Bytes) => Promise<void>,
 ): Promise<DeviceList> {
-  if (session.role !== 'primary') throw new Error('Falsche Rolle für diesen Schritt.');
-  if (!session.sas) throw new Error('SAS wurde nie berechnet — Kopplung abgebrochen.');
+  requireConfirmed(session, 'primary');
+  if (
+    !session.offer ||
+    !bytesEqual(session.offer.masterPub, id.master.publicKey) ||
+    session.offer.epoch !== id.epoch
+  ) {
+    throw new Error('Die Hauptidentität hat sich seit der SAS-Bestätigung geändert — Kopplung neu starten.');
+  }
 
-  const { grant, newList } = await createLinkGrant(
-    id.master.privateKey,
-    id.master.publicKey,
-    id.epoch,
-    currentList,
+  const { grant, newList } = await issueAndSaveLinkGrant(
+    dek,
+    id,
     session.request,
+    session.offer,
   );
-  await send(
-    session.peerSignPub,
-    await sealPayload(session.peerDhPub, SEALED_LINK_GRANT, await encodeLinkGrant(grant)),
-  );
-  await saveOwnDeviceList(dek, newList); // ← last action
+  const sealedGrant = await sealPayload(session.peerDhPub, SEALED_LINK_GRANT, await encodeLinkGrant(grant));
+  await send(session.peerSignPub, sealedGrant);
   return newList;
 }
 

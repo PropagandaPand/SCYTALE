@@ -13,9 +13,13 @@ import {
   utf8,
   type IdentityKeys,
   type LinkGrant,
+  type LinkOffer,
+  type LinkRequest,
+  type SignedPreKeyPublic,
+  LegacyIdentityFormatError,
 } from '../crypto';
-import { loadRecord, saveRecord } from './db';
-import { saveOwnDeviceList } from './devices';
+import { loadRecord, saveRecord, saveRecordsAtomically } from './db';
+import { sealOwnDeviceListRecord } from './devices';
 
 const KEY = 'identity';
 // AAD binds this ciphertext to the identity slot + schema version.
@@ -28,8 +32,10 @@ export async function loadOrCreateIdentity(dek: CryptoKey): Promise<IdentityKeys
   if (rec) {
     try {
       return await deserializeIdentity(await open(dek, rec, AAD));
-    } catch {
-      /* old format → fall through and regenerate */
+    } catch (e) {
+      // Only the explicit pre-master format break is regenerable. Authentication,
+      // JSON, key-coherence and I/O failures must not silently replace the account.
+      if (!(e instanceof LegacyIdentityFormatError)) throw e;
     }
   }
   const id = await generateIdentity();
@@ -61,8 +67,20 @@ export async function installLinkedIdentity(
   dek: CryptoKey,
   current: IdentityKeys,
   grant: LinkGrant,
+  expectedSpk: SignedPreKeyPublic,
+  request: LinkRequest,
+  offer: LinkOffer,
 ): Promise<IdentityKeys> {
-  if (!(await verifyLinkGrant(grant, current.sign.publicKey, current.dh.publicKey))) {
+  if (
+    !(await verifyLinkGrant(
+      grant,
+      current.sign.publicKey,
+      current.dh.publicKey,
+      expectedSpk,
+      request,
+      offer,
+    ))
+  ) {
     throw new Error('Kopplungs-Nachweis ungültig — Identität unverändert.');
   }
   const linked: IdentityKeys = {
@@ -76,7 +94,14 @@ export async function installLinkedIdentity(
     // affordance instead of a silent stranger.
     previousMasterPub: current.master.publicKey,
   };
-  await saveIdentity(dek, linked); // write new identity first …
-  await saveOwnDeviceList(dek, grant.deviceList); // … then its device list
+  // Prepare both ciphertexts before opening the transaction, then commit them
+  // together. A crash/quota failure leaves either the complete old pair or the
+  // complete linked pair — never a linked identity with an old device list.
+  const identityRecord = await seal(dek, await serializeIdentity(linked), AAD);
+  const listRecord = await sealOwnDeviceListRecord(dek, grant.deviceList);
+  await saveRecordsAtomically([
+    [KEY, identityRecord],
+    ['devicelist', listRecord],
+  ]);
   return linked;
 }

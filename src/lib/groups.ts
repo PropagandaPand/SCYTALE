@@ -14,7 +14,8 @@ import {
   type Bytes,
   type PreKeyBundle,
 } from '../crypto';
-import { loadRecord, saveRecord, deleteRecord } from './db';
+import { loadRecord, saveRecord, secureDeleteRecord } from './db';
+import { cryptoEraseRoom } from './messages';
 import type { GroupInvite } from './session';
 
 export interface GroupMember {
@@ -160,8 +161,10 @@ export async function loadGroups(dek: CryptoKey): Promise<Group[]> {
 }
 
 export async function removeGroup(dek: CryptoKey, id: string): Promise<void> {
-  await deleteRecord(`group:${id}`);
-  await deleteRecord(`msgs:${id}`);
+  // Destroy the small per-room key first: even if IndexedDB retains old log
+  // pages, the message ciphertext is no longer decryptable.
+  await cryptoEraseRoom(id);
+  await secureDeleteRecord(`group:${id}`);
   const ids = (await loadIndex(dek)).filter((x) => x !== id);
   await saveIndex(dek, ids);
 }

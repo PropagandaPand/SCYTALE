@@ -3,10 +3,9 @@ import { loadOrCreateIdentity, fingerprintOf } from './lib/identity';
 import {
   loadOrCreatePreKeys,
   ownSpkPublic,
-  savePreKeys,
   currentBundle,
   findSignedPreKey,
-  consumeOneTimePreKey,
+  findOneTimePreKey,
   type PreKeyState,
 } from './lib/prekeys';
 import {
@@ -38,6 +37,7 @@ import {
   offerReceivedOnN,
   completeLinkOnN,
   beginLinkOnP,
+  confirmLinkSession,
   completeLinkOnP,
   type LinkSession,
 } from './lib/linkflow';
@@ -93,7 +93,12 @@ import {
   type Group,
   type GroupMember,
 } from './lib/groups';
-import { saveContact, loadContacts, removeContact } from './lib/store';
+import {
+  saveContact,
+  saveContactAndConsumeOneTimePreKey,
+  loadContacts,
+  removeContact,
+} from './lib/store';
 import { moveContactStorage } from './lib/rekey';
 import { loadRetiredMasters, addRetiredMaster } from './lib/denylist';
 import { loadProfile, saveProfile, type MyProfile } from './lib/profile';
@@ -145,9 +150,23 @@ import { t, useLang, LANGS, getLang, setLang, type Lang } from './lib/i18n';
 import { tb } from './lib/tnodes';
 import { applyBadge } from './lib/badge';
 import { biometricAvailable, biometricEnrolled, disableBiometricUnlock } from './lib/vaultService';
+import {
+  AUTO_RECEIVE_CONTACT_CAP_BYTES,
+  automaticRecvReservationBytes,
+  hasOriginStorageHeadroom,
+  mayAutoReceiveAttachment,
+  remainingRecvReservationBytes,
+} from './lib/storageQuota';
 import { Attachment, LightboxImg } from './Attachment';
 import { ViewOnceViewer } from './ViewOnceViewer';
-import { uploadFileToR2, downloadR2ToStore, StorageFullError, FileReadError, readSliceRetry } from './lib/blobtransfer';
+import {
+  uploadFileToR2,
+  downloadR2ToStore,
+  tryValidateR2Descriptor,
+  StorageFullError,
+  FileReadError,
+  readSliceRetry,
+} from './lib/blobtransfer';
 import { transcodeVideoTo720p } from './lib/transcode';
 import {
   IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach, IconMic, IconTrash, IconDots, IconGroup, IconReply, IconForward, IconCopy,
@@ -174,6 +193,7 @@ const RECV_MAX_CHUNKS = 800; // ceiling on a transfer's chunk count (bounds book
 const RECV_MAX_CHUNK_BYTES = 256 * 1024; // reject an over-large single chunk payload
 const MAX_CONCURRENT_RECV = 6; // cap simultaneous in-progress incoming transfers
 const RECV_TTL_MS = 24 * 60 * 60 * 1000; // abandoned incoming transfer (sender vanished) is swept after 24 h
+const PUSH_UNSUBSCRIBE_TIMEOUT_MS = 1_500;
 const MAX_REC_SECONDS = 180;
 // Voice bitrate. Without this the browser default (~128 kbps) makes 30 s of speech
 // ~480 KB, so a recording the UI happily allowed could not be sent — MAX_REC_SECONDS
@@ -224,6 +244,20 @@ function isStorageFull(e: unknown): boolean {
     return e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED' || e.code === 22;
   }
   return e instanceof Error && /quota|storage.*full/i.test(e.message);
+}
+
+async function settleWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<T | undefined> {
+  let timer: number | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<undefined>((resolve) => {
+        timer = window.setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) window.clearTimeout(timer);
+  }
 }
 
 function incomingMessage(content: MessageContent, mid: string): ChatMessage {
@@ -391,6 +425,10 @@ export function Messenger({ dek, onLock }: Props) {
   const downloadingRef = useRef<Set<string>>(new Set()); // tids currently being pulled (spinner state)
   const pullProgressRef = useRef<Map<string, number>>(new Map()); // tid → percent received (download progress)
   const autoPulledRef = useRef<Set<string>>(new Set()); // tids we already auto-pulled once (don't loop)
+  const explicitPullRef = useRef<Set<string>>(new Set()); // user-tapped pulls bypass only the per-contact auto cap
+  const droppedRecvRef = useRef<Set<string>>(new Set()); // discard every remaining chunk of a denied transfer
+  const r2ReservationsRef = useRef<Map<string, number>>(new Map()); // active R2 downloads, included in origin admission
+  const storageGateRef = useRef<Promise<unknown>>(Promise.resolve()); // serialise reservation decisions across inbox/UI
   const servedRef = useRef<Map<string, number>>(new Map()); // (roomId:tid) → last serve time, to rate-limit re-serves
   const sendRoomRef = useRef<Map<string, string>>(new Map());
   const inboxClientRef = useRef<RelayClient | null>(null);
@@ -583,7 +621,29 @@ export function Messenger({ dek, onLock }: Props) {
         const self = await ensureSelfContact().catch(() => null);
         if (self) await fanoutSend(self, { kind: 'unlinkreq' }, randomMid(), 4).catch(() => undefined);
       }
-      await wipeAccount();
+      // Remove the server-side endpoint while the authenticated owner socket and
+      // local subscription still exist. Relay acknowledgement is bounded/best-effort:
+      // an unreachable server must never make a local cryptographic wipe impossible.
+      const subscription = await settleWithin(
+        currentSubscription().catch(() => null),
+        PUSH_UNSUBSCRIBE_TIMEOUT_MS,
+      );
+      if (subscription?.endpoint && inboxClientRef.current) {
+        await settleWithin(
+          Promise.resolve(inboxClientRef.current.unsubscribePush(subscription.endpoint)),
+          PUSH_UNSUBSCRIBE_TIMEOUT_MS,
+        ).catch(() => undefined);
+      }
+      // Persist disabled intent and remove the browser endpoint only after the
+      // server attempt; wipeAccount then unregisters the worker and clears storage.
+      // Start this exactly once. If a browser API stalls, wipeAccount still
+      // proceeds after the bound and unregisters the worker; a second concurrent
+      // disable attempt could otherwise recreate the control cache after wiping.
+      await settleWithin(
+        disablePush().catch(() => null),
+        PUSH_UNSUBSCRIBE_TIMEOUT_MS,
+      );
+      await wipeAccount({ pushTeardownStarted: true });
     } finally {
       location.reload();
     }
@@ -664,6 +724,53 @@ export function Messenger({ dek, onLock }: Props) {
   }, []);
 
   const commitMessages = () => setMessages({ ...messagesRef.current });
+
+  function withStorageGate<T>(task: () => Promise<T>): Promise<T> {
+    const run = storageGateRef.current.catch(() => undefined).then(task);
+    storageGateRef.current = run.catch(() => undefined);
+    return run;
+  }
+
+  async function originCanReserve(requestedBytes: number): Promise<boolean> {
+    if (!navigator.storage?.estimate) return false;
+    let estimate: StorageEstimate | null;
+    let markerIds: string[];
+    try {
+      [estimate, markerIds] = await Promise.all([
+        navigator.storage.estimate(),
+        allRecvMarkerIds(),
+      ]);
+    } catch {
+      return false;
+    }
+    const markers = await Promise.all(markerIds.map((id) => getRecvMarker(dek, id).catch(() => null)));
+    let volatileReservations = 0;
+    for (const bytes of r2ReservationsRef.current.values()) {
+      if (volatileReservations > Number.MAX_SAFE_INTEGER - bytes) {
+        volatileReservations = Number.MAX_SAFE_INTEGER;
+        break;
+      }
+      volatileReservations += bytes;
+    }
+    const persistedReservations = remainingRecvReservationBytes(markers);
+    const reserved =
+      persistedReservations > Number.MAX_SAFE_INTEGER - volatileReservations
+        ? Number.MAX_SAFE_INTEGER
+        : persistedReservations + volatileReservations;
+    return hasOriginStorageHeadroom(estimate, requestedBytes, reserved);
+  }
+
+  function markRecvDropped(tid: string): void {
+    // Bound attacker-controlled bookkeeping for a long-lived open tab.
+    if (droppedRecvRef.current.size >= 1024) {
+      const oldest = droppedRecvRef.current.values().next().value as string | undefined;
+      if (oldest) droppedRecvRef.current.delete(oldest);
+    }
+    droppedRecvRef.current.add(tid);
+    const changed = downloadingRef.current.delete(tid);
+    pullProgressRef.current.delete(tid);
+    if (changed) bump();
+  }
 
   /**
    * Turn attachment bytes into a stored FileRef. Non-stickers go to the out-of-band
@@ -971,11 +1078,13 @@ export function Messenger({ dek, onLock }: Props) {
   // stored one-to-one as an attachment chunk, so the transfer is persisted as it
   // arrives (crash-safe) and reassembled by getAttachmentBlob. On the last chunk the
   // meta is committed and ONE message (keyed by the content-addressed tid) is
-  // appended. A storage-full error propagates so onInbox does NOT ack → the relay
-  // re-delivers the chunk. Terminal: a chunk never becomes a text bubble, is never
-  // self-synced/fanned. 1:1 only — a hidden (group-member) contact is not supported.
+  // appended. Admission/attachment-quota failures return normally so onInbox ACKs
+  // and cannot enter an endless redelivery loop. Terminal: a chunk never becomes a
+  // text bubble, is never self-synced/fanned. 1:1 only — a hidden (group-member)
+  // contact is not supported.
   async function receiveChunk(contact: Contact, c: Extract<MessageContent, { kind: 'chunk' }>): Promise<void> {
     if (contact.hidden) return; // groups excluded (W7) — drop (and ack)
+    if (droppedRecvRef.current.has(c.tid)) return;
     // The tid is attacker-controlled and lands in storage keys — accept only the
     // newAttachmentId charset so it can't break key parsing or collide via ':'.
     if (!/^[A-Za-z0-9]{1,40}$/.test(c.tid)) return;
@@ -987,18 +1096,73 @@ export function Messenger({ dek, onLock }: Props) {
     // Already fully received (re-delivery after completion) → nothing to do. A pending
     // OFFER PLACEHOLDER (mid=tid, mine=false, file.pull set) is NOT "received" — the
     // pull's chunks must flow through, so skip only a COMPLETED (non-pull) message.
-    const prior = (messagesRef.current[contact.roomId] ?? []).find((x) => x.mid === c.tid && !x.mine);
+    let roomMessages = messagesRef.current[contact.roomId];
+    if (roomMessages === undefined) {
+      roomMessages = await loadMessages(dek, contact.roomId);
+      messagesRef.current[contact.roomId] = roomMessages;
+    }
+    const prior = roomMessages.find((x) => x.mid === c.tid && !x.mine);
     if (prior && !prior.file?.pull) return;
+    const explicitlyPulled = !!prior?.file?.pull && explicitPullRef.current.has(c.tid);
 
     // First chunk of this transfer: register it (bounds concurrency, protects it from
-    // the orphan GC, enables resume). Later chunks trust the FIRST descriptor, so a
-    // peer can't change total/name mid-transfer.
+    // the orphan GC, enables resume). Admission is serialized with R2 downloads so
+    // every accepted transfer has a real storage reservation. Automatic transfers
+    // additionally share a hard 32 MiB stored-byte budget per contact. Later chunks
+    // trust the FIRST descriptor, so a peer can't change total/name mid-transfer.
     let marker = await getRecvMarker(dek, c.tid);
     if (!marker) {
-      if ((await allRecvMarkerIds()).length >= MAX_CONCURRENT_RECV) return; // too many in flight
-      marker = { total: c.total, name: c.name, mime: c.mime, size: c.size, ts: Date.now(), receivedIdx: [], receivedBytes: 0, viewOnce: c.viewOnce };
-      await putRecvMarker(dek, c.tid, marker);
-    } else if (c.total !== marker.total) {
+      const candidate = {
+        total: c.total,
+        name: c.name,
+        mime: c.mime,
+        size: c.size,
+        ts: Date.now(),
+        receivedIdx: [],
+        receivedBytes: 0,
+        roomId: contact.roomId,
+        automatic: !explicitlyPulled,
+        viewOnce: c.viewOnce,
+      };
+      const admission = await withStorageGate(async (): Promise<'ok' | 'contact' | 'storage' | 'concurrency'> => {
+        const markerIds = await allRecvMarkerIds();
+        if (markerIds.length >= MAX_CONCURRENT_RECV) return 'concurrency';
+        const activeMarkers = await Promise.all(
+          markerIds.map((id) => getRecvMarker(dek, id).catch(() => null)),
+        );
+        if (
+          !explicitlyPulled &&
+          !mayAutoReceiveAttachment(
+            roomMessages,
+            c.size,
+            AUTO_RECEIVE_CONTACT_CAP_BYTES,
+            automaticRecvReservationBytes(activeMarkers, contact.roomId),
+          )
+        ) {
+          return 'contact';
+        }
+        if (!(await originCanReserve(c.size))) return 'storage';
+        try {
+          await putRecvMarker(dek, c.tid, candidate);
+        } catch (error) {
+          if (isStorageFull(error)) return 'storage';
+          throw error;
+        }
+        return 'ok';
+      });
+      if (admission !== 'ok') {
+        markRecvDropped(c.tid); // return normally → onInbox acks and ends redelivery
+        if (explicitlyPulled && admission === 'storage') {
+          setError(t('Nicht genug freier Gerätespeicher für diesen Download.'));
+        }
+        return;
+      }
+      marker = candidate;
+    } else if (
+      marker.roomId !== contact.roomId ||
+      typeof marker.automatic !== 'boolean' ||
+      c.total !== marker.total
+    ) {
       return; // inconsistent with the first chunk — drop
     }
 
@@ -1006,10 +1170,22 @@ export function Messenger({ dek, onLock }: Props) {
     // total × max-chunk (800 × 256 KB) could store far more than `size` claimed (M2).
     if (!marker.receivedIdx.includes(c.idx)) {
       if (marker.receivedBytes + c.data.length > marker.size) return; // over-claim → drop
-      await sealAndPutChunk(dek, c.tid, c.idx, c.data); // may throw QuotaExceededError → no ack
-      marker.receivedIdx.push(c.idx);
-      marker.receivedBytes += c.data.length;
-      await putRecvMarker(dek, c.tid, marker); // progress persisted (crash-safe/idempotent)
+      try {
+        await sealAndPutChunk(dek, c.tid, c.idx, c.data);
+        marker.receivedIdx.push(c.idx);
+        marker.receivedBytes += c.data.length;
+        await putRecvMarker(dek, c.tid, marker); // progress persisted (crash-safe/idempotent)
+      } catch (error) {
+        if (!isStorageFull(error)) throw error;
+        // The estimate is advisory and browsers may still reject an IndexedDB write.
+        // Abandon the whole transfer and ACK this/rest frames instead of creating an
+        // infinite redelivery loop that also blocks ratchet-state persistence.
+        await clearRecvMarker(c.tid).catch(() => undefined);
+        await secureWipeAttachment(c.tid).catch(() => undefined);
+        markRecvDropped(c.tid);
+        if (explicitlyPulled) setError(t('Nicht genug freier Gerätespeicher für diesen Download.'));
+        return;
+      }
       // Surface download progress on the pull chip. Re-render only when the whole
       // percent changes (not on every one of hundreds of chunks).
       const pct = Math.floor((marker.receivedIdx.length / marker.total) * 100);
@@ -1056,6 +1232,8 @@ export function Messenger({ dek, onLock }: Props) {
       }
       downloadingRef.current.delete(c.tid);
       pullProgressRef.current.delete(c.tid);
+      explicitPullRef.current.delete(c.tid);
+      droppedRecvRef.current.delete(c.tid);
       await clearRecvMarker(c.tid);
     }
   }
@@ -1352,9 +1530,13 @@ export function Messenger({ dek, onLock }: Props) {
 
   // Request an offered attachment (recipient side). Fans the request out to the
   // contact; only the offering device (which holds the file) serves it.
-  async function pullAttachment(roomId: string, m: ChatMessage): Promise<void> {
+  async function pullAttachment(roomId: string, m: ChatMessage, initiatedByUser = true): Promise<void> {
     if (!m.file?.pull || !m.file.attId || !m.mid) return;
     const tid = m.file.attId;
+    if (initiatedByUser) {
+      explicitPullRef.current.add(tid);
+      droppedRecvRef.current.delete(tid); // a deliberate retry gets a fresh quota decision
+    }
     if (downloadingRef.current.has(tid)) return; // already pulling (also guards a double-tap)
     const contact = contactsRef.current.find((c) => c.roomId === roomId);
     if (!contact) return;
@@ -1396,12 +1578,30 @@ export function Messenger({ dek, onLock }: Props) {
     const r2 = m.file.r2;
     const name = m.file.name;
     const mime = m.file.mime;
-    const size = m.file.size ?? 0;
+    const valid = tryValidateR2Descriptor(
+      { key: r2.key, keyB64: r2.keyB64, size: m.file.size ?? Number.NaN, chunk: r2.chunk },
+      CLIENT_MAX_BLOB,
+    );
+    if (!valid) {
+      setError(t('Download fehlgeschlagen: {msg}', { msg: 'Ungültiger Dateideskriptor.' }));
+      return;
+    }
+    const admission = await withStorageGate(async (): Promise<'ok' | 'busy' | 'storage'> => {
+      if (downloadingRef.current.has(mid) || r2ReservationsRef.current.has(mid)) return 'busy';
+      if (!(await originCanReserve(valid.size))) return 'storage';
+      r2ReservationsRef.current.set(mid, valid.size);
+      return 'ok';
+    });
+    if (admission === 'busy') return;
+    if (admission === 'storage') {
+      setError(t('Nicht genug freier Gerätespeicher für diesen Download.'));
+      return;
+    }
     downloadingRef.current.add(mid);
     bump();
     const attId = newAttachmentId();
     try {
-      await downloadR2ToStore(dek, attId, { key: r2.key, keyB64: r2.keyB64, size, chunk: r2.chunk }, name, mime, (f) => {
+      await downloadR2ToStore(dek, attId, valid, name, mime, (f) => {
         const pct = Math.floor(f * 100);
         if (pct !== pullProgressRef.current.get(mid)) {
           pullProgressRef.current.set(mid, pct);
@@ -1412,7 +1612,9 @@ export function Messenger({ dek, onLock }: Props) {
       // the self-destruct viewer (not inline) and gets crypto-erased after the single view.
       const vo = m.file.viewOnce;
       const arr = messagesRef.current[roomId] ?? (await loadMessages(dek, roomId));
-      const next = arr.map((x) => (x.mid === mid ? { ...x, file: { name, mime, size, attId, viewOnce: vo || undefined } } : x));
+      const next = arr.map((x) =>
+        x.mid === mid ? { ...x, file: { name, mime, size: valid.size, attId, viewOnce: vo || undefined } } : x,
+      );
       messagesRef.current[roomId] = next;
       commitMessages();
       await saveMessages(dek, roomId, next);
@@ -1421,6 +1623,9 @@ export function Messenger({ dek, onLock }: Props) {
     } finally {
       downloadingRef.current.delete(mid);
       pullProgressRef.current.delete(mid);
+      await withStorageGate(async () => {
+        r2ReservationsRef.current.delete(mid);
+      });
       bump();
     }
   }
@@ -1431,7 +1636,11 @@ export function Messenger({ dek, onLock }: Props) {
   function autoPull(roomId: string, tid: string, total: number) {
     if (autoPulledRef.current.has(tid) || downloadingRef.current.has(tid)) return;
     autoPulledRef.current.add(tid);
-    void pullAttachment(roomId, { mid: tid, mine: false, ts: Date.now(), file: { name: '', mime: '', attId: tid, pull: { total } } });
+    void pullAttachment(
+      roomId,
+      { mid: tid, mine: false, ts: Date.now(), file: { name: '', mime: '', attId: tid, pull: { total } } },
+      false,
+    );
   }
 
   // The hidden "self" contact: peerMaster == MY master, peerDeviceList == my own
@@ -2018,6 +2227,9 @@ export function Messenger({ dek, onLock }: Props) {
   // N confirmed the emoji. Install now if the grant already arrived, else mark
   // confirmed and show a waiting state until onLinkGrant installs it.
   async function onNConfirmSas() {
+    const session = linkSessionRef.current;
+    if (!session || session.role !== 'new') return;
+    confirmLinkSession(session);
     linkConfirmedRef.current = true;
     if (linkPendingGrantRef.current) await installGrant();
     else setLinkBusy(true); // waiting for the primary device to confirm
@@ -2058,6 +2270,14 @@ export function Messenger({ dek, onLock }: Props) {
       // never actually spoke to them under). Same discipline as the farewell.
       const preSwapMaster = asMasterPub(id.master.publicKey);
       const linked = await completeLinkOnN(dek, id, session, grant, farewell);
+      // The identity/list commit above has changed our local account anchor.
+      // Install the send barrier synchronously, before publishing `linked` to
+      // refs or performing another await. A message can therefore never ride an
+      // old ratchet while being presented as the newly linked identity.
+      for (const c of contactsRef.current) {
+        c.staleIdentity = true;
+        if (!c.ownMasterPub) c.ownMasterPub = preSwapMaster;
+      }
       identityRef.current = linked;
       setFingerprint(await fingerprintOf(linked));
       // Our shared code encoded the OLD master; regenerate it so anyone scanning
@@ -2073,8 +2293,6 @@ export function Messenger({ dek, onLock }: Props) {
       // we don't send over a session built under the old master; the user
       // reconnects each, which runs a fresh X3DH the peer then accepts.
       for (const c of contactsRef.current) {
-        c.staleIdentity = true;
-        if (!c.ownMasterPub) c.ownMasterPub = preSwapMaster; // the master the peer still pins us under
         await saveContact(dek, c);
       }
       // Erst-Sync: ask the primary for the account snapshot (profile + contacts), so
@@ -2157,11 +2375,12 @@ export function Messenger({ dek, onLock }: Props) {
     const pre = prekeysRef.current;
     const session = linkSessionRef.current;
     if (!id || !pre || !session) return;
+    confirmLinkSession(session);
     setLinkBusy(true);
     try {
       const currentList = await loadOrCreateOwnDeviceList(dek, id, ownSpkPublic(pre));
       if (!currentList) throw new Error(t('Geräteliste nicht verfügbar.'));
-      const newList = await completeLinkOnP(dek, id, session, currentList, sendToInbox);
+      const newList = await completeLinkOnP(dek, id, session, sendToInbox);
       // Gossip the updated list so contacts learn the new device (and, later,
       // stop accepting a removed one). Best-effort: revocation takes effect for
       // a contact once it has seen this newer, master-signed list.
@@ -2286,11 +2505,35 @@ export function Messenger({ dek, onLock }: Props) {
         await saveContact(dek, contact);
       }
 
-      const wasNew = !hasSession(contact);
       let content!: MessageContent;
       let mid = '';
       try {
         const r = await receiveEnvelope(id, contact, env, lookup);
+        // Persist the ADVANCED receive state (and consume the OPK) FIRST — this holds
+        // for BOTH a normal message and an authenticated-drop: in either case the
+        // header AEAD authenticated, so the OPK is genuinely spent and the ratchet
+        // advanced. That state must be durable before we do anything else (see the
+        // "persist advanced receive state" note below).
+        if (r.authenticatedOneTimePreKeyId !== undefined) {
+          const prekeys = prekeysRef.current;
+          if (!prekeys) throw new Error('Prekey-Zustand nicht geladen.');
+          await saveContactAndConsumeOneTimePreKey(
+            dek,
+            contact,
+            prekeys,
+            r.authenticatedOneTimePreKeyId,
+          );
+        } else {
+          await saveContact(dek, contact);
+        }
+        if (r.outcome !== 'message') {
+          // Authenticated, but the plaintext frame was invalid or an unauthorised
+          // self-frame (F-06/F-20/F-22 hardening). There is no content to process;
+          // receive state is already persisted above, so fall through to the
+          // finally-ack and let the relay stop re-delivering it.
+          console.warn(`[recv] authenticated-drop (${r.reason}) von ${displayName(contact)} — verworfen.`);
+          return;
+        }
         content = r.content;
         mid = r.mid;
       } catch (e) {
@@ -2333,7 +2576,6 @@ export function Messenger({ dek, onLock }: Props) {
       // same message decrypts a second time. That reopens a replay window the
       // ratchet closes by construction. Milder than the send-side nonce reuse,
       // but the same root cause: the invariant held only in RAM.
-      await saveContact(dek, contact);
       if (content.kind === 'profile') {
         contact.peerName = content.name;
         contact.peerAvatarB64 = content.avatar ? bytesToB64(content.avatar) : undefined;
@@ -2512,19 +2754,27 @@ export function Messenger({ dek, onLock }: Props) {
       } else if (content.kind === 'r2') {
         // A large attachment stored in R2 → a tap-to-download placeholder (not auto-pulled;
         // could be up to ~1 GB). The E2E per-file key rides in the descriptor.
+        const r2 = tryValidateR2Descriptor(
+          { key: content.key, keyB64: content.keyB64, size: content.size, chunk: content.chunk },
+          CLIENT_MAX_BLOB,
+        );
         if (
           !contact.hidden &&
           mid &&
-          content.size >= 0 &&
-          content.size <= CLIENT_MAX_BLOB &&
-          /^[a-f0-9]{16,64}$/.test(content.key) &&
+          r2 &&
           !hasMessage(messagesRef.current[contact.roomId] ?? [], mid, false)
         ) {
           await appendMessage(contact.roomId, {
             mine: false,
             ts: Date.now(),
             mid,
-            file: { name: content.name, mime: content.mime, size: content.size, viewOnce: content.viewOnce || undefined, r2: { key: content.key, keyB64: content.keyB64, chunk: content.chunk } },
+            file: {
+              name: content.name,
+              mime: content.mime,
+              size: r2.size,
+              viewOnce: content.viewOnce || undefined,
+              r2: { key: r2.key, keyB64: r2.keyB64, chunk: r2.chunk },
+            },
           });
           if (!(viewRef.current === 'chat' && activeRoomRef.current === contact.roomId)) {
             unreadRef.current[contact.roomId] = (unreadRef.current[contact.roomId] ?? 0) + 1;
@@ -2571,7 +2821,6 @@ export function Messenger({ dek, onLock }: Props) {
         }
       }
       await saveContact(dek, contact);
-      if (wasNew && prekeysRef.current) await savePreKeys(dek, prekeysRef.current);
       void ensureProfileSent(contact);
       void ensureListGossiped(contact); // keep peers current on MY devices
       bump();
@@ -2642,8 +2891,7 @@ export function Messenger({ dek, onLock }: Props) {
       prekeysRef.current = pre;
       lookupRef.current = {
         signedPreKey: (i) => findSignedPreKey(pre, i)?.keyPair,
-        consumeOneTimePreKey: (i) =>
-          i == null ? undefined : consumeOneTimePreKey(pre, i)?.keyPair.privateKey,
+        oneTimePreKey: (i) => findOneTimePreKey(pre, i)?.keyPair.privateKey,
       };
       setFingerprint(await fingerprintOf(id));
 

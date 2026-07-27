@@ -1,6 +1,8 @@
 import { defineConfig } from 'vite';
 import { readFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { resolve } from 'node:path';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 
@@ -43,30 +45,37 @@ export default defineConfig({
       filename: 'sw.ts',
       // 'prompt': the new SW WAITS and only activates on an explicit user tap —
       // no unattended reload. (autoUpdate + our skipWaiting caused a reload loop
-      // on iOS.) App CONTENT still stays fresh every load via network-first
-      // navigation, so this barely affects iteration; only the SW logic itself
-      // needs the one-tap update. Also the release-safe posture (no silent swap).
+      // on iOS.) Shell and executable assets stay pinned to the accepted build;
+      // the update prompt is therefore the deliberate release transition.
       registerType: 'prompt',
       injectRegister: null,
-      manifest: {
-        name: 'SKYTALE',
-        short_name: 'SKYTALE',
-        description: 'Ende-zu-Ende verschlüsselter Messenger.',
-        theme_color: '#0b0c0e',
-        background_color: '#0b0c0e',
-        display: 'standalone',
-        start_url: '/',
-        icons: [
-          { src: '/pwa-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
-          { src: '/pwa-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
-          { src: '/pwa-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
-        ],
-      },
+      // Kept as a normal repository asset so it participates in the same
+      // SHA-256 manifest transform as every other build file. The plugin's
+      // generated manifest/icons are appended after Workbox transforms with
+      // MD5 revisions and cannot satisfy the worker's byte-verification rule.
+      manifest: false,
       injectManifest: {
         // Precache the app shell so the installed PWA does NOT re-fetch JS on
         // every launch — our first line of defence against a malicious code push.
-        globPatterns: ['**/*.{js,css,html,svg,woff2,png}'],
+        globPatterns: ['**/*.{js,css,html,svg,woff,woff2,png,webmanifest}'],
         maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
+        // Workbox normally emits MD5 (and may omit revisions for hashed URLs).
+        // The hand-written worker verifies every fetched byte before accepting a
+        // candidate build, so emit an explicit SHA-256 for every precache entry.
+        manifestTransforms: [
+          async (entries) => ({
+            manifest: entries.map((entry) => ({
+              ...entry,
+              revision: createHash('sha256')
+                .update(
+                  readFileSync(
+                    resolve(process.cwd(), 'dist', entry.url.replace(/^\/+/, '')),
+                  ),
+                )
+                .digest('hex'),
+            })),
+          }),
+        ],
       },
       devOptions: { enabled: false },
     }),

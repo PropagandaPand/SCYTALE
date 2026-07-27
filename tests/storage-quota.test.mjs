@@ -1,0 +1,133 @@
+// Incoming attachment quota + account-wipe push teardown.
+// Each policy has a bug-shaped negative control.
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import * as S from './.bundle/entry.js';
+
+let pass = 0, fail = 0;
+const ok = (name, condition) => {
+  if (condition) {
+    pass++;
+    console.log('  ok  ', name);
+  } else {
+    fail++;
+    console.log('  FAIL', name);
+  }
+};
+
+const MiB = 1024 * 1024;
+
+console.log('\n[Attachment-Quota: pro Kontakt]');
+const received = [
+  { mine: false, file: { attId: 'a', size: 10 * MiB } },
+  { mine: false, file: { attId: 'a', size: 10 * MiB } }, // same stored object, count once
+  { mine: false, file: { attId: 'b', size: 20 * MiB } },
+  { mine: true, file: { attId: 'mine', size: 500 * MiB } },
+  { mine: false, file: { attId: 'pending', size: 25 * MiB, pull: { total: 2 } } },
+];
+ok('nur distinct vollständig gespeicherte empfangene Anhänge zählen',
+  S.storedReceivedAttachmentBytes(received) === 30 * MiB);
+ok('Auto-Empfang bis exakt 32 MiB ist zulässig',
+  S.mayAutoReceiveAttachment(received, 2 * MiB));
+ok('ein weiteres Byte über 32 MiB wird abgelehnt',
+  !S.mayAutoReceiveAttachment(received, 2 * MiB + 1));
+const active = [
+  { roomId: 'room-a', automatic: true, size: 1 * MiB, receivedBytes: 0 },
+  { roomId: 'room-b', automatic: true, size: 20 * MiB, receivedBytes: 10 * MiB },
+  { roomId: 'room-a', automatic: false, size: 500 * MiB, receivedBytes: 0 },
+];
+ok('laufende automatische Transfers werden ihrem Kontakt voll angerechnet',
+  S.automaticRecvReservationBytes(active, 'room-a') === 1 * MiB &&
+  S.mayAutoReceiveAttachment(received, 1 * MiB, 32 * MiB, 1 * MiB) &&
+  !S.mayAutoReceiveAttachment(received, 1 * MiB + 1, 32 * MiB, 1 * MiB));
+ok('Legacy-Marker ohne Quota-Eigentümer blockiert neue Auto-Transfers',
+  S.automaticRecvReservationBytes([{ size: 1, receivedBytes: 0 }], 'room-a') === Number.MAX_SAFE_INTEGER);
+ok('fehlende Größenmetadaten failen geschlossen',
+  !S.mayAutoReceiveAttachment([{ mine: false, file: { attId: 'legacy' } }], 1));
+// NEGATIVE CONTROL: the old per-file-only policy admitted every individually small file.
+const oldPerFileOnly = (bytes) => bytes <= 30 * MiB;
+ok('Negativkontrolle: alte Einzeldateigrenze hätte kumulatives Flooding erlaubt',
+  oldPerFileOnly(3 * MiB) && !S.mayAutoReceiveAttachment(received, 3 * MiB));
+
+console.log('\n[Attachment-Quota: Origin-Headroom + Reservierungen]');
+ok('Marker reservieren nur ihre noch fehlenden Bytes',
+  S.remainingRecvReservationBytes([
+    { size: 12 * MiB, receivedBytes: 2 * MiB },
+    { size: 5 * MiB, receivedBytes: 5 * MiB },
+  ]) === 10 * MiB);
+ok('korrupter Marker failt geschlossen',
+  S.remainingRecvReservationBytes([{ size: 1, receivedBytes: 2 }]) === Number.MAX_SAFE_INTEGER);
+ok('nicht lesbarer persistierter Marker failt ebenfalls geschlossen',
+  S.remainingRecvReservationBytes([null]) === Number.MAX_SAFE_INTEGER);
+ok('64 MiB Mindestreserve darf exakt stehen bleiben',
+  S.hasOriginStorageHeadroom(
+    { quota: 200 * MiB, usage: 100 * MiB },
+    30 * MiB,
+    6 * MiB,
+  ));
+ok('unter 64 MiB Restreserve wird abgelehnt',
+  !S.hasOriginStorageHeadroom(
+    { quota: 200 * MiB, usage: 100 * MiB },
+    30 * MiB,
+    6 * MiB + 1,
+  ));
+ok('bei großer Quota dominiert die 20-Prozent-Reserve',
+  !S.hasOriginStorageHeadroom(
+    { quota: 1024 * MiB, usage: 700 * MiB },
+    120 * MiB,
+    0,
+  ));
+ok('fehlende Browser-Schätzung failt geschlossen',
+  !S.hasOriginStorageHeadroom(null, 1, 0));
+// NEGATIVE CONTROL: usage-only ignores promised bytes from other live transfers.
+const oldUsageOnly = ({ quota, usage }, requested) => quota - usage >= requested + 64 * MiB;
+ok('Negativkontrolle: usage-only übersieht persistierte Restreservierungen',
+  oldUsageOnly({ quota: 200 * MiB, usage: 100 * MiB }, 30 * MiB) &&
+  !S.hasOriginStorageHeadroom({ quota: 200 * MiB, usage: 100 * MiB }, 30 * MiB, 20 * MiB));
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const messenger = readFileSync(join(root, 'src', 'Messenger.tsx'), 'utf8');
+const receiveStart = messenger.indexOf('async function receiveChunk');
+const receiveEnd = messenger.indexOf('\n  // Serialize every inbox task', receiveStart);
+const receiveSource = messenger.slice(receiveStart, receiveEnd);
+ok('neuer Chunk-Marker prüft Kontaktcap und Storage vor dem Persistieren',
+  receiveSource.indexOf('mayAutoReceiveAttachment') >= 0 &&
+  receiveSource.indexOf('originCanReserve') > receiveSource.indexOf('mayAutoReceiveAttachment') &&
+  receiveSource.indexOf('putRecvMarker(dek, c.tid, candidate)') > receiveSource.indexOf('originCanReserve'));
+ok('abgelehnte Transfers kehren normal zurück und werden dadurch geackt',
+  receiveSource.includes('markRecvDropped(c.tid); // return normally → onInbox acks'));
+ok('Auto-Pull ist ausdrücklich nicht als Nutzer-Pull markiert',
+  /void pullAttachment\([\s\S]*?false,\s*\);/.test(messenger));
+ok('R2-Downloads laufen durch dieselbe globale Reservierungsprüfung',
+  /downloadR2Message[\s\S]*?originCanReserve\(valid\.size\)[\s\S]*?r2ReservationsRef\.current\.set/.test(messenger));
+
+console.log('\n[Account-Wipe: Push-Reihenfolge]');
+const wipeStart = messenger.indexOf('async function doWipeAccount');
+const wipeEnd = messenger.indexOf('// ── Device linking', wipeStart);
+const wipeSource = messenger.slice(wipeStart, wipeEnd);
+const getEndpointAt = wipeSource.indexOf('currentSubscription()');
+const serverUnsubscribeAt = wipeSource.indexOf('unsubscribePush(subscription.endpoint)');
+const localDisableAt = wipeSource.indexOf('disablePush()');
+const wipeAt = wipeSource.indexOf('wipeAccount({ pushTeardownStarted: true })');
+ok('Wipe versucht Server-Unsubscribe vor lokalem Disable und Datentilgung',
+  getEndpointAt >= 0 &&
+  serverUnsubscribeAt > getEndpointAt &&
+  localDisableAt > serverUnsubscribeAt &&
+  wipeAt > localDisableAt);
+ok('Server-Unsubscribe besitzt ein kurzes Timeout',
+  wipeSource.includes('PUSH_UNSUBSCRIBE_TIMEOUT_MS'));
+ok('Push-Teardown wird vor dem Wipe nur einmal gestartet',
+  wipeSource.includes('wipeAccount({ pushTeardownStarted: true })') &&
+  !wipeSource.includes('pushAlreadyHandled'));
+
+const sw = readFileSync(join(root, 'src', 'sw.ts'), 'utf8');
+const changeStart = sw.indexOf("addEventListener('pushsubscriptionchange'");
+const changeEnd = sw.indexOf("addEventListener('notificationclick'", changeStart);
+const changeSource = sw.slice(changeStart, changeEnd);
+ok('Push-Rotation respektiert den persistenten Disable-Marker',
+  changeSource.indexOf('control.match(disabledKey)') >= 0 &&
+  changeSource.indexOf('pushManager.subscribe') > changeSource.indexOf('control.match(disabledKey)'));
+
+console.log(`\n${pass} ok, ${fail} fail`);
+process.exit(fail ? 1 : 0);

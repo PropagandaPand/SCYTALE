@@ -41,7 +41,9 @@ const req = {
   sasEphPub: (sodium.crypto_box_keypair()).publicKey,
   signedPreKey: N.spkPub,
 };
-const { newList } = await S.createLinkGrant(master.privateKey, master.publicKey, 1, currentList, req);
+// createLinkGrant now also binds P's offer transcript (F-04); a valid matching offer.
+const offer = { sasEphPub: (sodium.crypto_box_keypair()).publicKey, masterPub: master.publicKey, epoch: 1 };
+const { newList } = await S.createLinkGrant(master.privateKey, master.publicKey, 1, currentList, req, offer);
 
 ok('neue Liste verifiziert unter dem Master', (await S.verifyDeviceList(newList, master.publicKey, 1)) === true);
 ok('neue Liste hat zwei Geräte', newList.devices.length === 2);
@@ -62,7 +64,7 @@ ok('gefälschter N-SPK bricht die Master-Signatur (Negativkontrolle)', (await S.
 // must be refused by createLinkGrant — the master won't vouch for an unverified SPK.
 const badReq = { ...req, signedPreKey: { id: 9, pub: (sodium.crypto_box_keypair()).publicKey, signature: new Uint8Array(64) } };
 let grantRejected = false;
-try { await S.createLinkGrant(master.privateKey, master.publicKey, 1, currentList, badReq); } catch { grantRejected = true; }
+try { await S.createLinkGrant(master.privateKey, master.publicKey, 1, currentList, badReq, offer); } catch { grantRejected = true; }
 ok('createLinkGrant lehnt einen QR-getamperten SPK ab (Fund 3)', grantRejected === true);
 
 console.log(`\n${pass} ok, ${fail} fail`);

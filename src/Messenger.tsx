@@ -483,7 +483,7 @@ export function Messenger({ dek, onLock }: Props) {
   const [pendingVO, setPendingVO] = useState(false); // the preview's "einmal ansehen" toggle
   const [r2Upload, setR2Upload] = useState<number | null>(null); // 0..1 while a large file uploads to R2, else null
   const [transcoding, setTranscoding] = useState<number | null>(null); // 0..1 while a video is transcoded to 720p, else null
-  const [viewOnce, setViewOnce] = useState<Blob | null>(null); // the currently-open view-once photo (already wiped from storage)
+  const [viewOnce, setViewOnce] = useState<{ blob: Blob; mime: string } | null>(null); // the currently-open view-once media (already wiped from storage)
   const [notifOn, setNotifOn] = useState(false);
   const [notifBusy, setNotifBusy] = useState(false);
   const [qrFull, setQrFull] = useState(false); // own QR blown up full-screen for scanning
@@ -805,6 +805,7 @@ export function Messenger({ dek, onLock }: Props) {
   async function openViewOnce(roomId: string, m: ChatMessage) {
     if (!m.mid || !m.file?.attId || m.voSeen) return;
     const attId = m.file.attId;
+    const mime = m.file.mime;
     let blob: Blob | null = null;
     try {
       blob = await getAttachmentBlob(dek, attId);
@@ -829,7 +830,7 @@ export function Messenger({ dek, onLock }: Props) {
       setError(t('Foto ist nicht mehr verfügbar.'));
       return;
     }
-    setViewOnce(blob);
+    setViewOnce({ blob, mime });
   }
 
   // Recall ("unsend") one of MY OWN messages: tombstone it locally, then ask the peer's
@@ -1322,9 +1323,11 @@ export function Messenger({ dek, onLock }: Props) {
           bump();
         }
       });
-      // Reconcile the placeholder → a normal, playable attachment.
+      // Reconcile the placeholder → a downloaded attachment. Keep view-once so it opens in
+      // the self-destruct viewer (not inline) and gets crypto-erased after the single view.
+      const vo = m.file.viewOnce;
       const arr = messagesRef.current[roomId] ?? (await loadMessages(dek, roomId));
-      const next = arr.map((x) => (x.mid === mid ? { ...x, file: { name, mime, size, attId } } : x));
+      const next = arr.map((x) => (x.mid === mid ? { ...x, file: { name, mime, size, attId, viewOnce: vo || undefined } } : x));
       messagesRef.current[roomId] = next;
       commitMessages();
       await saveMessages(dek, roomId, next);
@@ -2396,7 +2399,7 @@ export function Messenger({ dek, onLock }: Props) {
             mine: false,
             ts: Date.now(),
             mid,
-            file: { name: content.name, mime: content.mime, size: content.size, r2: { key: content.key, keyB64: content.keyB64, chunk: content.chunk } },
+            file: { name: content.name, mime: content.mime, size: content.size, viewOnce: content.viewOnce || undefined, r2: { key: content.key, keyB64: content.keyB64, chunk: content.chunk } },
           });
           if (!(viewRef.current === 'chat' && activeRoomRef.current === contact.roomId)) {
             unreadRef.current[contact.roomId] = (unreadRef.current[contact.roomId] ?? 0) + 1;
@@ -3298,13 +3301,12 @@ export function Messenger({ dek, onLock }: Props) {
   async function sendMedia(src: { file: File | null; data: Uint8Array<ArrayBuffer> | null; size: number }, name: string, mime: string, viewOnce: boolean): Promise<void> {
     try {
       const size = src.size;
-      if (viewOnce && size > AUTOPUSH_CAP) {
-        setError(t('Einmal-Medien sind zu groß — max ~2 MB (kürzeres Video oder kleineres Bild wählen).'));
-        return;
-      }
       // Large files (videos up to ~1 GB) → encrypted straight to R2, streamed so the whole
       // file is never in memory. Needs the raw File; only the mailbox path uses byte arrays.
-      if (size > MAX_BIG_ATTACH) {
+      // For VIEW-ONCE, the threshold drops to the auto-push cap so a view-once video of any
+      // size self-destructs via R2 — whose delete-after-download matches the one-view idea.
+      const r2Threshold = viewOnce ? AUTOPUSH_CAP : MAX_BIG_ATTACH;
+      if (size > r2Threshold) {
         if (size > CLIENT_MAX_BLOB) {
           setError(t('Datei zu groß — maximal ~1 GB.'));
           return;
@@ -3315,7 +3317,7 @@ export function Messenger({ dek, onLock }: Props) {
         }
         const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
         if (!contact) return;
-        await sendViaR2(contact, src.file, name, mime);
+        await sendViaR2(contact, src.file, name, mime, viewOnce);
         return;
       }
       // Small enough for the relay mailbox — get the bytes (buffer the File only now, small).
@@ -3360,16 +3362,17 @@ export function Messenger({ dek, onLock }: Props) {
   /** Send a large file via R2: stream-encrypt + upload (also storing the sender's local
    *  copy in the same pass), then hand the recipient a tiny E2E descriptor (key + R2 id).
    *  Not self-synced to my own devices in v1 (would race the delete-after-download). */
-  async function sendViaR2(contact: Contact, file: File, name: string, mime: string): Promise<void> {
+  async function sendViaR2(contact: Contact, file: File, name: string, mime: string, viewOnce = false): Promise<void> {
     const attId = newAttachmentId();
     const mid = randomMid();
     setR2Upload(0);
     try {
       const ref = await uploadFileToR2(file, (f) => setR2Upload(f), { dek, attId, name, mime });
+      // The sender keeps a normal, re-viewable copy; only the recipient's descriptor is flagged.
       const localMsg: ChatMessage = { mine: true, ts: Date.now(), mid, file: { name, mime, attId, size: ref.size } };
       const deliveries = await fanoutSend(
         contact,
-        { kind: 'r2', key: ref.key, keyB64: ref.keyB64, name, mime, size: ref.size, chunk: ref.chunk },
+        { kind: 'r2', key: ref.key, keyB64: ref.keyB64, name, mime, size: ref.size, chunk: ref.chunk, viewOnce: viewOnce || undefined },
         mid,
       );
       await appendMessage(contact.roomId, { ...localMsg, deliveries });
@@ -3816,7 +3819,7 @@ export function Messenger({ dek, onLock }: Props) {
 
   // Full-screen image viewer (avatars, later chat images). Tap anywhere closes.
   const lightbox = zoomImg ? <LightboxImg blob={zoomImg} onClose={() => setZoomImg(null)} /> : null;
-  const viewOnceEl = viewOnce ? <ViewOnceViewer blob={viewOnce} onClose={() => setViewOnce(null)} /> : null;
+  const viewOnceEl = viewOnce ? <ViewOnceViewer blob={viewOnce.blob} mime={viewOnce.mime} onClose={() => setViewOnce(null)} /> : null;
   const r2UploadEl =
     r2Upload !== null ? (
       <div className="r2-upload" role="status">
@@ -3843,7 +3846,7 @@ export function Messenger({ dek, onLock }: Props) {
         </div>
       </div>
     ) : null;
-  const canVO = !!pendingMedia && pendingMedia.size <= AUTOPUSH_CAP; // fits the self-destruct path (≤ ~2 MB)
+  const canVO = !!pendingMedia && pendingMedia.size <= CLIENT_MAX_BLOB; // any size: ≤2 MB self-destructs via mailbox, larger via R2
   const mediaPreviewEl = pendingMedia ? (
     <div className="crop-modal vo-preview" role="dialog" aria-label={t('Senden')}>
       <div className="crop-head">{pendingMedia.isVideo ? t('Video senden') : t('Foto senden')}</div>

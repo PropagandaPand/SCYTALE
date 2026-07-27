@@ -15,11 +15,13 @@ import { IconBomb } from './icons';
  * On close, the image DISINTEGRATES — a canvas particle burn that dramatises the message
  * destroying itself for good (the bytes are already gone; this is the send-off).
  */
-export function ViewOnceViewer({ blob, onClose }: { blob: Blob; onClose: () => void }) {
+export function ViewOnceViewer({ blob, mime, onClose }: { blob: Blob; mime: string; onClose: () => void }) {
+  const isVideo = mime.startsWith('video/');
   const [url, setUrl] = useState('');
   const [held, setHeld] = useState(false);
   const [destroying, setDestroying] = useState(false);
   const imgRef = useRef<HTMLImageElement>(null); // hidden decode source (never shown → not saveable)
+  const videoRef = useRef<HTMLVideoElement>(null); // the video element (view-once video)
   const dispRef = useRef<HTMLCanvasElement>(null); // the VISIBLE image, drawn on a canvas
   const canvasRef = useRef<HTMLCanvasElement>(null); // the disintegration overlay
   const doneRef = useRef(false);
@@ -54,11 +56,12 @@ export function ViewOnceViewer({ blob, onClose }: { blob: Blob; onClose: () => v
   function beginDestroy() {
     if (destroying) return;
     setDestroying(true);
-    const img = imgRef.current;
+    const src: HTMLImageElement | HTMLVideoElement | null = isVideo ? videoRef.current : imgRef.current;
     const canvas = canvasRef.current;
     try {
-      if (!img || !canvas || !img.complete || !img.naturalWidth) return finish();
-      runDisintegrate(img, canvas, finish);
+      const w = src ? ('naturalWidth' in src ? src.naturalWidth : src.videoWidth) : 0;
+      if (!src || !canvas || !w) return finish();
+      runDisintegrate(src, canvas, finish);
     } catch {
       finish();
     }
@@ -81,38 +84,51 @@ export function ViewOnceViewer({ blob, onClose }: { blob: Blob; onClose: () => v
           ×
         </button>
       )}
-      <div
-        className={`vo-stage${held ? ' held' : ''}`}
-        onPointerDown={(e) => {
-          if (destroying) return;
-          e.currentTarget.setPointerCapture?.(e.pointerId);
-          setHeld(true);
-        }}
-        onPointerUp={() => setHeld(false)}
-        onPointerCancel={() => setHeld(false)}
-        onPointerLeave={() => setHeld(false)}
-        onContextMenu={(e) => e.preventDefault()}
-      >
-        <canvas ref={dispRef} className="vo-img" />
-        {url && (
-          <img
-            ref={imgRef}
-            src={url}
-            alt=""
-            draggable={false}
-            crossOrigin="anonymous"
-            style={{ display: 'none' }}
-            onLoad={drawDisplay}
-          />
-        )}
-        {!held && !destroying && (
-          <div className="vo-cover">
-            <IconBomb size={34} />
-            <div className="vo-cover-title">{t('Zum Ansehen gedrückt halten')}</div>
-            <div className="vo-cover-sub">{t('Das Foto ist bereits gelöscht — dies ist deine einzige Ansicht.')}</div>
-          </div>
-        )}
-      </div>
+      {isVideo ? (
+        // View-once VIDEO: plays once, then disintegrates. (A web app can't fully block
+        // saving a <video> the way it can a canvas image — best-effort attrs + the note.)
+        <div className="vo-stage" onContextMenu={(e) => e.preventDefault()}>
+          {url && (
+            <video
+              ref={videoRef}
+              className="vo-img"
+              src={url}
+              autoPlay
+              playsInline
+              controls={false}
+              disablePictureInPicture
+              controlsList="nodownload noremoteplayback"
+              onEnded={beginDestroy}
+              onContextMenu={(e) => e.preventDefault()}
+            />
+          )}
+        </div>
+      ) : (
+        <div
+          className={`vo-stage${held ? ' held' : ''}`}
+          onPointerDown={(e) => {
+            if (destroying) return;
+            e.currentTarget.setPointerCapture?.(e.pointerId);
+            setHeld(true);
+          }}
+          onPointerUp={() => setHeld(false)}
+          onPointerCancel={() => setHeld(false)}
+          onPointerLeave={() => setHeld(false)}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <canvas ref={dispRef} className="vo-img" />
+          {url && (
+            <img ref={imgRef} src={url} alt="" draggable={false} crossOrigin="anonymous" style={{ display: 'none' }} onLoad={drawDisplay} />
+          )}
+          {!held && !destroying && (
+            <div className="vo-cover">
+              <IconBomb size={34} />
+              <div className="vo-cover-title">{t('Zum Ansehen gedrückt halten')}</div>
+              <div className="vo-cover-sub">{t('Das Foto ist bereits gelöscht — dies ist deine einzige Ansicht.')}</div>
+            </div>
+          )}
+        </div>
+      )}
       {/* The disintegration canvas — full-screen, above the stage while destroying. */}
       <canvas ref={canvasRef} className="vo-destroy-canvas" aria-hidden="true" />
       {!destroying && (
@@ -127,7 +143,9 @@ export function ViewOnceViewer({ blob, onClose }: { blob: Blob; onClose: () => v
  * moving threshold mask), the burning edge glows orange, and glowing ash rises off it
  * with additive light. No chunky tiles. Runs ~1.5 s, then calls onDone.
  */
-function runDisintegrate(img: HTMLImageElement, canvas: HTMLCanvasElement, onDone: () => void) {
+function runDisintegrate(img: HTMLImageElement | HTMLVideoElement, canvas: HTMLCanvasElement, onDone: () => void) {
+  const nw = 'naturalWidth' in img ? img.naturalWidth : img.videoWidth;
+  const nh = 'naturalHeight' in img ? img.naturalHeight : img.videoHeight;
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const vw = window.innerWidth;
   const vh = window.innerHeight;
@@ -140,16 +158,16 @@ function runDisintegrate(img: HTMLImageElement, canvas: HTMLCanvasElement, onDon
   ctx.scale(dpr, dpr);
 
   // "contain" fit of the image inside the viewport.
-  const fit = Math.min(vw / img.naturalWidth, vh / img.naturalHeight);
-  const iw = img.naturalWidth * fit;
-  const ih = img.naturalHeight * fit;
+  const fit = Math.min(vw / nw, vh / nh);
+  const iw = nw * fit;
+  const ih = nh * fit;
   const ox = (vw - iw) / 2;
   const oy = (vh - ih) / 2;
 
   // Sample the image's actual colours (same-origin blob → not tainted) for the ash.
   const nat = document.createElement('canvas');
-  nat.width = img.naturalWidth;
-  nat.height = img.naturalHeight;
+  nat.width = nw;
+  nat.height = nh;
   const nctx = nat.getContext('2d');
   let pix: Uint8ClampedArray | null = null;
   if (nctx) {

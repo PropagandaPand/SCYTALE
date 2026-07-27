@@ -823,7 +823,7 @@ export type MessageContent =
   // A LARGE attachment stored encrypted in R2 (videos up to ~1 GB). Carries the R2 object
   // key + the per-file key (keyB64) end-to-end; the recipient downloads the ciphertext and
   // decrypts. `chunk` is the plaintext chunk size the blob was sealed with. See crypto/blob.ts.
-  | { kind: 'r2'; key: string; keyB64: string; name: string; mime: string; size: number; chunk: number }
+  | { kind: 'r2'; key: string; keyB64: string; name: string; mime: string; size: number; chunk: number; viewOnce?: boolean }
   // PULL request for an offered attachment. The sender streams its chunks in reply —
   // but only for a tid it actually offered to THIS contact (amplification guard).
   | { kind: 'attreq'; tid: string };
@@ -987,7 +987,10 @@ export async function frameContent(c: MessageContent): Promise<Bytes> {
   }
   if (c.kind === 'attreq') return prefixed(17, utf8.encode(JSON.stringify({ t: c.tid })));
   if (c.kind === 'r2')
-    return prefixed(19, utf8.encode(JSON.stringify({ k: c.key, kf: c.keyB64, n: c.name, m: c.mime, s: c.size, c: c.chunk })));
+    return prefixed(
+      19,
+      utf8.encode(JSON.stringify({ k: c.key, kf: c.keyB64, n: c.name, m: c.mime, s: c.size, c: c.chunk, vo: c.viewOnce ? 1 : undefined })),
+    );
   // ginvite
   return prefixed(4, utf8.encode(JSON.stringify(c.group)));
 }
@@ -1131,6 +1134,7 @@ export async function unframeContent(bytes: Bytes): Promise<MessageContent> {
       mime: String(j.m),
       size: Number(j.s),
       chunk: Number(j.c),
+      viewOnce: j.vo === 1 || undefined,
     };
   }
 

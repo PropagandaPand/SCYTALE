@@ -39,6 +39,92 @@ export function ViewOnceViewer({ blob, mime, onClose }: { blob: Blob; mime: stri
     c.getContext('2d')?.drawImage(img, 0, 0, c.width, c.height);
   }
 
+  // ── Zoom: two-finger pinch (mobile) + wheel/trackpad-pinch (desktop) ─────────
+  // Applied as an inline transform on the canvas, so it stays SHARP while zooming
+  // (the CSS blur only paints the idle, not-held photo). Desktop is revealed by default
+  // (screenshots are trivial there anyway); touch keeps the hold-to-view friction.
+  const isDesktop = useRef(typeof window !== 'undefined' && !!window.matchMedia?.('(hover: hover) and (pointer: fine)').matches).current;
+  const pointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const zoomRef = useRef({ scale: 1, tx: 0, ty: 0 });
+  const pinchRef = useRef<{ d: number; s: number; tx: number; ty: number; mx: number; my: number } | null>(null);
+  const clampScale = (s: number) => Math.max(1, Math.min(5, s));
+  const applyZoom = () => {
+    const c = dispRef.current;
+    if (!c) return;
+    const z = zoomRef.current;
+    c.style.transition = 'none'; // instant during a pinch/wheel; no 180 ms lag
+    c.style.transform = z.scale === 1 && !z.tx && !z.ty ? '' : `translate(${z.tx}px, ${z.ty}px) scale(${z.scale})`;
+  };
+
+  useEffect(() => {
+    if (isDesktop && !isVideo) setHeld(true); // desktop photo: revealed, no hold needed
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function zoomDown(e: React.PointerEvent) {
+    if (destroying) return;
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (!isDesktop) setHeld(true);
+    if (pointersRef.current.size === 2) {
+      const [a, b] = [...pointersRef.current.values()];
+      const z = zoomRef.current;
+      pinchRef.current = { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, s: z.scale, tx: z.tx, ty: z.ty, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
+    }
+  }
+  function zoomMove(e: React.PointerEvent) {
+    const p = pointersRef.current.get(e.pointerId);
+    if (!p) return;
+    const px = p.x;
+    const py = p.y;
+    p.x = e.clientX;
+    p.y = e.clientY;
+    const pts = [...pointersRef.current.values()];
+    const z = zoomRef.current;
+    if (pts.length >= 2 && pinchRef.current) {
+      const [a, b] = pts;
+      const pin = pinchRef.current;
+      z.scale = clampScale(pin.s * (Math.hypot(a.x - b.x, a.y - b.y) / pin.d));
+      z.tx = pin.tx + ((a.x + b.x) / 2 - pin.mx);
+      z.ty = pin.ty + ((a.y + b.y) / 2 - pin.my);
+      applyZoom();
+    } else if (pts.length === 1 && z.scale > 1) {
+      z.tx += e.clientX - px;
+      z.ty += e.clientY - py;
+      applyZoom();
+    }
+  }
+  function zoomUp(e: React.PointerEvent) {
+    pointersRef.current.delete(e.pointerId);
+    if (pointersRef.current.size < 2) pinchRef.current = null;
+    if (pointersRef.current.size === 0 && !isDesktop) {
+      setHeld(false);
+      zoomRef.current = { scale: 1, tx: 0, ty: 0 };
+      const c = dispRef.current;
+      if (c) {
+        c.style.transition = ''; // revert to CSS → the blur transitions back in
+        c.style.transform = '';
+      }
+    }
+  }
+  function zoomWheel(e: React.WheelEvent) {
+    e.preventDefault();
+    const z = zoomRef.current;
+    const ns = clampScale(z.scale * Math.exp(-e.deltaY * 0.0015));
+    const rect = dispRef.current?.getBoundingClientRect();
+    if (rect) {
+      // Keep the point under the cursor fixed while zooming.
+      const cx = e.clientX - (rect.left + rect.width / 2);
+      const cy = e.clientY - (rect.top + rect.height / 2);
+      const r = ns / z.scale;
+      z.tx = cx - (cx - z.tx) * r;
+      z.ty = cy - (cy - z.ty) * r;
+    }
+    z.scale = ns;
+    if (!isDesktop) setHeld(true);
+    applyZoom();
+  }
+
   useEffect(() => {
     const u = URL.createObjectURL(blob);
     setUrl(u);
@@ -106,14 +192,12 @@ export function ViewOnceViewer({ blob, mime, onClose }: { blob: Blob; mime: stri
       ) : (
         <div
           className={`vo-stage${held ? ' held' : ''}`}
-          onPointerDown={(e) => {
-            if (destroying) return;
-            e.currentTarget.setPointerCapture?.(e.pointerId);
-            setHeld(true);
-          }}
-          onPointerUp={() => setHeld(false)}
-          onPointerCancel={() => setHeld(false)}
-          onPointerLeave={() => setHeld(false)}
+          onPointerDown={zoomDown}
+          onPointerMove={zoomMove}
+          onPointerUp={zoomUp}
+          onPointerCancel={zoomUp}
+          onPointerLeave={zoomUp}
+          onWheel={zoomWheel}
           onContextMenu={(e) => e.preventDefault()}
         >
           <canvas ref={dispRef} className="vo-img" />

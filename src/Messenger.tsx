@@ -29,6 +29,7 @@ import {
   type IdentityKeys,
   type SasResult,
   isNewerDeviceList,
+  encodeDeviceList,
   type DeviceList,
 } from './crypto';
 import {
@@ -1515,18 +1516,23 @@ export function Messenger({ dek, onLock }: Props) {
     if (!self) return;
     const prof = myProfileRef.current;
     const avatar = prof.avatarB64 && prof.avatarB64.length <= AVATAR_IMPORT_CAP ? prof.avatarB64 : undefined;
-    const contacts: RosterEntry[] = contactsRef.current
-      .filter((c) => !c.hidden && !c.staleIdentity && !bytesEqual(c.peerMasterPub, id.master.publicKey))
-      .slice(0, ROSTER_MAX)
-      .map((c) => ({
-        pm: c.peerMasterPub,
-        pe: c.peerEpoch,
-        psp: c.peerSignPub,
-        pdp: c.peerDhPub,
-        nick: c.nickname ?? null,
-        pn: c.peerName ?? null,
-        vf: c.verified === true, // a SUGGESTION on the far side, never adopted blindly
-      }));
+    const contacts: RosterEntry[] = await Promise.all(
+      contactsRef.current
+        .filter((c) => !c.hidden && !c.staleIdentity && !bytesEqual(c.peerMasterPub, id.master.publicKey))
+        .slice(0, ROSTER_MAX)
+        .map(async (c) => ({
+          pm: c.peerMasterPub,
+          pe: c.peerEpoch,
+          psp: c.peerSignPub,
+          pdp: c.peerDhPub,
+          nick: c.nickname ?? null,
+          pn: c.peerName ?? null,
+          vf: c.verified === true, // a SUGGESTION on the far side, never adopted blindly
+          // The peer's master-signed device list → lets the linked device initiate X3DH
+          // (re-verified on the far side). Null for a legacy single-device contact.
+          dl: c.peerDeviceList ? await encodeDeviceList(c.peerDeviceList) : null,
+        })),
+    );
     const parts: BootstrapPart[] = [
       { t: 'profile', name: prof.name, avatar },
       { t: 'roster', contacts },

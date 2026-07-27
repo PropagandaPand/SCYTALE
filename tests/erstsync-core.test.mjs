@@ -37,9 +37,11 @@ ok('Roundtrip: profile-Part erhalten', back.parts[0].t === 'profile' && back.par
 const rb = back.parts[1].contacts[0];
 ok('Roundtrip: roster-Entry-Keys byteident', eqh(rb.pm, eM.publicKey) && eqh(rb.psp, eD.sign.publicKey) && eqh(rb.pdp, eD.dh.publicKey));
 ok('Roundtrip: nick/pn/vf erhalten', rb.nick === 'Kumpel' && rb.pn === 'Echter Name' && rb.vf === true);
-// Das Entry-Wire trägt KEINE ratchet/bundle/deviceList/roomId/ownMaster-Felder.
-ok('roster-Entry trägt keine Klon-Felder (bundle/dl/room/om)',
-  rb.bundle === undefined && rb.dl === undefined && rb.room === undefined && rb.om === undefined && rb.sessions === undefined);
+// Das Entry-Wire trägt jetzt OPTIONAL die master-signierte Geräteliste (dl) — auf der
+// Gegenseite RE-verifiziert (siehe C), nie blind adoptiert. Aber weiterhin KEIN
+// ratchet/bundle/roomId/ownMaster/sessions-Klon. Hier hatte die Quelle keine Liste → dl=null.
+ok('roster-Entry trägt keinen unsicheren Klon (bundle/room/om/sessions); dl=null ohne Liste',
+  rb.bundle === undefined && rb.room === undefined && rb.om === undefined && rb.sessions === undefined && rb.dl === null);
 
 const la = await S.unframeContent(await S.frameContent({ kind: 'listack', epoch: 3, version: 7 }));
 ok('listack roundtrip (epoch,version)', la.kind === 'listack' && la.epoch === 3 && la.version === 7);
@@ -80,10 +82,35 @@ ok('NEU: verified===false', cNew.verified === false);
 ok('NEU: roomId LOKAL abgeleitet (== computeMasterRoomId(myMaster, pm))',
   cNew.roomId === (await S.computeMasterRoomId(myMaster, S.asMasterPub(new Uint8Array(pA.publicKey)))));
 ok('NEU: nick/peerName übernommen', cNew.nickname === 'Anna' && cNew.peerName === 'Anna P.');
-// NEGATIVKONTROLLE: hätte der Entry ein dl/bundle mitgegeben, dürfte es NICHT ankommen.
+// NEGATIVKONTROLLE: ein GEFAKTES/kaputtes dl (+ ein bundle-Feld, das es gar nicht geben
+// darf) erzeugt KEINE Sendefähigkeit — decode/verify wirft/scheitert, Kontakt bleibt blockiert.
 const cNoClone = await S.mergeRosterEntry([], { ...mkEntry(mkMaster().publicKey, mkDev()), dl: 'BOGUS', bundle: 'BOGUS' }, myMaster, retired);
 ok('Negativkontrolle: erfundene dl/bundle-Wire-Felder erzeugen KEINE Sendefähigkeit',
   cNoClone.peerDeviceList === undefined && cNoClone.bundle === undefined);
+
+// POSITIV-Gegenstück (die Slave-Send-Fähigkeit): eine ECHTE master-signierte Geräteliste im
+// Roster-Entry wird nach Re-Verifikation ADOPTIERT → der Kontakt ist sendefähig (SPK-Pfad).
+const pMaster = mkMaster(), pDev = mkDev();
+const pid = {
+  master: { publicKey: new Uint8Array(pMaster.publicKey), privateKey: new Uint8Array(pMaster.privateKey) },
+  sign: { publicKey: new Uint8Array(pDev.sign.publicKey), privateKey: new Uint8Array(pDev.sign.privateKey) },
+  dh: { publicKey: new Uint8Array(pDev.dh.publicKey), privateKey: new Uint8Array(pDev.dh.privateKey) },
+  epoch: 1,
+  deviceCert: await S.signDeviceCert(pMaster.privateKey, 1, pDev.sign.publicKey, pDev.dh.publicKey),
+};
+const spk = await S.generateSignedPreKey(pid, 1);
+const pEntry = { signPub: pid.sign.publicKey, dhPub: pid.dh.publicKey, deviceCert: pid.deviceCert,
+  signedPreKey: { id: spk.id, pub: spk.keyPair.publicKey, signature: spk.signature } };
+const realList = await S.signDeviceList(pMaster.privateKey, pMaster.publicKey, 1, 2, [pEntry]);
+const cReal = await S.mergeRosterEntry([], mkEntry(pMaster.publicKey, pDev, { pe: 1, dl: await S.encodeDeviceList(realList) }), myMaster, retired);
+ok('POSITIV: echte master-signierte dl wird adoptiert → sendefähig (peerDeviceList gesetzt)',
+  cReal.peerDeviceList !== undefined && cReal.peerDeviceList.devices.length === 1);
+// NEGATIVKONTROLLE dazu: dieselbe Liste, aber vom FALSCHEN Schlüssel signiert (masterPub
+// behauptet den echten) → Signaturprüfung scheitert → NICHT adoptiert.
+const evil = mkMaster();
+const forged = await S.signDeviceList(evil.privateKey, pMaster.publicKey, 1, 2, [pEntry]);
+const cForged = await S.mergeRosterEntry([], mkEntry(pMaster.publicKey, pDev, { pe: 1, dl: await S.encodeDeviceList(forged) }), myMaster, retired);
+ok('Negativkontrolle: fremd-signierte dl (bad sig) wird NICHT adoptiert', cForged.peerDeviceList === undefined);
 
 // C2: verified nie blind — vf=true → nur Vorschlag, nie verified.
 const cVf = await S.mergeRosterEntry([], mkEntry(mkMaster().publicKey, mkDev(), { vf: true }), myMaster, retired);

@@ -478,9 +478,24 @@ export async function mergeRosterEntry(
 
   const existing = contacts.find((c) => bytesEqual(c.peerMasterPub, entry.pm));
 
+  // Adopt the peer's MASTER-SIGNED device list if the entry carries one — re-verified via
+  // applyDeviceListUpdate (peer-master signature + epoch + no-rollback), so it is NEVER
+  // trusted blindly. This lifts the send-block: the contact gains the per-device signed
+  // prekeys the device needs to INITIATE X3DH (the OTP-free path, so no prekey reuse).
+  const adoptDl = async (c: Contact): Promise<Contact> => {
+    if (entry.dl) {
+      try {
+        await applyDeviceListUpdate(c, await decodeDeviceList(entry.dl), retired);
+      } catch {
+        /* a corrupt/unverifiable list just leaves the contact send-blocked — no throw */
+      }
+    }
+    return c;
+  };
+
   if (!existing) {
-    // NEW silent contact: metadata only, send-blocked, unverified.
-    return {
+    // NEW contact: metadata + (if provided) the re-verified device list → send-capable.
+    const created: Contact = {
       roomId: derivedRoom,
       peerMasterPub: entry.pm,
       peerEpoch: entry.pe,
@@ -496,6 +511,7 @@ export async function mergeRosterEntry(
       bundle: undefined,
       sessions: new Map(),
     };
+    return adoptDl(created);
   }
 
   if (existing.staleIdentity) {
@@ -517,7 +533,7 @@ export async function mergeRosterEntry(
     existing.sessions = new Map();
     if (existing.nickname === undefined && entry.nick) existing.nickname = entry.nick;
     if (existing.peerName === undefined && entry.pn) existing.peerName = entry.pn;
-    return existing;
+    return adoptDl(existing);
   }
 
   // EXISTING, non-stale: FILL GAPS ONLY. Never touch pinned identity/keys/verified.
@@ -531,7 +547,7 @@ export async function mergeRosterEntry(
   ) {
     existing.verifiedSuggestion = true;
   }
-  return existing;
+  return adoptDl(existing);
 }
 
 /** Responder side: a stranger who holds OUR code just messaged us. Verify their
@@ -775,6 +791,11 @@ export interface RosterEntry {
   nick: string | null;
   pn: string | null; // peerName (learned from the peer's own profile)
   vf: boolean; // verified on the sending device
+  // The peer's MASTER-SIGNED device list (encoded), if we hold one. Carrying it lets the
+  // newly linked device INITIATE X3DH to the contact via the per-device signed prekeys —
+  // so it isn't send-blocked. It is NOT trusted blindly: the receiver re-verifies the
+  // peer-master signature + epoch (applyDeviceListUpdate) before adopting it.
+  dl?: Bytes | null;
 }
 
 /** Message payload framed into the ratchet plaintext. */
@@ -958,6 +979,7 @@ export async function frameContent(c: MessageContent): Promise<Bytes> {
               nk: e.nick,
               pn: e.pn,
               vf: e.vf,
+              dl: e.dl ? bytesToB64(e.dl) : null,
             })),
           },
     );
@@ -1065,6 +1087,7 @@ export async function unframeContent(bytes: Bytes): Promise<MessageContent> {
           nk: string | null;
           pn: string | null;
           vf: boolean;
+          dl?: string | null;
         }>;
         const contacts: RosterEntry[] = rawContacts.map((e) => ({
           pm: b64ToBytes(e.m),
@@ -1074,6 +1097,7 @@ export async function unframeContent(bytes: Bytes): Promise<MessageContent> {
           nick: e.nk ?? null,
           pn: e.pn ?? null,
           vf: e.vf === true,
+          dl: e.dl ? b64ToBytes(e.dl) : null,
         }));
         parts.push({ t: 'roster', contacts });
       }

@@ -7,8 +7,14 @@ compatibility_date = "2026-07-27"
 # cert automatically on deploy — no manual DNS. The worker keeps its internal name
 # ("scytale") so the existing Durable Object and deploy history stay attached.
 #
-# Do not expose a second production origin that bypasses the canonical hostname.
-workers_dev = false
+# workers_dev MUST stay true for now: the ENTIRE existing tester fleet installed their PWAs
+# from the *.workers.dev origin (skytale.chat only exists since 2026-07-27). Setting this to
+# false disables that origin and instantly bricks every installed PWA — the whole origin goes
+# dark: no service-worker update AND no relay connection (the app still opens from its cached
+# shell, so it silently shows the old version with all contacts red). Only flip this to false
+# AFTER every client has migrated to skytale.chat. (Audit F-26.6 wanted it off to drop the
+# second ingress — deferred until the fleet has moved.)
+workers_dev = true
 routes = [
   { pattern = "skytale.chat", custom_domain = true },
 ]

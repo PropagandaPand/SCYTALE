@@ -13,12 +13,34 @@
  * relay — there is no server-side account (the relay is a dumb mailbox).
  */
 import { deleteDB } from 'idb';
-import { closeDb } from './db';
+import { closeDb, secureOverwriteHeader } from './db';
 import { disablePush, PUSH_CONTROL_CACHE } from './push';
 
 const DB_NAMES = ['scytale', 'scytale-badge'];
 
+/** A localStorage flag that SURVIVES a wipe. If deleteDB is blocked or fails (a service-worker-
+ *  held connection, or a BFCache-frozen sibling tab — the flaky-mobile conditions this app
+ *  defends against), a leftover or overwritten-garbage header could otherwise make the next boot
+ *  show a permanently un-unlockable lock screen instead of fresh onboarding. Set BEFORE any
+ *  destructive step, honoured by hasVault(), and cleared only when a fresh vault is created. */
+export const RESET_MARKER = 'scytale-reset';
+function markReset(): void {
+  try {
+    localStorage.setItem(RESET_MARKER, '1');
+  } catch {
+    /* ignore */
+  }
+}
+export function wipedMarkerPresent(): boolean {
+  try {
+    return localStorage.getItem(RESET_MARKER) === '1';
+  } catch {
+    return false;
+  }
+}
+
 export async function wipeAccount(options: { pushTeardownStarted?: boolean } = {}): Promise<void> {
+  markReset(); // set the persistent onboarding flag before anything is torn down
   try {
     await navigator.clearAppBadge?.();
   } catch {
@@ -70,8 +92,28 @@ export async function wipeAccount(options: { pushTeardownStarted?: boolean } = {
     }
   }
   try {
-    for (const k of Object.keys(localStorage)) if (k.startsWith('scytale-')) localStorage.removeItem(k);
+    // Keep RESET_MARKER: it must outlive the wipe so a failed deleteDB still boots to onboarding.
+    for (const k of Object.keys(localStorage)) {
+      if (k.startsWith('scytale-') && k !== RESET_MARKER) localStorage.removeItem(k);
+    }
   } catch {
     /* ignore */
   }
+}
+
+/**
+ * Duress wipe: the irreversible crypto-erase triggered when the DURESS password is entered at
+ * unlock. Overwrites the vault header (the wrapped DEK) best-effort FIRST, then performs the
+ * full account wipe. This is forensically sound for the duress case by construction: the DEK is
+ * only ever derivable from the REAL passphrase, which a coercer holding the duress password does
+ * NOT have — so once the header is destroyed, even a recovered device image is unrecoverable
+ * ciphertext. The best-effort overwrite additionally hardens against a LATER coercion of the real
+ * passphrase. Honest limit: on flash/SSD the overwrite cannot guarantee the original cells are
+ * gone (FTL wear-levelling) — the guarantee is the key destruction, not the physical overwrite.
+ * See SECURITY.md.
+ */
+export async function duressWipe(): Promise<void> {
+  markReset(); // BEFORE overwriting the header, so a garbage header + failed deleteDB can't brick boot
+  await secureOverwriteHeader().catch(() => undefined);
+  await wipeAccount();
 }

@@ -149,7 +149,8 @@ import { Explainer } from './Explainer';
 import { t, useLang, LANGS, getLang, setLang, type Lang } from './lib/i18n';
 import { tb } from './lib/tnodes';
 import { applyBadge } from './lib/badge';
-import { biometricAvailable, biometricEnrolled, disableBiometricUnlock } from './lib/vaultService';
+import { biometricAvailable, biometricEnrolled, disableBiometricUnlock, duressEnabled } from './lib/vaultService';
+import { DuressSetup } from './DuressSetup';
 import {
   AUTO_RECEIVE_CONTACT_CAP_BYTES,
   automaticRecvReservationBytes,
@@ -551,6 +552,8 @@ export function Messenger({ dek, onLock }: Props) {
   const [bioSupported, setBioSupported] = useState(false); // platform authenticator present
   const [bioOn, setBioOn] = useState(false); // biometric unlock enrolled for this vault
   const [bioEnroll, setBioEnroll] = useState(false); // enrollment modal open
+  const [duressOn, setDuressOn] = useState(false); // a duress password is set for this vault
+  const [duressModal, setDuressModal] = useState<'set' | 'remove' | null>(null); // duress setup modal
   const [langSheet, setLangSheet] = useState(false); // language picker open
   const [bugOpen, setBugOpen] = useState(false); // bug-report modal open
   const [deleteOpen, setDeleteOpen] = useState(false); // account-delete confirmation open
@@ -670,9 +673,10 @@ export function Messenger({ dek, onLock }: Props) {
 
   useEffect(() => {
     void (async () => {
-      const [avail, enrolled] = await Promise.all([biometricAvailable(), biometricEnrolled()]);
+      const [avail, enrolled, duress] = await Promise.all([biometricAvailable(), biometricEnrolled(), duressEnabled()]);
       setBioSupported(avail);
       setBioOn(enrolled);
+      setDuressOn(duress);
     })();
   }, []);
   useEffect(() => {
@@ -5605,6 +5609,10 @@ export function Messenger({ dek, onLock }: Props) {
                         .catch(() => {}); // header keeps prf → toggle stays on, which is the honest state
                     }
                   } else {
+                    if (duressOn) {
+                      setError(t('Duress-Passwort und Face ID / Touch ID schließen sich gegenseitig aus — erst das andere ausschalten.'));
+                      return;
+                    }
                     setBioEnroll(true);
                   }
                 }}
@@ -5619,6 +5627,28 @@ export function Messenger({ dek, onLock }: Props) {
                 </span>
               </button>
             )}
+
+            <button
+              className="setting-row"
+              role="switch"
+              aria-checked={duressOn}
+              onClick={() => {
+                if (!duressOn && bioOn) {
+                  setError(t('Duress-Passwort und Face ID / Touch ID schließen sich gegenseitig aus — erst das andere ausschalten.'));
+                  return;
+                }
+                setDuressModal(duressOn ? 'remove' : 'set');
+              }}
+            >
+              <span className="setting-ic"><IconShield size={15} /></span>
+              <span className="setting-tx">
+                <span className="setting-title">{t('Duress-Passwort')}</span>
+                <span className="setting-sub">{t('Notfall-Passwort, das beim Entsperren den Tresor unwiderruflich löscht')}</span>
+              </span>
+              <span className={`switch${duressOn ? ' on' : ''}`}>
+                <span className="knob" />
+              </span>
+            </button>
 
             <button className="setting-row" onClick={() => setBackupMode('export')}>
               <span className="setting-ic"><IconArchive /></span>
@@ -5690,6 +5720,16 @@ export function Messenger({ dek, onLock }: Props) {
                 setBioEnroll(false);
               }}
               onClose={() => setBioEnroll(false)}
+            />
+          )}
+          {duressModal && (
+            <DuressSetup
+              mode={duressModal}
+              onDone={() => {
+                setDuressOn(duressModal === 'set');
+                setDuressModal(null);
+              }}
+              onClose={() => setDuressModal(null)}
             />
           )}
           {langSheet && (

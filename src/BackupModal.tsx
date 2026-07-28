@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { exportBackup, importBackup } from './lib/backup';
-import { unlockBoundVault } from './lib/vaultService';
+import { unlockBoundVault, DuressWipedError } from './lib/vaultService';
 import { t } from './lib/i18n';
 import { tb } from './lib/tnodes';
 
@@ -47,6 +47,7 @@ export function BackupModal({
       setTimeout(() => URL.revokeObjectURL(url), 2000);
       setDone(t('Backup exportiert. Bewahre die Datei UND die Export-Passphrase getrennt und sicher auf.'));
     } catch (e) {
+      if (e instanceof DuressWipedError) return location.reload(); // duress password entered here too → wipe + boot fresh
       setErr(e instanceof Error ? e.message : t('Export fehlgeschlagen.'));
     } finally {
       setBusy(false);

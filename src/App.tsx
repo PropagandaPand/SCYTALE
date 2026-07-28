@@ -6,6 +6,7 @@ import {
   WrongPassphraseError,
   DeviceBindingMissingError,
   LockedOutError,
+  DuressWipedError,
   lockoutStatus,
   unlockWithBiometric,
   biometricAvailable,
@@ -169,7 +170,11 @@ export function App() {
   }
 
   async function submit() {
-    if (lockState === 'locked' || busy) return;
+    // NOTE: deliberately NOT gated on lockState==='locked'. A submit during the brute-force
+    // countdown must still reach unlockBoundVault so the DURESS password can fire its wipe even
+    // while locked out (the coercion case). A non-duress attempt simply re-throws LockedOutError
+    // and the countdown re-appears — nothing is unlocked.
+    if (busy) return;
     if (phase === 'create' && passphrase.length < 8) return say(t('Mindestens 8 Zeichen.'), 'err');
     setBusy(true);
     setLockState('busy');
@@ -178,6 +183,12 @@ export function App() {
       const newDek = phase === 'create' ? await createBoundVault(passphrase) : await unlockBoundVault(passphrase);
       openWith(newDek);
     } catch (e) {
+      if (e instanceof DuressWipedError) {
+        // The duress password irreversibly erased the vault. Reload to a fresh onboarding —
+        // externally the app just "restarted" empty; nothing signals that duress was used.
+        location.reload();
+        return;
+      }
       if (e instanceof LockedOutError) {
         beginLockoutCountdown(e.remainingMs);
         say('');
@@ -354,7 +365,7 @@ export function App() {
                 value={passphrase}
                 autoComplete={phase === 'create' ? 'new-password' : 'current-password'}
                 placeholder="············"
-                disabled={lockState === 'locked'}
+                disabled={lockState === 'busy'}
                 onChange={(e) => setPassphrase(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && void submit()}
               />
@@ -371,7 +382,7 @@ export function App() {
             <button
               className="btn btn-primary btn-tall"
               onClick={() => void submit()}
-              disabled={busy || lockState === 'locked'}
+              disabled={busy}
             >
               {phase === 'create' ? t('Tresor erstellen') : t('Tresor entsperren')}
             </button>

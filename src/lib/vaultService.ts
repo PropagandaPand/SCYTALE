@@ -18,6 +18,8 @@ import {
   verifyKek,
   wrapDekUnder,
   unwrapDekWithPrf,
+  createDuressGuard,
+  matchesDuress,
   WrongPassphraseError,
   VaultCorruptError,
   type VaultHeader,
@@ -26,6 +28,7 @@ import { getOrCreateDeviceKey } from './deviceKey';
 import { loadHeader, saveHeader } from './db';
 import { clearFailures, lockoutStatus, registerFailure, type LockoutInfo } from './lockout';
 import { biometricAvailable, createBiometricCredential, evaluatePrf, derivePrfKek } from './biometric';
+import { duressWipe, wipedMarkerPresent, RESET_MARKER } from './wipe';
 
 export class DeviceBindingMissingError extends Error {
   constructor() {
@@ -38,6 +41,35 @@ export class LockedOutError extends Error {
   constructor(public remainingMs: number) {
     super('Zu viele Fehlversuche — vorübergehend gesperrt.');
     this.name = 'LockedOutError';
+  }
+}
+
+/** Raised AFTER the duress password has irreversibly wiped the vault. The UI drops to a fresh
+ *  onboarding state (the vault is gone) instead of showing a wrong-passphrase toast — the on-
+ *  screen result is a clean, empty app, indistinguishable from a reset to anyone watching. */
+export class DuressWipedError extends Error {
+  constructor() {
+    super('Tresor wurde gelöscht.');
+    this.name = 'DuressWipedError';
+  }
+}
+
+/** The chosen duress password must differ from the real passphrase — otherwise a normal login
+ *  would trigger the wipe. */
+export class DuressEqualsRealError extends Error {
+  constructor() {
+    super('Das Duress-Passwort darf nicht die echte Passphrase sein.');
+    this.name = 'DuressEqualsRealError';
+  }
+}
+
+/** Duress and biometric unlock are mutually exclusive: a Face ID / Touch ID unlock bypasses the
+ *  passphrase field entirely, so a coercer could open the REAL vault and the panic wipe would
+ *  never fire. Arming one requires the other to be off. */
+export class DuressBiometricConflictError extends Error {
+  constructor() {
+    super('Duress-Passwort und Face ID / Touch ID schließen sich gegenseitig aus.');
+    this.name = 'DuressBiometricConflictError';
   }
 }
 
@@ -70,6 +102,11 @@ export async function createBoundVault(passphrase: string): Promise<CryptoKey> {
   header.deviceWrap = { iv, ciphertext };
   await saveHeader(header);
   await clearFailures();
+  try {
+    localStorage.removeItem(RESET_MARKER); // a fresh vault clears any prior wipe/reset flag
+  } catch {
+    /* ignore */
+  }
   return dek;
 }
 
@@ -91,15 +128,38 @@ async function recoverBindingSuffix(header: VaultHeader): Promise<string> {
   }
 }
 
-export async function unlockBoundVault(passphrase: string): Promise<CryptoKey> {
-  const status = await lockoutStatus();
-  if (status.remainingMs > 0) throw new LockedOutError(status.remainingMs);
+/**
+ * Probe the duress guard at a cost INDEPENDENT of whether a duress password is configured — so a
+ * wrong-passphrase attempt can never reveal (by timing) that one exists. With a guard: one Argon2
+ * to test it. Without: one equal-cost throwaway Argon2, then no match.
+ */
+async function guardMatches(candidate: string, header: VaultHeader): Promise<boolean> {
+  if (header.duress) return matchesDuress(candidate, header);
+  await deriveHeaderKek(candidate, header); // equal-cost dummy derivation; result discarded
+  return false;
+}
 
+export async function unlockBoundVault(passphrase: string): Promise<CryptoKey> {
   const header = await loadHeader();
   if (!header) throw new Error('Kein Tresor gefunden.');
 
+  // Recover the device-binding suffix FIRST — a missing device key means neither the real unlock
+  // nor the duress guard can be derived on this device (both need the KEK).
   const suffix = await recoverBindingSuffix(header);
   const candidate = header.deviceWrap ? augment(passphrase, suffix) : passphrase;
+
+  // The duress guard is probed on EVERY attempt, INCLUDING while the brute-force lockout is
+  // active: the coercion scenario is exactly a locked-out screen after fumbled guesses, and the
+  // panic wipe MUST still fire then. `guardMatches` runs at a constant cost so a locked-out (or
+  // ordinary wrong) attempt never reveals whether a duress password is configured.
+  const status = await lockoutStatus();
+  if (status.remainingMs > 0) {
+    if (await guardMatches(candidate, header)) {
+      await duressWipe();
+      throw new DuressWipedError();
+    }
+    throw new LockedOutError(status.remainingMs);
+  }
 
   try {
     const dek = await unlockVault(candidate, header);
@@ -107,6 +167,12 @@ export async function unlockBoundVault(passphrase: string): Promise<CryptoKey> {
     return dek;
   } catch (e) {
     if (e instanceof WrongPassphraseError) {
+      // A wrong passphrase — is it the DURESS password? If so, irreversibly crypto-erase the
+      // vault and signal DuressWipedError so the UI drops to a fresh onboarding state.
+      if (await guardMatches(candidate, header)) {
+        await duressWipe();
+        throw new DuressWipedError();
+      }
       const info = await registerFailure();
       if (info.remainingMs > 0) throw new LockedOutError(info.remainingMs);
     }
@@ -115,6 +181,10 @@ export async function unlockBoundVault(passphrase: string): Promise<CryptoKey> {
 }
 
 export async function hasVault(): Promise<boolean> {
+  // A wipe (account delete, revoked-device self-wipe, or a duress erase) sets a persistent flag
+  // that outlives the wipe. Honour it even if a header record survived a blocked/failed deleteDB,
+  // so boot lands on fresh onboarding instead of a stale or garbage lock screen.
+  if (wipedMarkerPresent()) return false;
   return (await loadHeader()) !== undefined;
 }
 
@@ -145,6 +215,10 @@ export async function enableBiometricUnlock(passphrase: string): Promise<void> {
 
   const header = await loadHeader();
   if (!header) throw new Error('Kein Tresor gefunden.');
+  // Mutually exclusive with a duress password: a biometric door bypasses the passphrase field
+  // where duress is typed, so enabling it while duress is armed would silently re-open the panic
+  // wipe's bypass. Refuse — the user must remove the duress password first.
+  if (header.duress) throw new DuressBiometricConflictError();
 
   // Reproduce the exact passphrase the vault was sealed with (device-binding suffix).
   const suffix = await recoverBindingSuffix(header);
@@ -228,4 +302,78 @@ export async function disableBiometricUnlock(): Promise<void> {
   // Durable removal would require rotating the DEK (re-encrypt every record); see
   // SECURITY.md "Bekannte Grenzen". The OS passkey is left for the user to delete —
   // it is inert without prf.wrappedDek.
+}
+
+// ── Duress password ─────────────────────────────────────────────────────────
+// A SECOND passphrase that, entered at the unlock screen, does NOT unlock — it irreversibly
+// crypto-erases the whole vault (see unlockBoundVault + duressWipe). Stored as an extra wrap of a
+// random throwaway key in the header (crypto/vault.ts): the guard's VALUE is byte-shaped like any
+// wrapped key, but its presence (the header carries the wrap only when armed) does mean a forensic
+// image can tell a duress password is configured — the deniability is BEHAVIOURAL (entering it
+// looks like a wrong passphrase; the wiped app looks fresh), not at-rest. See SECURITY.md.
+// Setting it requires the REAL passphrase.
+
+/** Is a duress password configured? (Reads the header's guard slot.) */
+export async function duressEnabled(): Promise<boolean> {
+  return !!(await loadHeader())?.duress;
+}
+
+/** Verify the real passphrase (device-bound) against the header, counting failures against the
+ *  lockout — shared by duress set/remove. Returns the augmented real candidate on success. */
+async function assertRealPassphrase(realPassphrase: string, header: VaultHeader): Promise<string> {
+  const status = await lockoutStatus();
+  if (status.remainingMs > 0) throw new LockedOutError(status.remainingMs);
+  const suffix = await recoverBindingSuffix(header);
+  const candidate = header.deviceWrap ? augment(realPassphrase, suffix) : realPassphrase;
+  const passKek = await deriveHeaderKek(candidate, header);
+  try {
+    await verifyKek(passKek, header);
+  } catch {
+    const info = await registerFailure();
+    if (info.remainingMs > 0) throw new LockedOutError(info.remainingMs);
+    throw new WrongPassphraseError();
+  }
+  await clearFailures();
+  return candidate;
+}
+
+/**
+ * Set (or replace) the duress password. Requires the REAL passphrase (proves vault ownership),
+ * and the duress password must differ from it — otherwise a normal login would wipe the vault.
+ * It is device-bound the SAME way as the real passphrase, so unlock recognises it identically.
+ */
+export async function setDuressPassword(realPassphrase: string, duressPassphrase: string): Promise<void> {
+  const header = await loadHeader();
+  if (!header) throw new Error('Kein Tresor gefunden.');
+  // Mutually exclusive with biometric unlock: Face ID / Touch ID would open the real vault
+  // without ever touching the passphrase field, bypassing the panic wipe. Refuse to arm duress
+  // while biometric is enrolled — the user must turn Face ID / Touch ID off first.
+  if (header.prf) throw new DuressBiometricConflictError();
+  await assertRealPassphrase(realPassphrase, header);
+
+  const suffix = await recoverBindingSuffix(header);
+  const duressCandidate = header.deviceWrap ? augment(duressPassphrase, suffix) : duressPassphrase;
+  // Refuse a duress password that ALSO unlocks the real vault (would make a normal login wipe it).
+  const duressKek = await deriveHeaderKek(duressCandidate, header);
+  let duressUnlocksReal = false;
+  try {
+    await verifyKek(duressKek, header);
+    duressUnlocksReal = true;
+  } catch {
+    duressUnlocksReal = false;
+  }
+  if (duressUnlocksReal) throw new DuressEqualsRealError();
+
+  header.duress = await createDuressGuard(duressCandidate, header.argon2);
+  await saveHeader(header);
+}
+
+/** Remove the duress password. Requires the real passphrase. */
+export async function removeDuressPassword(realPassphrase: string): Promise<void> {
+  const header = await loadHeader();
+  if (!header) throw new Error('Kein Tresor gefunden.');
+  await assertRealPassphrase(realPassphrase, header);
+  if (!header.duress) return;
+  delete header.duress;
+  await saveHeader(header);
 }

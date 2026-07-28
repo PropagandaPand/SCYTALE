@@ -46,6 +46,22 @@ export interface VaultHeader {
     wrapIv: Uint8Array<ArrayBuffer>;
     wrappedDek: Uint8Array<ArrayBuffer>; // AES-256-GCM(prfKek, rawDEK)
   };
+  /**
+   * Optional DURESS guard: an extra wrap of a random THROWAWAY key under a SECOND passphrase.
+   * Byte-shaped exactly like the main DEK wrap (salt + IV + wrapped key), and it wraps random
+   * bytes, NEVER the DEK — so the duress password can only be RECOGNISED, never used to unlock;
+   * matching it triggers an irreversible crypto-erase of the whole vault (matchesDuress +
+   * vaultService.unlockBoundVault). Honesty about deniability: the guard's VALUE is opaque, but
+   * this field is present ONLY when a duress password is armed, so a forensic image of the header
+   * CAN reveal that one is configured. The deniability the feature provides is behavioural —
+   * entering it looks like a wrong passphrase, and the wiped app looks freshly installed — not
+   * at-rest. See SECURITY.md "Known limits".
+   */
+  duress?: {
+    salt: Uint8Array<ArrayBuffer>;
+    wrapIv: Uint8Array<ArrayBuffer>;
+    wrappedDek: Uint8Array<ArrayBuffer>; // AES-256-GCM(duressKek, random throwaway key)
+  };
 }
 
 export class WrongPassphraseError extends Error {
@@ -209,6 +225,70 @@ export async function unlockVault(passphrase: string, header: VaultHeader): Prom
     return await unwrapDek(kek, header);
   } catch {
     throw new WrongPassphraseError();
+  }
+}
+
+// ── Duress guard: recognise a second "panic" passphrase without unlocking anything ──
+//
+// A duress password must be RECOGNISED (so entering it can trigger a wipe) but must never
+// reveal the DEK. The guard therefore wraps a random THROWAWAY key under the duress-passphrase
+// KEK — a match means "the user typed the duress password; crypto-erase now". Its VALUE is opaque
+// (indistinguishable from random), but this field is written only when a duress password is
+// armed, so a forensic image of the header CAN reveal that one is configured — the deniability is
+// behavioural, not at-rest. See SECURITY.md "Known limits".
+
+/** Build a duress guard for `duressPassphrase`. `argon2` MUST be the vault header's params, so
+ *  matchesDuress (which derives with header.argon2) recognises it. */
+export async function createDuressGuard(
+  duressPassphrase: string,
+  argon2: Argon2Params,
+): Promise<NonNullable<VaultHeader['duress']>> {
+  const salt = crypto.getRandomValues(new Uint8Array(16)) as Uint8Array<ArrayBuffer>;
+  const kekBytes = await deriveKekBytes(duressPassphrase, salt, argon2);
+  const kek = await importKek(kekBytes);
+  // A random throwaway — extractable only so wrapKey can consume it once; never returned.
+  const decoy = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, [
+    'encrypt',
+    'decrypt',
+  ]);
+  const wrapIv = crypto.getRandomValues(new Uint8Array(IV_LEN)) as Uint8Array<ArrayBuffer>;
+  const wrappedDek = new Uint8Array(
+    await crypto.subtle.wrapKey('raw', decoy, kek, { name: 'AES-GCM', iv: wrapIv }),
+  ) as Uint8Array<ArrayBuffer>;
+  return { salt, wrapIv, wrappedDek };
+}
+
+/** True iff `passphrase` matches the vault's duress guard — i.e. the caller MUST wipe. Returns
+ *  false when no guard is set or it does not match, indistinguishable from a normal wrong
+ *  passphrase from the outside. Uses the header's Argon2 cost, exactly like the real path. */
+export async function matchesDuress(passphrase: string, header: VaultHeader): Promise<boolean> {
+  const d = header.duress;
+  if (
+    !d ||
+    !d.salt ||
+    d.salt.length < 16 ||
+    !d.wrapIv ||
+    d.wrapIv.length !== IV_LEN ||
+    !d.wrappedDek ||
+    d.wrappedDek.length < 16
+  ) {
+    return false;
+  }
+  const kekBytes = await deriveKekBytes(passphrase, d.salt, header.argon2);
+  const kek = await importKek(kekBytes);
+  try {
+    await crypto.subtle.unwrapKey(
+      'raw',
+      d.wrappedDek,
+      kek,
+      { name: 'AES-GCM', iv: d.wrapIv },
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['encrypt', 'decrypt'],
+    );
+    return true;
+  } catch {
+    return false;
   }
 }
 

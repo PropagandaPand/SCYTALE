@@ -358,6 +358,34 @@ export async function secureDeleteRecord(key: string): Promise<void> {
   await deleteRecord(key);
 }
 
+/** Best-effort secure overwrite of the vault header (meta/'vault' — the wrapped DEK) before an
+ *  irreversible wipe. Overwrites it with random bytes a few times so a flash-recovered image is
+ *  less likely to still hold the real wrapped DEK. Same honest SSD caveat as secureDeleteRecord:
+ *  the guarantee is the KEY DESTRUCTION (the header is then deleted with the DB), the overwrite
+ *  is only a cheap best-effort gesture. Used by the duress wipe. */
+export async function secureOverwriteHeader(): Promise<void> {
+  try {
+    const cur = await loadHeader();
+    const len = cur?.wrappedDek?.byteLength ?? 48;
+    for (let pass = 0; pass < 3; pass++) {
+      const garbage = {
+        version: 1,
+        argon2: cur?.argon2 ?? { memorySize: 65536, iterations: 3, parallelism: 1 },
+        salt: randomBytes(16),
+        wrapIv: randomBytes(12),
+        wrappedDek: randomBytes(len),
+      } as unknown as VaultHeader;
+      await withDB(async (d) => {
+        const tx = d.transaction('meta', 'readwrite');
+        await tx.objectStore('meta').put(garbage, 'vault');
+        await tx.done;
+      });
+    }
+  } catch {
+    /* best-effort */
+  }
+}
+
 /** Every record key starting with `prefix`. A real key-range scan, not a sealed
  *  index blob — an index blob would recreate exactly the "one growing blob" problem
  *  the attachment store exists to avoid. Used to enumerate an attachment's chunks

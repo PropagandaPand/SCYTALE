@@ -146,6 +146,27 @@ tightly gated:
 **Auto-lock:** after 5 minutes of inactivity the DEK is dropped from RAM and the app requires
 the passphrase (or Face ID) again. A **runtime self-test** checks the primitives at startup.
 
+**Duress password (optional):** a second passphrase you can set under *Security*. Entered at the
+unlock screen it does **not** unlock — it irreversibly crypto-erases the whole vault (best-effort
+overwrite of the header, then deletes the IndexedDB stores, tears down push + the service worker)
+and drops the app to a fresh onboarding state, indistinguishable from a mistyped passphrase to
+anyone watching. It is probed on **every** unlock attempt, including while the brute-force lockout
+is active (the coercion case), and the wrong-passphrase probe runs at a **constant cost** so timing
+never reveals whether a duress password is set. It must differ from the real passphrase, and it is
+**mutually exclusive with Face ID / Touch ID** — a biometric door would open the real vault without
+ever touching the passphrase field, so arming one requires the other to be off. The guard on disk
+is an extra wrap of a **random throwaway key**, byte-shaped like any other wrapped key; it wraps
+random bytes, never the DEK, so it can only be *recognised*, never used to unlock. Honest limits:
+the real guarantee is **key destruction** — the DEK is derivable only from the real passphrase,
+which a coercer holding the duress password does not have, so once the header is gone the sealed
+records are unrecoverable ciphertext even from a seized device image. The deniability is
+**behavioural** (a wrong-looking passphrase + a fresh-looking app), **not at-rest**: because the
+guard is present only when armed, a forensic image of the header can reveal that a duress password
+is configured. The best-effort overwrite hardens against a *later* coercion of the real passphrase,
+but on flash/SSD it cannot guarantee the original cells are physically gone (the FTL wear-levels —
+the guarantee is the key destruction, not the overwrite). It wipes **this device only**: copies
+already delivered to contacts, and any backup file you exported, are out of its reach.
+
 ---
 
 ## 2. Identity & verification

@@ -37,7 +37,9 @@ export function DuressSetup({
   async function save() {
     if (busy || !ready) return;
     if (mode === 'set') {
-      if (duress.length < 8) return setErr(t('Mindestens 8 Zeichen.'));
+      // No minimum length: the duress word protects nothing — it's only a trigger, and a short,
+      // easy-to-type word is better under stress. It only has to be non-empty (button-gated) and
+      // differ from the real passphrase (enforced in setDuressPassword).
       if (duress !== confirm) return setErr(t('Die Duress-Passwörter stimmen nicht überein.'));
     }
     setBusy(true);

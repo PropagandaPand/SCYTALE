@@ -2363,6 +2363,19 @@ html.privacy-curtain-on .privacy-curtain {
   gap: 8px;
   margin-top: 24px;
 }
+/* Section label above a group of setting rows — turns a flat list into scannable menus. */
+.settings-sec {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted, #7d828b);
+  padding: 4px 4px 2px;
+  margin-top: 14px;
+}
+.settings-sec:first-child {
+  margin-top: 0;
+}
 .setting-row {
   display: flex;
   align-items: center;

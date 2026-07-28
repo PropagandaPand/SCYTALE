@@ -5539,39 +5539,54 @@ export function Messenger({ dek, onLock }: Props) {
 
           {error && <div className="err-note">{error}</div>}
 
-          {/* Everything else as a scannable settings list, not four paragraphs. */}
+          {/* Grouped into sections so it reads as menus, not one long undifferentiated list. */}
           <div className="settings-list">
-            {pushSupported() && (
-              <button className="setting-row" onClick={() => void togglePush()} disabled={notifBusy}>
-                <span className="setting-ic"><IconBell /></span>
+            <div className="settings-sec">{t('Sicherheit')}</div>
+            {bioSupported && (
+              <button
+                className="setting-row"
+                role="switch"
+                aria-checked={bioOn}
+                onClick={() => {
+                  if (bioOn) {
+                    if (confirm(t('Face ID / Touch ID entfernen? Der Tresor bleibt per Passphrase entsperrbar.'))) {
+                      void disableBiometricUnlock()
+                        .then(() => setBioOn(false))
+                        .catch(() => {}); // header keeps prf → toggle stays on, which is the honest state
+                    }
+                  } else {
+                    setBioEnroll(true);
+                  }
+                }}
+              >
+                <span className="setting-ic"><IconLock size={15} /></span>
                 <span className="setting-tx">
-                  <span className="setting-title">{t('Benachrichtigungen')}</span>
-                  <span className="setting-sub">{t('Inhaltloses Wecksignal — nie Absender oder Text')}</span>
+                  <span className="setting-title">{t('Face ID / Touch ID')}</span>
+                  <span className="setting-sub">{t('Entsperren ohne Passphrase — Schlüssel bleibt gleich')}</span>
                 </span>
-                <span className={`switch${notifOn ? ' on' : ''}`}>
+                <span className={`switch${bioOn ? ' on' : ''}`}>
                   <span className="knob" />
                 </span>
               </button>
             )}
 
-            <button className="setting-row" onClick={() => setView('learn')}>
-              <span className="setting-ic"><IconGraduation /></span>
+            <button
+              className="setting-row"
+              role="switch"
+              aria-checked={duressOn}
+              onClick={() => setDuressModal(duressOn ? 'remove' : 'set')}
+            >
+              <span className="setting-ic"><IconShield size={15} /></span>
               <span className="setting-tx">
-                <span className="setting-title">{t('So funktioniert der Schutz')}</span>
-                <span className="setting-sub">{t('In 5 Schritten einfach erklärt')}</span>
+                <span className="setting-title">{t('Duress-Passwort')}</span>
+                <span className="setting-sub">{t('Notfall-Passwort, das beim Entsperren den Tresor unwiderruflich löscht')}</span>
               </span>
-              <span className="setting-go"><IconChevron /></span>
+              <span className={`switch${duressOn ? ' on' : ''}`}>
+                <span className="knob" />
+              </span>
             </button>
 
-            <button className="setting-row" onClick={() => setLangSheet(true)}>
-              <span className="setting-ic"><IconGlobe /></span>
-              <span className="setting-tx">
-                <span className="setting-title">{t('Sprache')}</span>
-                <span className="setting-sub">{LANGS.find((l) => l.code === getLang())?.name ?? getLang()}</span>
-              </span>
-              <span className="setting-go"><IconChevron /></span>
-            </button>
-
+            <div className="settings-sec">{t('Geräte')}</div>
             <button
               className="setting-row"
               onClick={() => {
@@ -5596,60 +5611,7 @@ export function Messenger({ dek, onLock }: Props) {
               <span className="setting-go"><IconChevron /></span>
             </button>
 
-            {bioSupported && (
-              <button
-                className="setting-row"
-                role="switch"
-                aria-checked={bioOn}
-                onClick={() => {
-                  if (bioOn) {
-                    if (confirm(t('Face ID / Touch ID entfernen? Der Tresor bleibt per Passphrase entsperrbar.'))) {
-                      void disableBiometricUnlock()
-                        .then(() => setBioOn(false))
-                        .catch(() => {}); // header keeps prf → toggle stays on, which is the honest state
-                    }
-                  } else {
-                    if (duressOn) {
-                      setError(t('Duress-Passwort und Face ID / Touch ID schließen sich gegenseitig aus — erst das andere ausschalten.'));
-                      return;
-                    }
-                    setBioEnroll(true);
-                  }
-                }}
-              >
-                <span className="setting-ic"><IconLock size={15} /></span>
-                <span className="setting-tx">
-                  <span className="setting-title">{t('Face ID / Touch ID')}</span>
-                  <span className="setting-sub">{t('Entsperren ohne Passphrase — Schlüssel bleibt gleich')}</span>
-                </span>
-                <span className={`switch${bioOn ? ' on' : ''}`}>
-                  <span className="knob" />
-                </span>
-              </button>
-            )}
-
-            <button
-              className="setting-row"
-              role="switch"
-              aria-checked={duressOn}
-              onClick={() => {
-                if (!duressOn && bioOn) {
-                  setError(t('Duress-Passwort und Face ID / Touch ID schließen sich gegenseitig aus — erst das andere ausschalten.'));
-                  return;
-                }
-                setDuressModal(duressOn ? 'remove' : 'set');
-              }}
-            >
-              <span className="setting-ic"><IconShield size={15} /></span>
-              <span className="setting-tx">
-                <span className="setting-title">{t('Duress-Passwort')}</span>
-                <span className="setting-sub">{t('Notfall-Passwort, das beim Entsperren den Tresor unwiderruflich löscht')}</span>
-              </span>
-              <span className={`switch${duressOn ? ' on' : ''}`}>
-                <span className="knob" />
-              </span>
-            </button>
-
+            <div className="settings-sec">{t('Daten & Backup')}</div>
             <button className="setting-row" onClick={() => setBackupMode('export')}>
               <span className="setting-ic"><IconArchive /></span>
               <span className="setting-tx">
@@ -5668,6 +5630,38 @@ export function Messenger({ dek, onLock }: Props) {
               <span className="setting-go"><IconChevron /></span>
             </button>
 
+            <div className="settings-sec">{t('Allgemein')}</div>
+            {pushSupported() && (
+              <button className="setting-row" onClick={() => void togglePush()} disabled={notifBusy}>
+                <span className="setting-ic"><IconBell /></span>
+                <span className="setting-tx">
+                  <span className="setting-title">{t('Benachrichtigungen')}</span>
+                  <span className="setting-sub">{t('Inhaltloses Wecksignal — nie Absender oder Text')}</span>
+                </span>
+                <span className={`switch${notifOn ? ' on' : ''}`}>
+                  <span className="knob" />
+                </span>
+              </button>
+            )}
+
+            <button className="setting-row" onClick={() => setLangSheet(true)}>
+              <span className="setting-ic"><IconGlobe /></span>
+              <span className="setting-tx">
+                <span className="setting-title">{t('Sprache')}</span>
+                <span className="setting-sub">{LANGS.find((l) => l.code === getLang())?.name ?? getLang()}</span>
+              </span>
+              <span className="setting-go"><IconChevron /></span>
+            </button>
+
+            <button className="setting-row" onClick={() => setView('learn')}>
+              <span className="setting-ic"><IconGraduation /></span>
+              <span className="setting-tx">
+                <span className="setting-title">{t('So funktioniert der Schutz')}</span>
+                <span className="setting-sub">{t('In 5 Schritten einfach erklärt')}</span>
+              </span>
+              <span className="setting-go"><IconChevron /></span>
+            </button>
+
             <button className="setting-row" onClick={() => setBugOpen(true)}>
               <span className="setting-ic"><IconBug /></span>
               <span className="setting-tx">
@@ -5677,6 +5671,7 @@ export function Messenger({ dek, onLock }: Props) {
               <span className="setting-go"><IconChevron /></span>
             </button>
 
+            <div className="settings-sec">{t('Konto')}</div>
             <button className="setting-row danger" onClick={() => setDeleteOpen(true)}>
               <span className="setting-ic"><IconTrash size={15} /></span>
               <span className="setting-tx">

@@ -7,6 +7,10 @@ import type { Lang } from './i18n';
 
 export const dicts: Partial<Record<Lang, Record<string, string>>> = {
   en: {
+    "Sicherheit": "Security",
+    "Daten & Backup": "Data & Backup",
+    "Allgemein": "General",
+    "Konto": "Account",
     "Duress-Passwort und Face ID / Touch ID schließen sich gegenseitig aus — erst das andere ausschalten.": "The duress password and Face ID / Touch ID are mutually exclusive — turn the other off first.",
     "Duress-Passwort einrichten": "Set up duress password",
     "Duress-Passwort entfernen": "Remove duress password",
@@ -379,6 +383,10 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Verknüpftes Gerät": "Linked device",
   },
   es: {
+    "Sicherheit": "Seguridad",
+    "Daten & Backup": "Datos y copia de seguridad",
+    "Allgemein": "General",
+    "Konto": "Cuenta",
     "Duress-Passwort und Face ID / Touch ID schließen sich gegenseitig aus — erst das andere ausschalten.": "La contraseña de coacción y Face ID / Touch ID son mutuamente excluyentes: desactiva primero la otra.",
     "Duress-Passwort einrichten": "Configurar contraseña de coacción",
     "Duress-Passwort entfernen": "Quitar contraseña de coacción",
@@ -751,6 +759,10 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Verknüpftes Gerät": "Dispositivo vinculado",
   },
   fr: {
+    "Sicherheit": "Sécurité",
+    "Daten & Backup": "Données et sauvegarde",
+    "Allgemein": "Général",
+    "Konto": "Compte",
     "Duress-Passwort und Face ID / Touch ID schließen sich gegenseitig aus — erst das andere ausschalten.": "Le mot de passe de contrainte et Face ID / Touch ID s’excluent mutuellement — désactivez d’abord l’autre.",
     "Duress-Passwort einrichten": "Configurer le mot de passe de contrainte",
     "Duress-Passwort entfernen": "Retirer le mot de passe de contrainte",
@@ -1123,6 +1135,10 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Verknüpftes Gerät": "Appareil lié",
   },
   it: {
+    "Sicherheit": "Sicurezza",
+    "Daten & Backup": "Dati e backup",
+    "Allgemein": "Generale",
+    "Konto": "Account",
     "Duress-Passwort und Face ID / Touch ID schließen sich gegenseitig aus — erst das andere ausschalten.": "La password di coercizione e Face ID / Touch ID si escludono a vicenda: disattiva prima l’altra.",
     "Duress-Passwort einrichten": "Configura password di coercizione",
     "Duress-Passwort entfernen": "Rimuovi password di coercizione",
@@ -1495,6 +1511,10 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Verknüpftes Gerät": "Dispositivo collegato",
   },
   pt: {
+    "Sicherheit": "Segurança",
+    "Daten & Backup": "Dados e backup",
+    "Allgemein": "Geral",
+    "Konto": "Conta",
     "Duress-Passwort und Face ID / Touch ID schließen sich gegenseitig aus — erst das andere ausschalten.": "A palavra-passe de coação e o Face ID / Touch ID são mutuamente exclusivos — desative primeiro o outro.",
     "Duress-Passwort einrichten": "Configurar palavra-passe de coação",
     "Duress-Passwort entfernen": "Remover palavra-passe de coação",
@@ -1867,6 +1887,10 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Verknüpftes Gerät": "Dispositivo vinculado",
   },
   nl: {
+    "Sicherheit": "Beveiliging",
+    "Daten & Backup": "Gegevens & back-up",
+    "Allgemein": "Algemeen",
+    "Konto": "Account",
     "Duress-Passwort und Face ID / Touch ID schließen sich gegenseitig aus — erst das andere ausschalten.": "Het dwangwachtwoord en Face ID / Touch ID sluiten elkaar uit — schakel eerst het andere uit.",
     "Duress-Passwort einrichten": "Dwangwachtwoord instellen",
     "Duress-Passwort entfernen": "Dwangwachtwoord verwijderen",
@@ -2239,6 +2263,10 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Verknüpftes Gerät": "Gekoppeld apparaat",
   },
   pl: {
+    "Sicherheit": "Bezpieczeństwo",
+    "Daten & Backup": "Dane i kopia zapasowa",
+    "Allgemein": "Ogólne",
+    "Konto": "Konto",
     "Duress-Passwort und Face ID / Touch ID schließen sich gegenseitig aus — erst das andere ausschalten.": "Hasło przymusu i Face ID / Touch ID wzajemnie się wykluczają — najpierw wyłącz drugie.",
     "Duress-Passwort einrichten": "Skonfiguruj hasło przymusu",
     "Duress-Passwort entfernen": "Usuń hasło przymusu",
@@ -2611,6 +2639,10 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Verknüpftes Gerät": "Powiązane urządzenie",
   },
   ru: {
+    "Sicherheit": "Безопасность",
+    "Daten & Backup": "Данные и резервная копия",
+    "Allgemein": "Общие",
+    "Konto": "Аккаунт",
     "Duress-Passwort und Face ID / Touch ID schließen sich gegenseitig aus — erst das andere ausschalten.": "Пароль под принуждением и Face ID / Touch ID взаимоисключающие — сначала отключите другое.",
     "Duress-Passwort einrichten": "Настроить пароль под принуждением",
     "Duress-Passwort entfernen": "Удалить пароль под принуждением",
@@ -2983,6 +3015,10 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Verknüpftes Gerät": "Связанное устройство",
   },
   uk: {
+    "Sicherheit": "Безпека",
+    "Daten & Backup": "Дані та резервна копія",
+    "Allgemein": "Загальні",
+    "Konto": "Обліковий запис",
     "Duress-Passwort und Face ID / Touch ID schließen sich gegenseitig aus — erst das andere ausschalten.": "Пароль примусу та Face ID / Touch ID взаємовиключні — спершу вимкніть інше.",
     "Duress-Passwort einrichten": "Налаштувати пароль примусу",
     "Duress-Passwort entfernen": "Видалити пароль примусу",
@@ -3355,6 +3391,10 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Verknüpftes Gerät": "Пов'язаний пристрій",
   },
   tr: {
+    "Sicherheit": "Güvenlik",
+    "Daten & Backup": "Veri ve Yedek",
+    "Allgemein": "Genel",
+    "Konto": "Hesap",
     "Duress-Passwort und Face ID / Touch ID schließen sich gegenseitig aus — erst das andere ausschalten.": "Baskı parolası ile Face ID / Touch ID birbirini dışlar — önce diğerini kapatın.",
     "Duress-Passwort einrichten": "Baskı parolası ayarla",
     "Duress-Passwort entfernen": "Baskı parolasını kaldır",
@@ -3727,6 +3767,10 @@ export const dicts: Partial<Record<Lang, Record<string, string>>> = {
     "Verknüpftes Gerät": "Bağlantılı cihaz",
   },
   zh: {
+    "Sicherheit": "安全",
+    "Daten & Backup": "数据与备份",
+    "Allgemein": "常规",
+    "Konto": "账户",
     "Duress-Passwort und Face ID / Touch ID schließen sich gegenseitig aus — erst das andere ausschalten.": "胁迫密码与 Face ID / Touch ID 互斥——请先关闭另一项。",
     "Duress-Passwort einrichten": "设置胁迫密码",
     "Duress-Passwort entfernen": "移除胁迫密码",

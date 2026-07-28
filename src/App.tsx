@@ -11,6 +11,7 @@ import {
   unlockWithBiometric,
   biometricAvailable,
   biometricEnrolled,
+  duressEnabled,
 } from './lib/vaultService';
 import { cryptoSelfTest } from './lib/selftest';
 import { hasWebCrypto, isInAppBrowser, isInstagram } from './lib/environment';
@@ -85,11 +86,19 @@ export function App() {
     }
     let alive = true;
     void (async () => {
-      const [avail, enrolled] = await Promise.all([biometricAvailable(), biometricEnrolled()]);
+      const [avail, enrolled, duressArmed] = await Promise.all([
+        biometricAvailable(),
+        biometricEnrolled(),
+        duressEnabled(),
+      ]);
       if (!alive) return;
       const can = avail && enrolled;
       setCanBiometric(can);
-      if (can && !autoBioTriedRef.current) {
+      // When a duress password is armed, do NOT auto-launch Face ID / Touch ID: a coerced
+      // biometric would open the REAL vault before the user could type the duress word. The
+      // passphrase field must be the first thing reachable. The manual biometric button stays
+      // available for a voluntary unlock.
+      if (can && !duressArmed && !autoBioTriedRef.current) {
         autoBioTriedRef.current = true;
         void unlockBiometric();
       }

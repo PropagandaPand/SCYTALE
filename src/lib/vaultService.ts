@@ -63,16 +63,6 @@ export class DuressEqualsRealError extends Error {
   }
 }
 
-/** Duress and biometric unlock are mutually exclusive: a Face ID / Touch ID unlock bypasses the
- *  passphrase field entirely, so a coercer could open the REAL vault and the panic wipe would
- *  never fire. Arming one requires the other to be off. */
-export class DuressBiometricConflictError extends Error {
-  constructor() {
-    super('Duress-Passwort und Face ID / Touch ID schließen sich gegenseitig aus.');
-    this.name = 'DuressBiometricConflictError';
-  }
-}
-
 /** Re-export so the UI can show the wrong-passphrase state without a second import. */
 export { WrongPassphraseError, lockoutStatus };
 export type { LockoutInfo };
@@ -215,10 +205,6 @@ export async function enableBiometricUnlock(passphrase: string): Promise<void> {
 
   const header = await loadHeader();
   if (!header) throw new Error('Kein Tresor gefunden.');
-  // Mutually exclusive with a duress password: a biometric door bypasses the passphrase field
-  // where duress is typed, so enabling it while duress is armed would silently re-open the panic
-  // wipe's bypass. Refuse — the user must remove the duress password first.
-  if (header.duress) throw new DuressBiometricConflictError();
 
   // Reproduce the exact passphrase the vault was sealed with (device-binding suffix).
   const suffix = await recoverBindingSuffix(header);
@@ -345,10 +331,6 @@ async function assertRealPassphrase(realPassphrase: string, header: VaultHeader)
 export async function setDuressPassword(realPassphrase: string, duressPassphrase: string): Promise<void> {
   const header = await loadHeader();
   if (!header) throw new Error('Kein Tresor gefunden.');
-  // Mutually exclusive with biometric unlock: Face ID / Touch ID would open the real vault
-  // without ever touching the passphrase field, bypassing the panic wipe. Refuse to arm duress
-  // while biometric is enrolled — the user must turn Face ID / Touch ID off first.
-  if (header.prf) throw new DuressBiometricConflictError();
   await assertRealPassphrase(realPassphrase, header);
 
   const suffix = await recoverBindingSuffix(header);

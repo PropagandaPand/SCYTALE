@@ -4,7 +4,6 @@ import {
   removeDuressPassword,
   WrongPassphraseError,
   DuressEqualsRealError,
-  DuressBiometricConflictError,
 } from './lib/vaultService';
 import { IconEye, IconEyeOff } from './icons';
 import { t } from './lib/i18n';
@@ -53,7 +52,6 @@ export function DuressSetup({
     } catch (e) {
       if (e instanceof WrongPassphraseError) setErr(t('Falsche Passphrase.'));
       else if (e instanceof DuressEqualsRealError) setErr(t('Das Duress-Passwort darf nicht deine echte Passphrase sein.'));
-      else if (e instanceof DuressBiometricConflictError) setErr(t('Duress-Passwort und Face ID / Touch ID schließen sich gegenseitig aus — erst das andere ausschalten.'));
       else setErr(t('Speichern fehlgeschlagen: {msg}', { msg: (e as Error).message }));
       setBusy(false);
     }

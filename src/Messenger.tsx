@@ -1350,7 +1350,14 @@ export function Messenger({ dek, onLock }: Props) {
         const d = dels.find((x) => x.deliveryId === id)!;
         if (d.status === 'sent' || d.status === 'stale') return; // terminal per delivery — no change, no banner
         arr[fi] = { ...arr[fi], deliveries: dels.map((x) => (x.deliveryId === id ? { ...x, status } : x)) };
-        if (status === 'failed' && errorMsg) setError(errorMsg);
+        // Global error banner ONLY when the message reached NO device at all. A single device's
+        // inbox being full/offline (a rarely-online or stale secondary device) still delivered to
+        // the peer's live devices — that partial is shown subtly on the bubble, and must not pop a
+        // "mailbox full" alarm for a message that actually arrived. aggregateDelivery is 'failed'
+        // only when EVERY live device failed (and 'pending' while any is still in flight).
+        if (status === 'failed' && errorMsg && aggregateDelivery(arr[fi].deliveries!).label === 'failed') {
+          setError(errorMsg);
+        }
         void saveMessages(dek, roomId, arr);
         commitMessages();
         bump();

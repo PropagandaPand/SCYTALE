@@ -455,10 +455,10 @@ export async function makeContact(myMasterPub: MasterPub, bundle: PreKeyBundle):
  *  - roomId + fingerprint are ALWAYS derived LOCALLY from (myMaster, entry.pm),
  *    never taken from the wire (the entry carries neither) → no attacker-steered
  *    room / mis-routing / overwrite.
- *  - NO ratchet/bundle/deviceList is imported → the contact is SEND-BLOCKED
- *    (bundle=undefined, empty sessions). It becomes reachable only once the real
- *    peer learns my new device (WP4 re-gossip) and writes. So a substituted/MITM'd
- *    linked device gains NO immediate send capability to my whole contact graph.
+ *  - NO ratchet or live bundle/session is imported. An optional peer DeviceList
+ *    is decoded and master-signature/epoch/rollback verified before adoption; if
+ *    absent or invalid the contact remains send-blocked. Either way no ratchet
+ *    state is cloned onto the linked device.
  *  - `vf` is carried ONLY as a suggestion (verifiedSuggestion), NEVER as verified.
  *  - FILL GAPS ONLY on an existing contact — never overwrite pinned identity, keys,
  *    or verified (TOFU on this device wins).

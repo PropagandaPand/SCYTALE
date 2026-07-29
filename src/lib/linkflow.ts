@@ -32,13 +32,12 @@ import {
   encodeLinkRequest,
   encodeLinkOffer,
   decodeLinkOffer,
-  encodeLinkGrant,
+  decodeLinkGrant,
   verifyLinkGrant,
   generateSasEphemeral,
   linkingSas,
   sealPayload,
   SEALED_LINK_OFFER,
-  SEALED_LINK_GRANT,
   isPrimaryDevice,
   type LinkRequest,
   type SignedPreKeyPublic,
@@ -50,10 +49,18 @@ import {
   type IdentityKeys,
   type DeviceList,
   bytesEqual,
+  getSodium,
   type Bytes,
 } from '../crypto';
 import { installLinkedIdentity } from './identity';
-import { issueAndSaveLinkGrant } from './devices';
+import {
+  issueAndSaveLinkGrant,
+  loadOrCreateOwnDeviceList,
+} from './devices';
+import {
+  clearPendingLinkGrantAndRecover,
+} from './linkIntent';
+import type { ConfirmedNewDeviceLinkIntent } from './linkRecovery';
 
 /** Everything a linking attempt holds before it commits. Discard = full abort. */
 export interface LinkSession {
@@ -127,6 +134,209 @@ function requireConfirmed(session: LinkSession, role: LinkSession['role']): void
   if (!approved || approved !== confirmationSnapshot(session)) {
     throw new Error('SAS wurde nicht ausdrücklich bestätigt — Kopplung abgebrochen.');
   }
+}
+
+function sameSignedPreKey(a: SignedPreKeyPublic, b: SignedPreKeyPublic): boolean {
+  return (
+    a.id === b.id &&
+    bytesEqual(a.pub, b.pub) &&
+    bytesEqual(a.signature, b.signature)
+  );
+}
+
+async function reconstructNewLinkSession(
+  intent: ConfirmedNewDeviceLinkIntent,
+  id: IdentityKeys,
+  currentSpk: SignedPreKeyPublic | null,
+  requireCurrentGeneration = true,
+): Promise<LinkSession> {
+  const request = await decodeLinkRequest(intent.requestToken);
+  const offer = decodeLinkOffer(intent.offerBytes);
+  if (
+    (await encodeLinkRequest(request)) !== intent.requestToken ||
+    !bytesEqual(encodeLinkOffer(offer), intent.offerBytes)
+  ) {
+    throw new Error('Gespeichertes Kopplungs-Transcript ist nicht kanonisch.');
+  }
+  if (
+    !bytesEqual(request.deviceSignPub, id.sign.publicKey) ||
+    !bytesEqual(request.deviceDhPub, id.dh.publicKey) ||
+    (currentSpk !== null && !sameSignedPreKey(request.signedPreKey, currentSpk))
+  ) {
+    throw new Error('Gespeicherte Kopplung gehört nicht zu aktueller Geräte-Identität/SPK.');
+  }
+  const sodium = await getSodium();
+  const derivedEphPub = new Uint8Array(
+    sodium.crypto_scalarmult_base(intent.sasEphPrivate),
+  );
+  if (!bytesEqual(derivedEphPub, request.sasEphPub)) {
+    throw new Error('Gespeichertes SAS-Ephemeral-Keypair ist inkohärent.');
+  }
+  const isPreInstallIdentity = bytesEqual(id.master.publicKey, intent.preLinkMasterPub);
+  const isCommittedLinkedIdentity =
+    !!id.previousMasterPub &&
+    bytesEqual(id.previousMasterPub, intent.preLinkMasterPub) &&
+    bytesEqual(id.master.publicKey, offer.masterPub) &&
+    id.epoch === offer.epoch;
+  if (requireCurrentGeneration && !isPreInstallIdentity && !isCommittedLinkedIdentity) {
+    throw new Error('Gespeicherte Kopplung passt zu keiner zulässigen Identity-Generation.');
+  }
+  const myEph: KeyPair = {
+    publicKey: request.sasEphPub,
+    privateKey: intent.sasEphPrivate,
+  };
+  const sas = await linkingSas({
+    role: 'new',
+    myEph,
+    request,
+    offer: { ...offer, masterPub: offer.masterPub as MasterPub },
+  });
+  return {
+    role: 'new',
+    myEph,
+    sas,
+    request,
+    offer,
+    approvedMasterPub: offer.masterPub,
+    peerSignPub: request.deviceSignPub,
+    peerDhPub: request.deviceDhPub,
+  };
+}
+
+/**
+ * Material for the encrypted recovery record. Only callable for the exact
+ * immutable transcript already confirmed through confirmLinkSession().
+ */
+export async function createConfirmedNewDeviceLinkIntent(
+  session: LinkSession,
+  id: IdentityKeys,
+  currentSpk: SignedPreKeyPublic,
+  createdAt = Date.now(),
+): Promise<ConfirmedNewDeviceLinkIntent> {
+  requireConfirmed(session, 'new');
+  if (!session.offer) throw new Error('Kopplungs-Angebot fehlt.');
+  const intent: ConfirmedNewDeviceLinkIntent = {
+    createdAt,
+    preLinkMasterPub: id.master.publicKey,
+    sasEphPrivate: session.myEph.privateKey,
+    requestToken: await encodeLinkRequest(session.request),
+    offerBytes: encodeLinkOffer(session.offer),
+  };
+  const reconstructed = await reconstructNewLinkSession(intent, id, currentSpk);
+  // Recompute, then compare the entire immutable snapshot — never persist a
+  // caller-supplied `confirmed` bit or saved SAS display value.
+  if (confirmationSnapshot(reconstructed) !== confirmationSnapshot(session)) {
+    throw new Error('Bestätigte Kopplungs-Session weicht vom rekonstruierten Transcript ab.');
+  }
+  return intent;
+}
+
+/**
+ * Boot recovery: strictly decode the transcript, bind it to current local
+ * identity/SPK, prove the X25519 keypair, recompute the SAS, and only then
+ * recreate the in-memory confirmation capability.
+ */
+export async function restoreConfirmedNewDeviceLinkSession(
+  intent: ConfirmedNewDeviceLinkIntent,
+  id: IdentityKeys,
+  currentSpk: SignedPreKeyPublic,
+): Promise<LinkSession> {
+  const session = await reconstructNewLinkSession(intent, id, currentSpk);
+  return confirmLinkSession(session);
+}
+
+/**
+ * Reconstruct a rejection-only transcript. Unlike active recovery this does
+ * not create a confirmation capability, so completeLinkOnN remains impossible.
+ * Current SPK/master generation may legitimately have moved on after discard;
+ * the immutable request still binds the unchanged device sign/DH keys.
+ */
+export async function restoreDiscardedNewDeviceLinkSession(
+  intent: ConfirmedNewDeviceLinkIntent,
+  id: IdentityKeys,
+): Promise<LinkSession> {
+  return reconstructNewLinkSession(intent, id, null, false);
+}
+
+async function verifyNewDeviceLinkGrantTranscript(
+  id: IdentityKeys,
+  session: LinkSession,
+  grant: LinkGrant,
+): Promise<boolean> {
+  if (session.role !== 'new') return false;
+  return (
+    !!session.approvedMasterPub &&
+    !!session.offer &&
+    bytesEqual(session.approvedMasterPub, grant.masterPub) &&
+    session.offer.epoch === grant.epoch &&
+    (await verifyLinkGrant(
+      grant,
+      id.sign.publicKey,
+      id.dh.publicKey,
+      session.request.signedPreKey,
+      session.request,
+      session.offer,
+    ))
+  );
+}
+
+export async function verifyConfirmedNewDeviceLinkGrant(
+  id: IdentityKeys,
+  session: LinkSession,
+  grant: LinkGrant,
+): Promise<boolean> {
+  requireConfirmed(session, 'new');
+  return verifyNewDeviceLinkGrantTranscript(id, session, grant);
+}
+
+export async function verifyDiscardedNewDeviceLinkGrant(
+  id: IdentityKeys,
+  session: LinkSession,
+  grant: LinkGrant,
+): Promise<boolean> {
+  // Deliberately does not call requireConfirmed: a discarded transcript may
+  // reject/retire its own late credential, never install it.
+  return verifyNewDeviceLinkGrantTranscript(id, session, grant);
+}
+
+/**
+ * Select only relay rows that cryptographically belong to this exact confirmed
+ * N-side transcript. This is deliberately a selector, not an ACK operation:
+ * an explicit local discard may retire its own already-queued credential, but
+ * must not consume anonymous sibling rows from another/fake attempt.
+ */
+export async function confirmedLinkGrantRows(
+  id: IdentityKeys,
+  session: LinkSession,
+  pending: ReadonlyMap<number, Bytes>,
+): Promise<number[]> {
+  requireConfirmed(session, 'new');
+  const matching: number[] = [];
+  for (const [ackId, payload] of pending) {
+    try {
+      const grant = await decodeLinkGrant(payload);
+      if (await verifyConfirmedNewDeviceLinkGrant(id, session, grant)) matching.push(ackId);
+    } catch {
+      // Anonymous malformed/foreign candidates are intentionally not selected.
+    }
+  }
+  return matching;
+}
+
+/** A retry after the atomic identity/list commit must not install the grant a
+ * second time and overwrite previousMasterPub. It still verifies the complete
+ * confirmed transcript before accepting the durable identity as its result. */
+export async function confirmedLinkGrantAlreadyInstalled(
+  id: IdentityKeys,
+  session: LinkSession,
+  grant: LinkGrant,
+): Promise<boolean> {
+  if (!(await verifyConfirmedNewDeviceLinkGrant(id, session, grant))) return false;
+  return (
+    bytesEqual(id.master.publicKey, grant.masterPub) &&
+    id.epoch === grant.epoch &&
+    bytesEqual(id.deviceCert, grant.deviceCert)
+  );
 }
 
 // ── N (new device) ─────────────────────────────────────────────────────────
@@ -296,11 +506,37 @@ export async function beginLinkOnP(
  * it before publication. A failed send is retried idempotently from the same list
  * entry/cert; createLinkGrant does not bump the version again.
  */
+export class LinkGrantDeliveryPendingError extends Error {
+  readonly committedList: DeviceList;
+  readonly pendingTarget: Bytes;
+
+  constructor(committedList: DeviceList, pendingTarget: Bytes, cause?: unknown) {
+    super('Gerät wurde dauerhaft autorisiert, aber der Kopplungs-Nachweis ist noch nicht bestätigt zugestellt.');
+    this.name = 'LinkGrantDeliveryPendingError';
+    this.committedList = committedList;
+    this.pendingTarget = new Uint8Array(pendingTarget);
+    (this as { cause?: unknown }).cause = cause;
+  }
+}
+
+export class LinkGrantDeliveryCancelledError extends Error {
+  readonly currentList: DeviceList;
+  readonly discardedCorruptReplacement: boolean;
+
+  constructor(currentList: DeviceList, discardedCorruptReplacement: boolean) {
+    super('Die ausstehende Kopplung wurde parallel beendet oder widerrufen.');
+    this.name = 'LinkGrantDeliveryCancelledError';
+    this.currentList = currentList;
+    this.discardedCorruptReplacement = discardedCorruptReplacement;
+  }
+}
+
 export async function completeLinkOnP(
   dek: CryptoKey,
   id: IdentityKeys,
   session: LinkSession,
   send: (recipientSignPub: Bytes, sealedPayload: Bytes) => Promise<void>,
+  publishCommitted?: (list: DeviceList) => Promise<void> | void,
 ): Promise<DeviceList> {
   requireConfirmed(session, 'primary');
   if (
@@ -311,14 +547,50 @@ export async function completeLinkOnP(
     throw new Error('Die Hauptidentität hat sich seit der SAS-Bestätigung geändert — Kopplung neu starten.');
   }
 
-  const { grant, newList } = await issueAndSaveLinkGrant(
+  const { newList, sealedPayload, pendingRecord } = await issueAndSaveLinkGrant(
     dek,
     id,
     session.request,
     session.offer,
   );
-  const sealedGrant = await sealPayload(session.peerDhPub, SEALED_LINK_GRANT, await encodeLinkGrant(grant));
-  await send(session.peerSignPub, sealedGrant);
+  try {
+    // Publish the authoritative post-CAS snapshot before N can receive the
+    // credential and immediately send a bootreq. If this local barrier fails,
+    // retain the exact delivery intent and do not expose the Grant yet.
+    await publishCommitted?.(newList);
+    await send(session.peerSignPub, sealedPayload);
+    const cleanup = await clearPendingLinkGrantAndRecover(dek, pendingRecord);
+    if (cleanup.status !== 'cleared') {
+      // A cancel/replacement won the CAS while this receipt was in flight.
+      // Reconcile against current durable authority; never report/gossip A's
+      // now-stale list and never hide a successor Pending B.
+      const currentList = await loadOrCreateOwnDeviceList(dek, id);
+      if (!currentList) throw new Error('Aktuelle Geräteliste nach Kopplungs-Race nicht verfügbar.');
+      if (cleanup.status === 'replaced') {
+        throw new LinkGrantDeliveryPendingError(
+          currentList,
+          cleanup.pending.recipientSignPub,
+          new Error('Eine neuere ausstehende Kopplung hat den Receipt-Cleanup überholt.'),
+        );
+      }
+      throw new LinkGrantDeliveryCancelledError(
+        currentList,
+        cleanup.status === 'discarded-corrupt',
+      );
+    }
+  } catch (cause) {
+    if (
+      cause instanceof LinkGrantDeliveryPendingError ||
+      cause instanceof LinkGrantDeliveryCancelledError
+    ) {
+      throw cause;
+    }
+    throw new LinkGrantDeliveryPendingError(
+      newList,
+      session.request.deviceSignPub,
+      cause,
+    );
+  }
   return newList;
 }
 

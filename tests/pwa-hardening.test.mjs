@@ -36,6 +36,11 @@ const appSource = readFileSync(join(root, 'src', 'App.tsx'), 'utf8');
 const cssSource = readFileSync(join(root, 'src', 'app.css'), 'utf8');
 ok('App setzt den Curtain synchron im Lifecycle-Handler',
   appSource.includes("classList.add('privacy-curtain-on')"));
+ok('Hide/Freeze invalidiert auch laufende Argon2-/WebAuthn-Ergebnisse',
+  appSource.includes('lifecycleEpochRef.current++') &&
+  appSource.includes('lifecycleEpochRef.current !== expectedLifecycleEpoch'));
+ok('BFCache-Rückkehr räumt den Curtain über pageshow kontrolliert auf',
+  appSource.includes("window.addEventListener('pageshow', onPageShow)"));
 ok('Curtain ist blickdicht und liegt über allen App-Overlays',
   /\.privacy-curtain\s*\{[\s\S]*?z-index:\s*10000[\s\S]*?background:\s*#0b0c0e/.test(cssSource));
 
@@ -72,17 +77,215 @@ const goodManifest = [
 ];
 const cleanShell =
   '<!doctype html><html lang="de"><head>' +
+  '<title>SKYTALE</title>' +
   '<script type="module" crossorigin src="/assets/app.js"></script>' +
   '<link rel="stylesheet" crossorigin href="/assets/app.css"></head>' +
   '<body><div id="app"></div></body></html>';
+const strictCsp =
+  "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; " +
+  "form-action 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; " +
+  "img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src 'self'; " +
+  "worker-src 'self'; manifest-src 'self'";
+const shellResponse = (body, csp = strictCsp) => {
+  const headers = { 'content-type': 'text/html' };
+  if (csp !== null) headers['content-security-policy'] = csp;
+  return new Response(body, { headers });
+};
+const refreshingShellResponse = (body) => {
+  const response = shellResponse(body);
+  const headers = new Headers(response.headers);
+  headers.set('refresh', '0; url=https://evil.example/login');
+  return new Response(body, { headers });
+};
 const fetchGood = async (path) => {
-  if (path === '/') return new Response(cleanShell, { headers: { 'content-type': 'text/html' } });
+  if (path === '/') return shellResponse(cleanShell);
   if (path.endsWith('.js')) return new Response('export{}', { headers: { 'content-type': 'text/javascript' } });
   return new Response('body', { headers: { 'content-type': 'text/css' } });
 };
 await S.populateBuildPrecache(cache, goodManifest, fetchGood);
 ok('vollständiger Build enthält Shell + alle Pflichtassets',
   stored.has('/index.html') && stored.has('/assets/app.js') && stored.has('/assets/app.css'));
+ok('streng gelieferte CSP bleibt auf der gecachten Shell erhalten',
+  stored.get('/index.html')?.headers.get('content-security-policy') === strictCsp);
+const workboxRelativeManifest = goodManifest.map((entry) => ({
+  ...entry,
+  url: entry.url.slice(1),
+}));
+const relativeStored = new Map();
+await S.populateBuildPrecache(
+  { put: async (key, response) => relativeStored.set(String(key), response) },
+  workboxRelativeManifest,
+  fetchGood,
+);
+ok('Workbox-relative Manifestpfade werden kanonisch root-relativ gecacht',
+  relativeStored.has('/index.html') &&
+  relativeStored.has('/assets/app.js') &&
+  relativeStored.has('/assets/app.css'));
+
+let suffixedShellMimeRejected = false;
+try {
+  await S.populateBuildPrecache(
+    { put: async () => undefined },
+    goodManifest,
+    async (path) => {
+      if (path !== '/') return fetchGood(path);
+      return new Response(cleanShell, {
+        headers: {
+          'content-type': 'text/html+evil',
+          'content-security-policy': strictCsp,
+        },
+      });
+    },
+  );
+} catch {
+  suffixedShellMimeRejected = true;
+}
+ok('HTML-Subtyp-Suffix kann keine nicht ausführbare Shell als HTML tarnen',
+  suffixedShellMimeRejected);
+
+let suffixedScriptMimeRejected = false;
+try {
+  await S.populateBuildPrecache(
+    { put: async () => undefined },
+    goodManifest,
+    async (path) => path.endsWith('.js')
+      ? new Response('export{}', { headers: { 'content-type': 'text/javascript+evil' } })
+      : fetchGood(path),
+  );
+} catch {
+  suffixedScriptMimeRejected = true;
+}
+ok('JavaScript-Subtyp-Suffix kann ein nicht ausführbares Buildasset nicht tarnen',
+  suffixedScriptMimeRejected);
+
+const utf8ShellStore = new Map();
+await S.populateBuildPrecache(
+  { put: async (key, response) => utf8ShellStore.set(String(key), response) },
+  goodManifest,
+  async (path) => path === '/'
+    ? new Response(cleanShell, {
+      headers: {
+        'content-type': 'text/html; charset=UTF-8',
+        'content-security-policy': strictCsp,
+      },
+    })
+    : fetchGood(path),
+);
+ok('explizites UTF-8 bleibt als eindeutiger Shell-Charset zulässig',
+  utf8ShellStore.has('/index.html'));
+
+let utf16ShellRejected = false;
+try {
+  await S.populateBuildPrecache(
+    { put: async () => undefined },
+    goodManifest,
+    async (path) => path === '/'
+      ? new Response(cleanShell, {
+        headers: {
+          'content-type': 'text/html; charset=utf-16',
+          'content-security-policy': strictCsp,
+        },
+      })
+      : fetchGood(path),
+  );
+} catch {
+  utf16ShellRejected = true;
+}
+ok('abweichender HTTP-Charset kann Validator und Browser nicht entkoppeln',
+  utf16ShellRejected);
+
+let attachedShellRejected = false;
+try {
+  await S.populateBuildPrecache(
+    { put: async () => undefined },
+    goodManifest,
+    async (path) => path === '/'
+      ? new Response(cleanShell, {
+        headers: {
+          'content-type': 'text/html',
+          'content-security-policy': strictCsp,
+          'content-disposition': 'attachment; filename="index.html"',
+        },
+      })
+      : fetchGood(path),
+  );
+} catch {
+  attachedShellRejected = true;
+}
+ok('Content-Disposition kann eine validierte Shell nicht zum Download umdeuten',
+  attachedShellRejected);
+
+let attachedScriptRejected = false;
+try {
+  await S.populateBuildPrecache(
+    { put: async () => undefined },
+    goodManifest,
+    async (path) => path.endsWith('.js')
+      ? new Response('export{}', {
+        headers: {
+          'content-type': 'text/javascript',
+          'content-disposition': 'attachment; filename="app.js"',
+        },
+      })
+      : fetchGood(path),
+  );
+} catch {
+  attachedScriptRejected = true;
+}
+ok('Content-Disposition kann ein verifiziertes App-Modul nicht unstartbar cachen',
+  attachedScriptRejected);
+
+const cspAllowsInstall = async (csp) => {
+  try {
+    await S.populateBuildPrecache(
+      { put: async () => undefined },
+      goodManifest,
+      async (path) => path === '/' ? shellResponse(cleanShell, csp) : fetchGood(path),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+};
+ok("strikte script-src 'self' + 'wasm-unsafe-eval' wird dynamisch akzeptiert",
+  await cspAllowsInstall(strictCsp));
+ok('fehlende CSP lässt die Shell-Installation dynamisch scheitern',
+  !(await cspAllowsInstall(null)));
+ok('default-src ohne explizite script-src reicht nicht als Shell-Vertrauensanker',
+  !(await cspAllowsInstall("default-src 'self'")));
+ok("'unsafe-inline' in script-src lässt die Shell-Installation scheitern",
+  !(await cspAllowsInstall("default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'")));
+ok("'unsafe-eval' in script-src lässt die Shell-Installation scheitern",
+  !(await cspAllowsInstall("default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'")));
+ok('Unicode-Leerraum kann den Validator nicht von Chromiums CSP-Parser abkoppeln',
+  !(await cspAllowsInstall(strictCsp.replaceAll(' ', '\u00a0'))));
+ok('fremde Script-Origin in der CSP lässt die Shell-Installation scheitern',
+  !(await cspAllowsInstall("default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://evil.example")));
+ok('schwaches script-src-elem kann die geprüfte script-src-Regel nicht überschreiben',
+  !(await cspAllowsInstall(
+    `${strictCsp}; script-src-elem https://evil.example`,
+  )));
+ok('frame-src darf default-src nicht nachträglich für Phishing-Frames überschreiben',
+  !(await cspAllowsInstall(
+    `${strictCsp}; frame-src https://evil.example`,
+  )));
+ok('style-src-elem darf die geprüfte Style-Policy nicht nachträglich überschreiben',
+  !(await cspAllowsInstall(
+    `${strictCsp}; style-src-elem *`,
+  )));
+ok('striktes script-src allein reicht bei schwacher Form/Object/Base-Policy nicht',
+  !(await cspAllowsInstall(
+    "default-src *; base-uri *; object-src *; frame-ancestors *; form-action *; " +
+    "script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; " +
+    "img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src 'self'; " +
+    "worker-src 'self'; manifest-src 'self'",
+  )));
+ok('fehlende form-action/base-uri/frame-ancestors Direktiven werden fail-closed abgelehnt',
+  !(await cspAllowsInstall(
+    "default-src 'self'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; " +
+    "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; " +
+    "font-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'",
+  )));
 
 let wrongTypeRejected = false;
 try {
@@ -93,7 +296,7 @@ try {
       { url: '/assets/missing.js', revision: await revision('export{}') },
     ],
     async (path) => path === '/'
-      ? new Response('<!doctype html>', { headers: { 'content-type': 'text/html' } })
+      ? shellResponse('<!doctype html>')
       : new Response('<!doctype html>', { headers: { 'content-type': 'text/html' } }),
   );
 } catch {
@@ -110,9 +313,7 @@ try {
     { put: async () => undefined },
     goodManifest,
     async (path) => path === '/'
-      ? new Response('<!doctype html><script src="/assets/app-b.js"></script>', {
-          headers: { 'content-type': 'text/html' },
-        })
+      ? shellResponse('<!doctype html><script src="/assets/app-b.js"></script>')
       : fetchGood(path),
   );
 } catch {
@@ -127,6 +328,7 @@ ok('Shell eines zwischenzeitlich gewechselten Deployments wird über die Struktu
 // boots only the verified module.
 const injectedShell =
   '<!doctype html><html lang="de"><head>' +
+  '<title>SKYTALE</title>' +
   '<script type="module" crossorigin src="/assets/app.js"></script>' +
   '<link rel="stylesheet" crossorigin href="/assets/app.css"></head>' +
   '<body><div id="app"></div>' +
@@ -139,7 +341,7 @@ try {
     { put: async (key, response) => injectedStore.set(String(key), response) },
     goodManifest,
     async (path) => (path === '/'
-      ? new Response(injectedShell, { headers: { 'content-type': 'text/html' } })
+      ? shellResponse(injectedShell)
       : fetchGood(path)),
   );
   injectedInstalled = injectedStore.has('/index.html') && injectedStore.has('/assets/app.js');
@@ -152,22 +354,292 @@ ok('Edge-injizierte Shell (CF-Challenge-Script) installiert dennoch — kein Fle
 ok('Negativkontrolle: eine byte-genaue Shell-Prüfung hätte die injizierte Shell verworfen',
   injectedInstalled && (await revision(injectedShell)) !== (await revision(cleanShell)));
 
+let injectedFormRejected = false;
+try {
+  await S.populateBuildPrecache(
+    { put: async () => undefined },
+    goodManifest,
+    async (path) => path === '/'
+      ? shellResponse(cleanShell.replace(
+          '<div id="app"></div>',
+          '<form action="https://evil.example"><input name="passphrase"></form><div id="app"></div>',
+        ))
+      : fetchGood(path),
+  );
+} catch {
+  injectedFormRejected = true;
+}
+ok('scriptloses injiziertes Passwort-Formular wird strukturell abgelehnt',
+  injectedFormRejected);
+
+let injectedRefreshRejected = false;
+try {
+  await S.populateBuildPrecache(
+    { put: async () => undefined },
+    goodManifest,
+    async (path) => path === '/'
+      ? shellResponse(cleanShell.replace(
+          '<div id="app"></div>',
+          '<meta http-equiv="refresh" content="0;url=https://evil.example/login"><div id="app"></div>',
+        ))
+      : fetchGood(path),
+  );
+} catch {
+  injectedRefreshRejected = true;
+}
+ok('injiziertes Meta-Refresh kann die PWA nicht zu einer Passphrase-Phishingseite navigieren',
+  injectedRefreshRejected);
+
+let injectedRefreshHeaderRejected = false;
+try {
+  await S.populateBuildPrecache(
+    { put: async () => undefined },
+    goodManifest,
+    async (path) => path === '/' ? refreshingShellResponse(cleanShell) : fetchGood(path),
+  );
+} catch {
+  injectedRefreshHeaderRejected = true;
+}
+ok('injizierter HTTP-Refresh-Header kann die PWA nicht zu einer Phishingseite navigieren',
+  injectedRefreshHeaderRejected);
+
+let injectedImageMapRejected = false;
+try {
+  await S.populateBuildPrecache(
+    { put: async () => undefined },
+    goodManifest,
+    async (path) => path === '/'
+      ? shellResponse(cleanShell.replace(
+          '<div id="app"></div>',
+          '<img usemap="#login" src="data:image/svg+xml,%3Csvg/%3E">' +
+          '<map name="login"><area shape="rect" coords="0,0,1000,1000" ' +
+          'href="https://evil.example/login"></map><div id="app"></div>',
+        ))
+      : fetchGood(path),
+  );
+} catch {
+  injectedImageMapRejected = true;
+}
+ok('injizierte Image-Map kann keinen CSP-unbegrenzten Top-Level-Login öffnen',
+  injectedImageMapRejected);
+
+let abruptCommentPhishRejected = false;
+try {
+  await S.populateBuildPrecache(
+    { put: async () => undefined },
+    goodManifest,
+    async (path) => path === '/'
+      ? shellResponse(cleanShell.replace(
+          '<div id="app"></div>',
+          '<!--><form id="phish"><input name="passphrase"></form>--><div id="app"></div>',
+        ))
+      : fetchGood(path),
+  );
+} catch {
+  abruptCommentPhishRejected = true;
+}
+ok('HTML-Parser-Fehlererholung kann kein aus Regex-Sicht kommentiertes Formular aktivieren',
+  abruptCommentPhishRejected);
+
+let fakeScriptTagPhishRejected = false;
+try {
+  await S.populateBuildPrecache(
+    { put: async () => undefined },
+    goodManifest,
+    async (path) => path === '/'
+      ? shellResponse(cleanShell.replace(
+          '<div id="app"></div>',
+          '<script:fake><form id="phish"><input name="passphrase"></form>' +
+          '</script><div id="app"></div>',
+        ))
+      : fetchGood(path),
+  );
+} catch {
+  fakeScriptTagPhishRejected = true;
+}
+ok('ein script-Präfix-Tag kann aktive Formulare nicht aus der Strukturprüfung ausblenden',
+  fakeScriptTagPhishRejected);
+
+let malformedScriptCloseRejected = false;
+try {
+  await S.populateBuildPrecache(
+    { put: async () => undefined },
+    goodManifest,
+    async (path) => path === '/'
+      ? shellResponse(cleanShell.replace(
+          '<div id="app"></div>',
+          '<script>0</script x><form id="phish"><input name="passphrase"></form>' +
+          '<script>0</script><div id="app"></div>',
+        ))
+      : fetchGood(path),
+  );
+} catch {
+  malformedScriptCloseRejected = true;
+}
+ok('Browser-Rawtext-Recovery an einem mehrdeutigen script-End-Tag wird abgelehnt',
+  malformedScriptCloseRejected);
+
+let unicodeScriptSeparatorRejected = false;
+try {
+  await S.populateBuildPrecache(
+    { put: async () => undefined },
+    goodManifest,
+    async (path) => path === '/'
+      ? shellResponse(cleanShell.replace(
+          '<div id="app"></div>',
+          '<script\u00a0><form id="phish"><input name="passphrase"></form>' +
+          '</script><div id="app"></div>',
+        ))
+      : fetchGood(path),
+  );
+} catch {
+  unicodeScriptSeparatorRejected = true;
+}
+ok('Unicode-Leerraum kann kein unbekanntes script-Präfix als Rawtext tarnen',
+  unicodeScriptSeparatorRejected);
+
+let visibleBodyTextRejected = false;
+try {
+  await S.populateBuildPrecache(
+    { put: async () => undefined },
+    goodManifest,
+    async (path) => path === '/'
+      ? shellResponse(cleanShell.replace(
+          '<div id="app"></div>',
+          'SKYTALE-Sicherheitsprüfung: Passwort erneut eingeben<div id="app"></div>',
+        ))
+      : fetchGood(path),
+  );
+} catch {
+  visibleBodyTextRejected = true;
+}
+ok('injizierter sichtbarer Body-Text kann keine Branding-/Phishing-UI vortäuschen',
+  visibleBodyTextRejected);
+
+let styledBodyRejected = false;
+try {
+  await S.populateBuildPrecache(
+    { put: async () => undefined },
+    goodManifest,
+    async (path) => path === '/'
+      ? shellResponse(cleanShell.replace('<body>', '<body style="position:fixed;inset:0">'))
+      : fetchGood(path),
+  );
+} catch {
+  styledBodyRejected = true;
+}
+ok('Attribute am Body können die App-Shell nicht überdecken oder umgestalten',
+  styledBodyRejected);
+
+let unverifiedManifestRejected = false;
+try {
+  await S.populateBuildPrecache(
+    { put: async () => undefined },
+    goodManifest,
+    async (path) => path === '/'
+      ? shellResponse(cleanShell.replace(
+          '</head>',
+          '<link rel="manifest" href="/attacker.webmanifest"></head>',
+        ))
+      : fetchGood(path),
+  );
+} catch {
+  unverifiedManifestRejected = true;
+}
+ok('ein nicht manifestverifiziertes Web-App-Manifest wird abgelehnt',
+  unverifiedManifestRejected);
+
+let alteredTitleRejected = false;
+try {
+  await S.populateBuildPrecache(
+    { put: async () => undefined },
+    goodManifest,
+    async (path) => path === '/'
+      ? shellResponse(cleanShell.replace('<title>SKYTALE</title>', '<title>Bank Login</title>'))
+      : fetchGood(path),
+  );
+} catch {
+  alteredTitleRejected = true;
+}
+ok('ein manipulierter Produkttitel wird abgelehnt',
+  alteredTitleRejected);
+
+const spacedTagNames = [
+  cleanShell.replace('</title>', '</ title>'),
+  cleanShell.replace('<html', '< html'),
+];
+const spacedTagNamesRejected = await Promise.all(spacedTagNames.map(async (shell) => {
+  try {
+    await S.populateBuildPrecache(
+      { put: async () => undefined },
+      goodManifest,
+      async (path) => path === '/' ? shellResponse(shell) : fetchGood(path),
+    );
+    return false;
+  } catch {
+    return true;
+  }
+}));
+ok('Leerraum vor Start-/End-Tag-Namen kann Browser und Validator nicht entkoppeln',
+  spacedTagNamesRejected.every(Boolean));
+
 // A shell that pulls a CROSS-ORIGIN script is refused (belt-and-suspenders over the CSP).
 let crossOriginRejected = false;
 try {
   await S.populateBuildPrecache({ put: async () => undefined }, goodManifest,
     async (path) => (path === '/'
-      ? new Response('<!doctype html><script type="module" src="https://evil.example/x.js"></script>', { headers: { 'content-type': 'text/html' } })
+      ? shellResponse('<!doctype html><script type="module" src="https://evil.example/x.js"></script>')
       : fetchGood(path)));
 } catch { crossOriginRejected = true; }
 ok('Shell mit Fremd-Origin-Script wird abgelehnt', crossOriginRejected);
+
+// The parser's synthetic URL base is not the real document origin. An absolute
+// reference to that dummy host must therefore never count as same-origin.
+let syntheticBaseOriginRejected = false;
+try {
+  await S.populateBuildPrecache(
+    { put: async () => undefined },
+    goodManifest,
+    async (path) => path === '/'
+      ? shellResponse(cleanShell
+        .replace('/assets/app.js', 'https://local.invalid/assets/app.js')
+        .replace('/assets/app.css', 'https://local.invalid/assets/app.css'))
+      : fetchGood(path),
+  );
+} catch {
+  syntheticBaseOriginRejected = true;
+}
+ok('absolute URL zum Parser-Dummy-Origin wird als cross-origin abgelehnt',
+  syntheticBaseOriginRejected);
+
+const ambiguousShellRefs = [
+  '//local.invalid/assets/app.js',
+  '/\\local.invalid/assets/app.js',
+  '/assets/../assets/app.js',
+];
+const ambiguousShellRefsRejected = await Promise.all(ambiguousShellRefs.map(async (ref) => {
+  try {
+    await S.populateBuildPrecache(
+      { put: async () => undefined },
+      goodManifest,
+      async (path) => path === '/'
+        ? shellResponse(cleanShell.replace('/assets/app.js', ref))
+        : fetchGood(path),
+    );
+    return false;
+  } catch {
+    return true;
+  }
+}));
+ok('Authority-, Backslash- und Dot-Segment-URL-Differenzen werden abgelehnt',
+  ambiguousShellRefsRejected.every(Boolean));
 
 // A shell that references a same-origin script we did NOT byte-verify is refused.
 let unverifiedRefRejected = false;
 try {
   await S.populateBuildPrecache({ put: async () => undefined }, goodManifest,
     async (path) => (path === '/'
-      ? new Response('<!doctype html><script type="module" src="/assets/not-in-manifest.js"></script>', { headers: { 'content-type': 'text/html' } })
+      ? shellResponse('<!doctype html><script type="module" src="/assets/not-in-manifest.js"></script>')
       : fetchGood(path)));
 } catch { unverifiedRefRejected = true; }
 ok('Shell mit nicht verifizierter same-origin Ressource wird abgelehnt', unverifiedRefRejected);
@@ -177,7 +649,7 @@ let noModuleRejected = false;
 try {
   await S.populateBuildPrecache({ put: async () => undefined }, goodManifest,
     async (path) => (path === '/'
-      ? new Response('<!doctype html><link rel="stylesheet" href="/assets/app.css"></head>', { headers: { 'content-type': 'text/html' } })
+      ? shellResponse('<!doctype html><link rel="stylesheet" href="/assets/app.css"></head>')
       : fetchGood(path)));
 } catch { noModuleRejected = true; }
 ok('Shell ohne verifiziertes App-Modul wird abgelehnt', noModuleRejected);
@@ -192,6 +664,9 @@ ok('fehlgeschlagener Install löscht den privaten Kandidaten und wirft weiter',
 ok('unbekannte Script-/Style-Requests fallen nicht ins Live-Netz',
   /req\.destination === 'script'[\s\S]*?cacheUnavailable\(\)/.test(swSource));
 ok('alter globale Cache-Name ist entfernt', !swSource.includes("const PRECACHE = 'scytale-precache'"));
+ok('Update-Prompt wird nicht fälschlich als Origin-Trust-Boundary dokumentiert',
+  swSource.includes('this prompt is release UX, not a trust boundary') &&
+  !swSource.includes('must change ONLY when they explicitly accept'));
 
 console.log('\n[Medien: automatische Voll-Decodes sind begrenzt]');
 ok('normales Bild bleibt inline',

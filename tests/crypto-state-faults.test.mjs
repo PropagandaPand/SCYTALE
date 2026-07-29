@@ -30,8 +30,10 @@ ok('Linked Identity + DeviceList gehen durch EINEN Batch-Commit',
 ok('Batch-Commit verwendet eine readwrite-Transaktion',
   dbSrc.includes("transaction(['records', 'kv'], 'readwrite')") && dbSrc.includes('await tx.done'));
 ok('Grant wird vor send dauerhaft gespeichert',
-  linkSrc.indexOf('await saveOwnDeviceList(dek, newList)') <
-  linkSrc.indexOf('await send(session.peerSignPub, sealedGrant)'));
+  devicesSrc.includes('[KEY, listRecord]') &&
+  devicesSrc.includes('[PENDING_LINK_GRANT_KEY, intentRecord]') &&
+  linkSrc.indexOf('await issueAndSaveLinkGrant(') <
+    linkSrc.indexOf('await send(session.peerSignPub, sealedPayload)'));
 // F-21: a primary's stored own device list is authority ONLY if it verifies under the
 // current master (storedTrusted). An unverified/foreign-but-decryptable stored list must
 // NOT be re-signed into a fresh authority — the repair is fail-closed: it throws instead

@@ -118,7 +118,9 @@ a backup is by definition the exfiltratable path device binding otherwise forbid
 tightly gated:
 - **Opt-in and explicit**, never automatic.
 - **Second authentication:** the vault passphrase is **re-prompted immediately before the
-  export** (`unlockBoundVault`) — an unlocked vault + physical access is not a one-click exfil.
+  export** (`verifyRealPassphrase`) — an unlocked vault + physical access is not a one-click
+  exfiltration path, and entering the duress passphrase inside the mounted real account cannot
+  accidentally trigger promotion/wipe.
 - **A separate export passphrase** encrypts the file with **full Argon2id**; the `MIN_ARGON2`
   floor is **not** bypassed (AES-256-GCM under the derived key).
 - **Backup v4 bounds and authenticates chunks.** The length-prefixed binary container uses
@@ -146,26 +148,48 @@ tightly gated:
 **Auto-lock:** after 5 minutes of inactivity the DEK is dropped from RAM and the app requires
 the passphrase (or Face ID) again. A **runtime self-test** checks the primitives at startup.
 
-**Duress password (optional):** a second passphrase you can set under *Security*. Entered at the
-unlock screen it does **not** unlock — it irreversibly crypto-erases the whole vault (best-effort
-overwrite of the header, then deletes the IndexedDB stores, tears down push + the service worker)
-and drops the app to a fresh onboarding state, indistinguishable from a mistyped passphrase to
-anyone watching. It is probed on **every** unlock attempt, including while the brute-force lockout
-is active (the coercion case), and the wrong-passphrase probe runs at a **constant cost** so timing
-never reveals whether a duress password is set. It must differ from the real passphrase, and it is
-**mutually exclusive with Face ID / Touch ID** — a biometric door would open the real vault without
-ever touching the passphrase field, so arming one requires the other to be off. The guard on disk
-is an extra wrap of a **random throwaway key**, byte-shaped like any other wrapped key; it wraps
-random bytes, never the DEK, so it can only be *recognised*, never used to unlock. Honest limits:
-the real guarantee is **key destruction** — the DEK is derivable only from the real passphrase,
-which a coercer holding the duress password does not have, so once the header is gone the sealed
-records are unrecoverable ciphertext even from a seized device image. The deniability is
-**behavioural** (a wrong-looking passphrase + a fresh-looking app), **not at-rest**: because the
-guard is present only when armed, a forensic image of the header can reveal that a duress password
-is configured. The best-effort overwrite hardens against a *later* coercion of the real passphrase,
-but on flash/SSD it cannot guarantee the original cells are physically gone (the FTL wear-levels —
-the guarantee is the key destruction, not the overwrite). It wipes **this device only**: copies
-already delivered to contacts, and any backup file you exported, are out of its reach.
+**Duress password → decoy account (optional):** a second passphrase you can set under *Security*.
+Entered at the unlock screen it does **not** open your real account — it irreversibly crypto-erases
+the real vault (best-effort header overwrite followed by clearing and replacing the canonical
+database contents) and opens a self-contained **decoy account** instead: a full second account with
+its own identity, contacts and messages, initially living in a separate database
+(`scytale-decoy`). To anyone watching, entering it looks like a normal unlock into a plausible,
+working account — the UI does not signal that a real account existed or that duress was used. The
+decoy is probed on **every** unlock attempt, including while the brute-force lockout is active (the
+coercion case). Armed and unarmed misses both pay the dominant Argon2 KDF cost; this is
+**cost-matched**, not a claim of strict constant-time execution across browser, IndexedDB and
+device-binding operations. The duress passphrase must differ from the real passphrase and has a
+12-character minimum. You populate the decoy ahead of time from *Security → Fill the decoy account*
+(only reachable from the unlocked **real** account); switching back to the real account there needs
+no re-authentication within that already unlocked session, and the decoy account itself shows
+**no** control or indicator that a real account exists. Recognition is unlocking the decoy vault in
+its own database — the real header stores only a `decoyArmed` marker so the lock screen knows to
+probe; it is **not** a value that can unlock anything.
+
+> **⚠ Biometrics void duress protection — a deliberate, documented trade-off.** Since the removal of
+> the biometric/duress mutual exclusion, Face ID / Touch ID may be enabled *alongside* a duress
+> password. The app only suppresses the **auto-launch** when duress is armed — but a manual biometric
+> button remains, and biometric unlock opens the **real** vault directly (it unwraps the real DEK from
+> the PRF-wrapped key), with no passphrase. A biometric is therefore a **coercible door**: a forced
+> face/finger opens the real account and the panic-wipe never fires. Additionally, the real DEK stays
+> wrapped under the biometric PRF key, so a duress erase that best-effort overwrites the header does
+> not, by itself, remove every biometric-reachable copy from uncompacted IndexedDB logs. **For genuine
+> coercion resistance, do not enable Face ID / Touch ID while a duress password is armed.** The app
+> keeps the choice available and warns at the point of arming; it does not enforce exclusivity.
+
+Honest limits: the real guarantee is **key destruction**. Once the real wrapped DEK/header has been
+destroyed and the canonical stores replaced, the prior sealed records no longer have an application
+key path. Security before that point still depends on the strength of the real passphrase and the
+device-binding secret. Deniability is **behavioural**, **not at-rest**: while armed but unused, the
+`decoyArmed` marker and a second database can reveal that a decoy is configured. Promotion uses a
+witness-bound monotone journal and fences the source before erasing the real key. After the decoy is
+copied into the canonical slot, the source database is deleted and the journal cleared only after
+IndexedDB confirms deletion. If another tab/browser state blocks that deletion, the canonical decoy
+still opens, but the fenced source database and `copied` journal may temporarily remain visible;
+re-arming stays fail-closed and boot recovery retries cleanup. The best-effort overwrite cannot
+guarantee physical flash/SSD cells are gone because of wear levelling—the guarantee is
+cryptographic key destruction, not physical sector erasure. Duress wipes **this device only**:
+copies already delivered to contacts, remote relay data and exported backups are out of its reach.
 
 ---
 
@@ -277,28 +301,31 @@ already delivered to contacts, and any backup file you exported, are out of its 
 
 ### Link initial-sync — the account snapshot a newly linked device receives
 
-Linking establishes identity, not content. Until this stage a linked device was cryptographically the
-same account but visually empty — indistinguishable from a failed pairing. It now receives a
-**snapshot** (`bootstrap` frame) carrying the **profile** (name, avatar) and the **contact roster**.
-Chat history does **not** travel yet (issue #1).
+Until this stage a linked device was cryptographically the same account but visually empty—
+indistinguishable from a failed pairing. It now receives a relay-confirmed **bootstrap stream**
+carrying the **profile** (name, avatar), **contact roster**, bounded optional peer DeviceLists and
+chunked **text history**. Historical attachments and legacy messages without a stable `mid` are
+deliberately skipped; complete history transfer remains issue #1.
 
 **PULL, not push.** The primary does not send the snapshot when the SAS is confirmed: at that moment
 the new device has not installed its identity yet, so the message would be delivered, acked and lost.
 Instead the new device mints a `requestId`, persists it as pending, and asks (`bootreq`); the primary —
 and only the primary, so sibling devices do not all answer — replies to exactly that one device. The
 request survives reloads and is retried until a snapshot lands, so a pairing done while the primary was
-offline still completes later.
+offline still completes later. Each bootstrap/history frame must receive a durable relay receipt;
+the terminal `done` frame is sent only after every preceding frame was confirmed.
 
-**What the snapshot deliberately does NOT contain.** A roster entry carries only
-`peerMasterPub / peerEpoch / peerSignPub / peerDhPub / nickname / peerName` plus a verification *hint*.
-It carries **no ratchet state, no prekey bundle, no peer device list, no roomId**. Consequences, all
-intended:
+**What the bootstrap deliberately does NOT contain.** A roster entry carries identity/profile fields,
+a verification *hint* and, while the frame-wide 500 KiB budget permits, the peer's signed DeviceList.
+It carries **no ratchet state, no cloned live session, no roomId and no attachment bytes**.
+Consequences, all intended:
 - **No ratchet is ever cloned.** Two devices sharing one ratchet would both advance it and reuse a
   message key — a two-time pad. Every device builds its own X3DH session per peer device (the Stage 3d
   invariant is preserved).
-- **Imported contacts are send-blocked** until the real peer learns this device and writes. A
-  substituted or maliciously linked device therefore gains **no immediate ability to send into the
-  whole contact graph** — it can only receive.
+- **Imported contacts remain authorization-gated.** A supplied DeviceList is master-verified before
+  adoption, and the real peer must learn/authorize this newly linked device before its X3DH traffic
+  is accepted. A substituted device gains no cloned ratchet or immediate trusted session into the
+  contact graph.
 - **`roomId` and the fingerprint are always derived locally** from (my master, peer master), never
   taken from the wire, so a manipulated snapshot cannot steer a conversation into the wrong room.
 
@@ -313,10 +340,11 @@ denylisted (abandoned) master, or whose locally derived room is already occupied
 are skipped outright. A contact left over from the pre-link identity (`staleIdentity`) is **not**
 silently reactivated.
 
-**Gating and idempotency.** `bootstrap` and `bootreq` are accepted **only** from my own devices
+**Gating and idempotency.** `bootstrap`, `history` parts inside it and `bootreq` are accepted **only** from my own devices
 (`peerMaster == my master`), enforced both at the source (`receiveEnvelope`) and again in the inbox
-handler. Both are terminal: never rendered as a message, never re-fanned. Import is idempotent via the
-snapshot id, whose marker is written **last**, so a crash mid-import simply replays the merge.
+handler. They are terminal: never rendered as a message, never re-fanned. Each history chunk has a
+deterministic per-contact id and deduplicates by `(mid, direction)`; its applied marker is written
+**last**, so a crash mid-import replays the merge without duplicating or silently dropping text.
 
 **Reachability (`listack`).** A newly linked device is useless if peers keep talking only to the
 primary. Peers acknowledge which version of my device list they hold, and I re-offer it while their
@@ -415,14 +443,16 @@ both arrive.
 > turns a repeated key into a repeated nonce (the bug in the group send paths, v0.16.2). The invariant must
 > therefore hold **across persistence**, not just within a session.
 >
-> Enforcement: `encryptAndPersist` (send) writes the advanced state **before** transmitting; the receive
-> path writes it **immediately after decrypting**, before any content processing (including deleting the
-> consumed skipped key — *that* is one-time use on the receive side). The commit copy protects only
-> **sequential** processing; the whole receive path additionally runs through **one promise chain** (per
-> client), so a relay delivering the same ciphertext under two ack IDs becomes an ordinary, rejected replay
-> rather than two concurrent decrypts of the same uncommitted state. **Send** runs through that same chain
-> too (v0.19.2): otherwise a send landing between a concurrent decrypt's clone and its commit would roll the
-> `CKs` advance back and reuse (key, nonce) = a two-time pad.
+> Enforcement: `encryptAndPersist` (send) writes the advanced state **before** transmitting. Receive
+> decrypts against an isolated contact copy, durably applies the idempotent application effect first,
+> and only then commits the advanced ratchet plus any authenticated OPK consumption. If application
+> persistence fails, the relay row remains and the old ratchet can decrypt it again; if the application
+> write reached disk before a crash, its authenticated message id makes that retry idempotent. The whole
+> receive path additionally runs through **one promise chain** (per client), so a relay delivering the same
+> ciphertext under two ack IDs becomes an ordinary, rejected replay rather than two concurrent decrypts
+> of the same uncommitted state. **Send** runs through that same chain too (v0.19.2): otherwise a send
+> landing between a concurrent decrypt's clone and its commit would roll the `CKs` advance back and reuse
+> (key, nonce) = a two-time pad.
 
 - **Commit discipline on decrypt (critical, v0.17.1):** `ratchetDecrypt` works on a **copy** and adopts it
   only after the AEAD check passes. Before that, `skipMessageKeys`, `dhRatchet` and the `delete` in
@@ -445,7 +475,7 @@ both arrive.
 > | Transition | Enforcement | Without it |
 > |---|---|---|
 > | Send | `encryptAndPersist` writes **before** transmit | Nonce reuse after reload (v0.16.2) |
-> | Receive | Persist **immediately after** decrypt, before any content processing | Replay of a consumed skipped key (v0.16.3) |
+> | Receive | Isolated decrypt; durable idempotent application effect; then ratchet/OPK commit; relay ACK last | Data loss on local write failure or replay of an uncommitted transition |
 > | Decrypt | Draft copy, commit **after** the AEAD check | Remote session destruction without key material (v0.17.1) |
 > | X3DH reply | OPK consumption and session creation are **one** step | Either an unprocessable retransmit or a reusable OPK |
 > | Sim-init tie-break | Commit `ratchet`/`pendingHeader` only **after** `respondX3DH` (cert) and AEAD — build on locals | A forged prekey (public master+signPub, junk cert) destroyed the in-flight session (v0.19.x) |
@@ -512,21 +542,29 @@ both arrive.
 
 `worker/index.ts`, `src/sw.ts`, `vite.config.ts`
 
-- **CSP `default-src 'self'`** blocks foreign scripts, styles, fonts and direct foreign
-  connections. `script-src 'self' 'wasm-unsafe-eval'` is the narrow WASM allowance used by
-  libsodium/hash-wasm; `connect-src 'self'` permits only same-origin APIs. This is important
-  defense in depth, not an XSS sandbox: compromised same-origin code can read unlocked
-  plaintext and misuse same-origin endpoints.
-- **Further headers**: host-scoped HSTS (2 y; deliberately no `includeSubDomains` until every
-  subdomain has been audited), `nosniff`, `Referrer-Policy: no-referrer`,
+- **Closed CSP policy.** `default-src 'self'` blocks foreign resources;
+  `script-src 'self' 'wasm-unsafe-eval'` is the narrow WASM allowance used by
+  libsodium/hash-wasm; `connect-src 'self'` permits only same-origin APIs; base/form/frame/object
+  sinks are separately restricted. The service worker accepts a delivered shell only when the
+  complete directive set and every value exactly match this policy—extra sink-specific override
+  directives fail closed. CSP and shell parsing use browser-matching ASCII-whitespace rules:
+  Unicode separators cannot make the validator and Chromium tokenize a directive/tag differently.
+  The accepted HTML grammar fixes the body, title and single `#app` mount, rejects visible foreign
+  text/attributes, and permits only byte-verified build references (including icons and the web-app
+  manifest). This is important defense in depth, not an XSS sandbox: compromised same-origin code
+  can read unlocked plaintext and misuse same-origin endpoints.
+- **Further headers**: host-scoped HSTS (2 y) on both intentionally supported production
+  origins (`skytale.chat` and `scytale.illogical.workers.dev`; deliberately no
+  `includeSubDomains`), `nosniff`, `Referrer-Policy: no-referrer`,
   `X-Frame-Options: DENY` / `frame-ancestors 'none'`, COOP+CORP `same-origin`, a restrictive `Permissions-Policy`
   (camera/microphone same-origin only, geo/payment/USB off).
 - **Self-hosted fonts** (no CDN — would break CSP and leak IPs).
 - **Service-worker update mode is `prompt`** (`registerType: 'prompt'`). Every build installs
-  into a private cache whose name commits to the build and manifest. Every required asset is
-  fetched with `no-store` and checked against an injected SHA-256 revision; a missing,
-  mismatched or mixed-deployment asset rejects the candidate install. The old active worker
-  continues serving only its old cache until the user accepts the waiting worker.
+  into a private cache whose name commits to the build and manifest. Every required executable
+  asset is fetched with `no-store` and checked against an injected SHA-256 revision; a missing,
+  mismatched or mixed-deployment asset rejects the candidate install. The update prompt controls
+  the normal handover UX, but it is **not** a security boundary: each worker can serve only its
+  own complete verified build, including after browser-driven activation once old clients close.
 - **Non-extractable CryptoKeys throughout** (KEK, DEK, device key, message keys, biometric KEK).
 
 ---
@@ -637,6 +675,11 @@ Node/npm version.)
   honestly nacks further sends until it drains); it cannot grow storage without bound or affect other inboxes.
 - **Code-delivery trust**: mitigated but not eliminated by the reproducible build; a real user-facing mitigation
   (an independent verifier publishing signed hashes) is open.
+- **Two intentional production origins.** `skytale.chat` and
+  `scytale.illogical.workers.dev` remain supported. The latter is not migration debt and
+  `workers_dev` must stay enabled for installed PWAs. This adds one origin surface, so the
+  Worker enforces the same HTTPS redirect, CSP, HSTS and security headers on both; browser
+  storage and identities remain origin-separated.
 
 ---
 

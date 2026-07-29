@@ -4078,6 +4078,13 @@ canvas.vo-img {
 .setting-row.danger .setting-ic {
   color: var(--danger);
 }
+.setting-row.accent {
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface2));
+}
+.setting-row.accent .setting-title,
+.setting-row.accent .setting-ic {
+  color: var(--accent);
+}
 
 /* ── Device management rows ──────────────────────────────────────────────── */
 .dev-row {

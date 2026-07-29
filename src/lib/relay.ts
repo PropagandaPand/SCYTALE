@@ -19,6 +19,12 @@ export type RelayStatus = 'connecting' | 'open' | 'closed';
 
 const PING_EVERY_MS = 25_000;
 const PONG_GRACE_MS = 8_000;
+const CONFIRMED_SEND_TIMEOUT_MS = 12_000;
+
+function requestId(): string {
+  const words = crypto.getRandomValues(new Uint32Array(4));
+  return [...words].map((word) => word.toString(16).padStart(8, '0')).join('');
+}
 
 export interface RelayOptions {
   onStatus?: (s: RelayStatus) => void;
@@ -44,6 +50,15 @@ export class RelayClient {
   private unsubscribeWaiters = new Map<
     string,
     { resolve: (ok: boolean) => void; timer: ReturnType<typeof setTimeout> }
+  >();
+  private sendWaiters = new Map<
+    string,
+    {
+      resolve: () => void;
+      reject: (error: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+      frame: string;
+    }
   >();
   status: RelayStatus = 'closed';
 
@@ -142,12 +157,28 @@ export class RelayClient {
         this.pongTimer = null;
       }
     } else if (m.t === 'sent') {
-      this.opts.onAck?.(typeof m.mid === 'string' ? m.mid : null);
+      const mid = typeof m.mid === 'string' ? m.mid : null;
+      if (mid) {
+        const waiter = this.sendWaiters.get(mid);
+        if (waiter) {
+          clearTimeout(waiter.timer);
+          this.sendWaiters.delete(mid);
+          waiter.resolve();
+        }
+      }
+      this.opts.onAck?.(mid);
     } else if (m.t === 'nack') {
-      this.opts.onNack?.(
-        typeof m.mid === 'string' ? m.mid : null,
-        typeof m.reason === 'string' ? m.reason : undefined,
-      );
+      const mid = typeof m.mid === 'string' ? m.mid : null;
+      const reason = typeof m.reason === 'string' ? m.reason : undefined;
+      if (mid) {
+        const waiter = this.sendWaiters.get(mid);
+        if (waiter) {
+          clearTimeout(waiter.timer);
+          this.sendWaiters.delete(mid);
+          waiter.reject(new Error(`Relay hat die Zustellung abgelehnt${reason ? ` (${reason})` : ''}.`));
+        }
+      }
+      this.opts.onNack?.(mid, reason);
     } else if (m.t === 'authed' && this.opts.auth) {
       this.ownerAuthed = true;
       for (const resolve of this.authWaiters) resolve(true);
@@ -202,6 +233,35 @@ export class RelayClient {
     const frame = JSON.stringify(silent ? { t: 'send', b64: bytesToB64(bytes), mid, silent: true } : { t: 'send', b64: bytesToB64(bytes), mid });
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(frame);
     else this.outbox.push(frame);
+  }
+
+  /** Resolve only after the relay confirms its durable mailbox INSERT. A caller
+   * can keep a sealed retry intent until this promise succeeds, avoiding false
+   * "done" state on disconnect/nack/timeout. */
+  sendConfirmed(
+    bytes: Bytes,
+    silent = false,
+    timeoutMs = CONFIRMED_SEND_TIMEOUT_MS,
+  ): Promise<void> {
+    const mid = requestId();
+    const frame = JSON.stringify(
+      silent
+        ? { t: 'send', b64: bytesToB64(bytes), mid, silent: true }
+        : { t: 'send', b64: bytesToB64(bytes), mid },
+    );
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.sendWaiters.delete(mid);
+        // If it never left the local outbox, do not send it unexpectedly after
+        // the caller has moved to its durable retry path.
+        const queued = this.outbox.indexOf(frame);
+        if (queued >= 0) this.outbox.splice(queued, 1);
+        reject(new Error('Keine dauerhafte Relay-Bestätigung erhalten.'));
+      }, Math.max(1, timeoutMs));
+      this.sendWaiters.set(mid, { resolve, reject, timer, frame });
+      if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(frame);
+      else this.outbox.push(frame);
+    });
   }
 
   /** Owner: register (or clear) the Web Push subscription for this inbox. Sent
@@ -269,6 +329,11 @@ export class RelayClient {
       clearTimeout(waiter.timer);
       this.unsubscribeWaiters.delete(rid);
       waiter.resolve(false);
+    }
+    for (const [mid, waiter] of this.sendWaiters) {
+      clearTimeout(waiter.timer);
+      this.sendWaiters.delete(mid);
+      waiter.reject(new Error('Relay-Verbindung geschlossen.'));
     }
     this.stopHeartbeat();
     this.ws?.close();

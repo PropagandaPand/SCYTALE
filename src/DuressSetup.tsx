@@ -1,9 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   setDuressPassword,
   removeDuressPassword,
+  biometricEnrolled,
   WrongPassphraseError,
   DuressEqualsRealError,
+  DuressTooShortError,
+  MIN_DURESS_PASSPHRASE_LENGTH,
 } from './lib/vaultService';
 import { IconEye, IconEyeOff } from './icons';
 import { t } from './lib/i18n';
@@ -11,9 +14,9 @@ import { tb } from './lib/tnodes';
 
 /**
  * Set or remove the DURESS password: a second passphrase that, entered at the unlock screen,
- * does NOT unlock the vault but irreversibly crypto-erases it. Setting requires the real
- * passphrase once (proves ownership); the duress password must differ from it. Removing also
- * requires the real passphrase.
+ * opens a separately keyed decoy only after irreversibly crypto-erasing the real account.
+ * Setting requires the real passphrase once (proves ownership); the duress password must
+ * differ from it. Removing also requires the real passphrase.
  */
 export function DuressSetup({
   mode,
@@ -30,16 +33,29 @@ export function DuressSetup({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [show, setShow] = useState(false);
+  // An enrolled biometric is a coercible door to the REAL vault that voids duress protection. We
+  // don't enforce exclusivity (per product decision), but we warn honestly at the point of arming.
+  const [bioOn, setBioOn] = useState(false);
+  useEffect(() => {
+    if (mode === 'set') void biometricEnrolled().then(setBioOn).catch(() => undefined);
+  }, [mode]);
 
   const title = mode === 'set' ? t('Duress-Passwort einrichten') : t('Duress-Passwort entfernen');
-  const ready = mode === 'set' ? !!real && !!duress && !!confirm : !!real;
+  const ready =
+    mode === 'set'
+      ? !!real && duress.length >= MIN_DURESS_PASSPHRASE_LENGTH && !!confirm
+      : !!real;
 
   async function save() {
     if (busy || !ready) return;
     if (mode === 'set') {
-      // No minimum length: the duress word protects nothing — it's only a trigger, and a short,
-      // easy-to-type word is better under stress. It only has to be non-empty (button-gated) and
-      // differ from the real passphrase (enforced in setDuressPassword).
+      if (duress.length < MIN_DURESS_PASSPHRASE_LENGTH) {
+        return setErr(
+          t('Das Duress-Passwort muss mindestens {count} Zeichen lang sein.', {
+            count: MIN_DURESS_PASSPHRASE_LENGTH,
+          }),
+        );
+      }
       if (duress !== confirm) return setErr(t('Die Duress-Passwörter stimmen nicht überein.'));
     }
     setBusy(true);
@@ -54,7 +70,13 @@ export function DuressSetup({
     } catch (e) {
       if (e instanceof WrongPassphraseError) setErr(t('Falsche Passphrase.'));
       else if (e instanceof DuressEqualsRealError) setErr(t('Das Duress-Passwort darf nicht deine echte Passphrase sein.'));
-      else setErr(t('Speichern fehlgeschlagen: {msg}', { msg: (e as Error).message }));
+      else if (e instanceof DuressTooShortError) {
+        setErr(
+          t('Das Duress-Passwort muss mindestens {count} Zeichen lang sein.', {
+            count: MIN_DURESS_PASSPHRASE_LENGTH,
+          }),
+        );
+      } else setErr(t('Speichern fehlgeschlagen: {msg}', { msg: (e as Error).message }));
       setBusy(false);
     }
   }
@@ -66,6 +88,7 @@ export function DuressSetup({
     autoComplete: string,
     autoFocus = false,
     onEnter = false,
+    passwordManagerIgnore = false,
   ) => (
     <label className="backup-field">
       <span>{label}</span>
@@ -74,6 +97,9 @@ export function DuressSetup({
           type={show ? 'text' : 'password'}
           value={value}
           autoComplete={autoComplete}
+          data-1p-ignore={passwordManagerIgnore ? 'true' : undefined}
+          data-lpignore={passwordManagerIgnore ? 'true' : undefined}
+          data-bwignore={passwordManagerIgnore ? 'true' : undefined}
           autoFocus={autoFocus}
           disabled={busy}
           onChange={(e) => set(e.target.value)}
@@ -98,14 +124,24 @@ export function DuressSetup({
       <div className="backup-body">
         <p className="backup-warn">
           {mode === 'set'
-            ? tb('Ein **zweites Passwort für den Notfall**: Gibst du es beim Entsperren ein, wird der **gesamte Tresor sofort und unwiderruflich gelöscht** — statt geöffnet zu werden. Von außen sieht es aus wie ein normaler Entsperr-Versuch. Nutze es NUR, wenn du zur Eingabe gezwungen wirst. Es muss sich von deiner echten Passphrase unterscheiden.')
-            : tb('Bestätige deine **echte Passphrase**, um das Duress-Passwort zu entfernen. Danach löscht keine zweite Eingabe mehr den Tresor.')}
+            ? tb('Ein **zweites Passwort für den Notfall**: Gibst du es beim Entsperren ein, wird dein **echtes Konto sofort und unwiderruflich gelöscht** und stattdessen ein **Schein-Konto** geöffnet. Von außen sieht es aus wie ein ganz normales Entsperren. Nutze es NUR, wenn du zur Eingabe gezwungen wirst. Es muss sich von deiner echten Passphrase unterscheiden. Danach kannst du das Schein-Konto in den Einstellungen mit glaubwürdigen Chats füllen.')
+            : tb('Bestätige deine **echte Passphrase**, um das Duress-Passwort zu entfernen. Danach wird auch das Schein-Konto gelöscht und keine zweite Eingabe wechselt mehr das Konto.')}
         </p>
+        {mode === 'set' && bioOn && (
+          <p className="backup-warn">
+            {tb('⚠ **Face ID / Touch ID ist aktiv.** Biometrie öffnet den **echten** Tresor direkt — ein erzwungenes Gesicht/Finger hebelt den Duress-Schutz komplett aus. Für echten Zwangsschutz schalte die Biometrie aus.')}
+          </p>
+        )}
         {field(t('Echte Tresor-Passphrase'), real, setReal, 'current-password', true, mode === 'remove')}
         {mode === 'set' && (
           <>
-            {field(t('Duress-Passwort'), duress, setDuress, 'new-password')}
-            {field(t('Duress-Passwort wiederholen'), confirm, setConfirm, 'new-password', false, true)}
+            {field(t('Duress-Passwort'), duress, setDuress, 'off', false, false, true)}
+            {field(t('Duress-Passwort wiederholen'), confirm, setConfirm, 'off', false, true, true)}
+            <div className="backup-hint">
+              {t('Mindestens {count} Zeichen; nicht im Passwortmanager speichern.', {
+                count: MIN_DURESS_PASSPHRASE_LENGTH,
+              })}
+            </div>
           </>
         )}
         {err && <div className="err-note">{err}</div>}

@@ -16,7 +16,8 @@ transposition cipher.
 > **Status:** the cryptographic core (identity, X3DH, Double Ratchet, sealed
 > sender, at-rest vault, multi-device identity + device linking) is implemented
 > and tested. A newly linked device now receives your profile and contacts and is
-> reliably reachable for your peers; **chat history does not travel yet**. See
+> reliably reachable for your peers; bounded text history is bootstrapped, while
+> historical attachments are deliberately not cloned yet. See
 > [Status](#status) and the open issues.
 
 ## Principle
@@ -91,15 +92,16 @@ current with the code.
 | Multi-device: master identity + cross-signed device certs | ✅ |
 | Device linking (SAS), per-device sessions, revocation | ✅ |
 | Self-sync of *sent* messages to your own devices | ✅ |
-| **Link initial-sync**: profile + contacts land on a newly linked device | ✅ |
+| **Link initial-sync**: profile + contacts + bounded text history land on a newly linked device | ✅ |
 | Reliable inbound to a linked device (ack-driven device-list re-gossip) | ✅ |
 | Link initial-sync: full chat **history** to a linked device | 🚧 [#1](https://github.com/PropagandaPand/SCYTALE/issues/1) |
 | Device management (see / remove linked devices, device names) | 🚧 [#2](https://github.com/PropagandaPand/SCYTALE/issues/2) |
 | Groups × devices (a group message reaching a member's 2nd device) | ⏳ deferred |
 
-A newly linked device now pulls your profile and contact list from the primary,
-so it is recognisably your account rather than an empty shell. Chat history does
-not travel yet — that is the next piece of work.
+A newly linked device now pulls your profile, contact list and relay-confirmed,
+chunked text history from the primary, so it is recognisably your account rather
+than an empty shell. Historical attachments and legacy messages without a stable
+message id are deliberately skipped; complete history transfer remains open.
 
 ## Development
 
@@ -149,8 +151,9 @@ out a man-in-the-middle.
 - **Endpoint:** no encryption helps against a compromised device (malware,
   client-side scanning in the OS, physical access to an unlocked vault) — which
   is precisely the point of the objection to Chat Control.
-- **Multi-device:** see [Status](#status) — chat history does not yet reach a
-  newly linked device, and group messages never reach a member's second device.
+- **Multi-device:** see [Status](#status) — bounded text history reaches a newly
+  linked device, but historical attachments/legacy no-id messages do not; group
+  messages never reach a member's second device.
 
 ---
 

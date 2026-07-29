@@ -1,3 +1,4 @@
+import 'fake-indexeddb/auto';
 import fs from 'node:fs';
 import * as S from './.bundle/entry.js';
 
@@ -95,6 +96,8 @@ ok('Datei über Gesamtlimit wird abgelehnt, ohne sie zu lesen',
 
 const backupSrc = fs.readFileSync(new URL('../src/lib/backup.ts', import.meta.url), 'utf8');
 const dbSrc = fs.readFileSync(new URL('../src/lib/db.ts', import.meta.url), 'utf8');
+const messengerSrc = fs.readFileSync(new URL('../src/Messenger.tsx', import.meta.url), 'utf8');
+const bootSrc = messengerSrc.slice(messengerSrc.indexOf('const bootLoad = enqueueInbox'));
 
 ok('Restore staged alles vor dem einzigen Commit',
   backupSrc.indexOf('await attachments(stageId)') < backupSrc.indexOf('await commitRestoreStage(stageId)') &&
@@ -108,6 +111,21 @@ ok('Restore wechselt eine persistente Account-Generation gegen alte Tab-Writer',
   dbSrc.includes("kv.put(nextGeneration, ACCOUNT_GENERATION_KEY)") &&
   dbSrc.includes('throw new StaleAccountGenerationError()') &&
   backupSrc.includes('beginAccountRestore()'));
+ok('Restore-Fence ist vor dem Staging persistent und wird im Commit atomar entfernt',
+  dbSrc.includes("const ACCOUNT_RESTORE_LOCK_KEY = 'account-restore-lock'") &&
+  dbSrc.includes('await kv.put(lock, ACCOUNT_RESTORE_LOCK_KEY)') &&
+  dbSrc.includes('await kv.delete(ACCOUNT_RESTORE_LOCK_KEY)') &&
+  backupSrc.includes('await beginAccountRestore()') &&
+  backupSrc.includes('await cancelAccountRestore()'));
+ok('Restore-Fence nutzt eine erneuerte Lease statt eines nach Crash permanenten RAM-Tokens',
+  dbSrc.includes('ACCOUNT_RESTORE_LEASE_MS') &&
+  dbSrc.includes('freshRestoreLock(activeRestoreToken)') &&
+  dbSrc.includes("tx.objectStore('restore').clear()"));
+ok('Live-Relay wird vor Restore pausiert und erst nach authentifiziertem Boot geöffnet',
+  messengerSrc.includes('async function quiesceInbox') &&
+  messengerSrc.includes('onBeforeImport={quiesceInbox}') &&
+  bootSrc.indexOf('await bootLoad; // contacts are on their final master roomIds') <
+    bootSrc.indexOf('connectInbox(await inboxRoom(id.sign.publicKey))'));
 ok('unsichere Legacy-Restores ohne DeviceList werden abgelehnt',
   backupSrc.includes('Legacy-Backup ohne authentifizierte Geräteliste'));
 ok('Gerätenamen und auch cardless Message-Räume reisen im Backup mit',
@@ -119,6 +137,38 @@ ok('v4 exportiert bounded chunks statt Attachment-arrayBuffer',
   !backupSrc.includes('blob.arrayBuffer()'));
 ok('Binärformat verlangt exakten EOF',
   backupSrc.includes('if (off !== fileSize) throw new Error(CORRUPT)'));
+
+// Dynamic crash simulation: start + stage a restore, lose every RAM token by switching the DB
+// context, then advance beyond the lease. Reopening must discard only the invisible stage and allow
+// a normal write; the live generation must remain intact.
+await S.switchVaultDb('scytale');
+await S.deleteVaultDb('scytale');
+await S.switchVaultDb('scytale');
+await S.saveRecord('live-before-crash', { iv: new Uint8Array(12), ct: new Uint8Array(16) });
+await S.beginAccountRestore();
+await S.stageRestoreRecord(
+  '11111111111111111111111111111111',
+  'identity',
+  { iv: new Uint8Array(12), ct: new Uint8Array(16) },
+);
+const realNow = Date.now;
+const crashedAt = realNow();
+Date.now = () => crashedAt + S.ACCOUNT_RESTORE_LEASE_MS + 1;
+await S.switchVaultDb('scytale-decoy');
+await S.switchVaultDb('scytale');
+let recovered = false;
+try {
+  await S.saveRecord('live-after-crash', { iv: new Uint8Array(12), ct: new Uint8Array(16) });
+  recovered = await S.withVaultDb('scytale', async (d) =>
+    (await d.get('records', 'live-before-crash')) !== undefined &&
+    (await d.get('records', 'live-after-crash')) !== undefined &&
+    (await d.count('restore')) === 0 &&
+    (await d.get('kv', 'account-restore-lock')) === undefined);
+} finally {
+  Date.now = realNow;
+}
+ok('Crash nach Restore-Beginn wird nach Lease-Ablauf ohne Verlust der Live-Generation geborgen',
+  recovered);
 
 console.log(`\n${pass} ok, ${fail} fail`);
 process.exit(fail ? 1 : 0);

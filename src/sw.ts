@@ -3,16 +3,15 @@
  * dependency-free so the app shell — our first line of defence against a
  * malicious code push — stays fully auditable. Two jobs:
  *
- *   1. Precache the app shell and serve it CACHE-FIRST. The shell is our first
- *      line of defence against a malicious code push, so the code a user runs
- *      must change ONLY when they explicitly accept an update — the server must
- *      not be able to silently swap the shell on a live launch. Navigations and
- *      hashed JS/CSS therefore both come from the precache. A new deploy produces
- *      a new service worker that WAITS: ReloadPrompt forces registration.update()
- *      on a timer and on every foreground (so even a backgrounded iOS PWA notices)
- *      and surfaces "Neue Version" — tapping it posts SKIP_WAITING, the new SW
- *      activates, and its precache (fresh index.html + new hashed assets) takes
- *      over. Staleness is bounded by that prompt, not by a silent code swap.
+ *   1. Precache one complete app build and serve it CACHE-FIRST. Navigations and
+ *      hashed JS/CSS therefore cannot mix bytes from different deployments.
+ *      While a client stays open, a new worker normally waits and ReloadPrompt
+ *      offers an explicit refresh. Browser lifecycle rules may nevertheless
+ *      activate a waiting worker automatically after every old client closes;
+ *      this prompt is release UX, not a trust boundary against a compromised
+ *      origin or deployment pipeline. The security property here is atomic,
+ *      hash-checked build caching, a validated strict CSP on the delivered HTML,
+ *      and fail-closed executable misses.
  *   2. Wake on a CONTENT-FREE Web Push and show a generic "Neue Nachricht".
  *
  * The push payload never carries message content: the vault is passphrase-
@@ -75,7 +74,8 @@ sw.addEventListener('install', (event) => {
   );
 });
 
-// Activate immediately only on an explicit user request (prompt-mode update).
+// An explicit prompt acceptance accelerates activation. Browsers may also
+// activate a waiting worker naturally after all older controlled clients close.
 sw.addEventListener('message', (event) => {
   if ((event.data as { type?: string } | undefined)?.type === 'SKIP_WAITING') void sw.skipWaiting();
 });
@@ -96,11 +96,8 @@ sw.addEventListener('activate', (event) => {
   );
 });
 
-// Serve the app shell CACHE-FIRST: the running code changes only when the user
-// accepts an update (which activates a new SW → a new precache). The server
-// cannot swap the shell out from under a live session on a security tool. The
-// A missing active cache fails closed. Fetching `/` here would silently execute
-// the server's newer shell before the user accepted its waiting worker.
+// Serve the active worker's app shell CACHE-FIRST. A missing active cache fails
+// closed; fetching `/` here could combine this worker with a different deploy.
 function cacheUnavailable(): Response {
   return new Response('SKYTALE-App-Cache fehlt. Bitte die App neu laden oder neu installieren.', {
     status: 503,

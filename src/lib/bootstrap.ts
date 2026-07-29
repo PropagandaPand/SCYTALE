@@ -9,13 +9,33 @@
  *   re-sending `bootreq{requestId}` to P until a bootstrap arrives (pending=false),
  *   which is how the snapshot survives N not yet having an identity at link time.
  */
-import { seal, open, utf8 } from '../crypto';
+import { bytesEqual, seal, open, utf8, type Bytes } from '../crypto';
 import { loadRecord, saveRecord } from './db';
 
 const APPLIED_KEY = 'bootstrap-applied';
 const APPLIED_AAD = utf8.encode('scytale:bootstrap-applied:v1');
 const REQUEST_KEY = 'bootstrap-request';
 const REQUEST_AAD = utf8.encode('scytale:bootstrap-request:v1');
+
+export interface BootstrapDelivery {
+  deviceSignPub: Bytes;
+  sealed: Bytes;
+}
+
+/** A bootstrap frame is deliberately single-recipient. Empty, duplicated or
+ * substituted fan-out results are protocol failures, never "sent enough". */
+export function requireExactBootstrapDelivery<T extends BootstrapDelivery>(
+  targetSignPub: Bytes,
+  deliveries: T[],
+): T {
+  if (
+    deliveries.length !== 1 ||
+    !bytesEqual(deliveries[0].deviceSignPub, targetSignPub)
+  ) {
+    throw new Error('Bootstrap-Ziel ist nicht exakt und erreichbar.');
+  }
+  return deliveries[0];
+}
 
 export async function loadBootstrapApplied(dek: CryptoKey): Promise<Set<string>> {
   const rec = await loadRecord(APPLIED_KEY);

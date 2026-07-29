@@ -15,9 +15,13 @@ import {
   decodeDeviceList,
   isPrimaryDevice,
   createLinkGrant,
+  encodeLinkGrant,
+  sealPayload,
+  SEALED_LINK_GRANT,
   seal,
   open,
   utf8,
+  type Bytes,
   type DeviceList,
   type IdentityKeys,
   type LinkGrant,
@@ -26,7 +30,16 @@ import {
   type SignedPreKeyPublic,
   type SealedRecord,
 } from '../crypto';
-import { compareAndSwapRecord, loadRecord } from './db';
+import {
+  compareAndSwapRecords,
+  compareAndSwapRecordsWithDeletes,
+  loadRecord,
+} from './db';
+import {
+  PENDING_LINK_GRANT_KEY,
+  openPendingLinkGrantRecord,
+  sealPendingLinkGrantRecord,
+} from './linkIntent';
 
 const KEY = 'devicelist';
 const AAD = utf8.encode('scytale:devicelist:v1');
@@ -56,10 +69,15 @@ async function commitSnapshot(
   snapshot: DeviceListSnapshot,
   list: DeviceList,
 ): Promise<boolean> {
-  return compareAndSwapRecord(
-    KEY,
-    snapshot.record,
-    await sealOwnDeviceListRecord(dek, list),
+  if (await loadRecord(PENDING_LINK_GRANT_KEY)) {
+    throw new Error('Geräteliste ist bis zur Zustellung des Kopplungs-Nachweises gesperrt.');
+  }
+  return compareAndSwapRecords(
+    [
+      [KEY, snapshot.record],
+      [PENDING_LINK_GRANT_KEY, undefined],
+    ],
+    [[KEY, await sealOwnDeviceListRecord(dek, list)]],
   );
 }
 
@@ -212,6 +230,111 @@ export async function revokeDevice(
   throw new Error('Geräteliste wurde gleichzeitig zu oft geändert — bitte erneut versuchen.');
 }
 
+export interface CancelledPendingLinkGrant {
+  newList: DeviceList;
+  targetSignPub: Bytes;
+}
+
+/**
+ * Explicit P-side cancellation after DeviceList + delivery intent already
+ * committed. The only safe rollback is a NEWER master-signed list without the
+ * target. Commit that revocation and delete the exact pending payload in one
+ * CAS transaction, so neither a crash nor another tab can leave a ghost entry
+ * paired with an absent retry (or a permanent coordination blocker).
+ */
+export async function cancelPendingLinkGrantAndRevokeDevice(
+  dek: CryptoKey,
+  id: IdentityKeys,
+  expectedTargetSignPub?: Bytes,
+): Promise<CancelledPendingLinkGrant | null> {
+  if (!isPrimaryDevice(id)) {
+    throw new Error('Nur das Hauptgerät kann eine ausstehende Kopplung widerrufen.');
+  }
+  if (expectedTargetSignPub && expectedTargetSignPub.length !== 32) {
+    throw new Error('Ungültiges erwartetes Kopplungs-Ziel.');
+  }
+  let targetSignPub: Bytes | null = expectedTargetSignPub
+    ? new Uint8Array(expectedTargetSignPub)
+    : null;
+  for (let attempt = 0; attempt < MAX_CAS_RETRIES; attempt++) {
+    const [snapshot, pendingSnapshot] = await Promise.all([
+      loadSnapshot(dek),
+      loadRecord(PENDING_LINK_GRANT_KEY),
+    ]);
+    if (pendingSnapshot) {
+      const pending = await openPendingLinkGrantRecord(dek, pendingSnapshot);
+      if (targetSignPub && !eqSign(targetSignPub, pending.recipientSignPub)) {
+        throw new Error('Eine neuere ausstehende Kopplung hat den Widerruf überholt.');
+      }
+      targetSignPub = pending.recipientSignPub;
+    } else if (!targetSignPub) {
+      return null;
+    }
+
+    const current = snapshot.list;
+    if (
+      !current ||
+      !(await verifyDeviceList(current, id.master.publicKey, id.epoch)) ||
+      !deviceInList(current, id.sign.publicKey)
+    ) {
+      throw new Error('Aktuelle Geräteliste ungültig — Kopplungs-Widerruf abgebrochen.');
+    }
+    if (!targetSignPub || eqSign(targetSignPub, id.sign.publicKey)) {
+      throw new Error('Ausstehende Kopplung nennt unzulässig das Hauptgerät.');
+    }
+    const devices = current.devices.filter(
+      (device) => !eqSign(device.signPub, targetSignPub as Bytes),
+    );
+    if (devices.length === current.devices.length) {
+      // A concurrent confirmed delivery + revoke may already have produced the
+      // newer authority. Remove only the exact stale coordination blocker.
+      if (
+        !pendingSnapshot ||
+        await compareAndSwapRecordsWithDeletes(
+          [
+            [KEY, snapshot.record],
+            [PENDING_LINK_GRANT_KEY, pendingSnapshot],
+          ],
+          [],
+          [PENDING_LINK_GRANT_KEY],
+        )
+      ) {
+        return { newList: current, targetSignPub };
+      }
+      continue;
+    }
+    if (devices.length === 0) {
+      throw new Error('Kopplungs-Widerruf würde die Geräteliste leeren.');
+    }
+    const newList = await signDeviceList(
+      id.master.privateKey,
+      id.master.publicKey,
+      id.epoch,
+      current.version + 1,
+      devices,
+    );
+    const listRecord = await sealOwnDeviceListRecord(dek, newList);
+    const committed = pendingSnapshot
+      ? await compareAndSwapRecordsWithDeletes(
+          [
+            [KEY, snapshot.record],
+            [PENDING_LINK_GRANT_KEY, pendingSnapshot],
+          ],
+          [[KEY, listRecord]],
+          [PENDING_LINK_GRANT_KEY],
+        )
+      : await compareAndSwapRecords(
+          [
+            [KEY, snapshot.record],
+            [PENDING_LINK_GRANT_KEY, undefined],
+          ],
+          [[KEY, listRecord]],
+        );
+    if (committed) return { newList, targetSignPub };
+  }
+  throw new Error('Ausstehende Kopplung wurde gleichzeitig zu oft geändert.');
+}
+
 /** Issue and persist a LinkGrant against the latest durable own-list snapshot.
  * A concurrent link/revoke/adopt causes the CAS to miss; the operation then
  * reloads and recomputes so equal-version forks cannot be published.
@@ -221,12 +344,23 @@ export async function issueAndSaveLinkGrant(
   id: IdentityKeys,
   request: LinkRequest,
   offer: LinkOffer,
-): Promise<{ grant: LinkGrant; newList: DeviceList }> {
+): Promise<{
+  grant: LinkGrant;
+  newList: DeviceList;
+  sealedPayload: Bytes;
+  pendingRecord: SealedRecord;
+}> {
   if (!isPrimaryDevice(id)) {
     throw new Error('Nur das Hauptgerät kann weitere Geräte koppeln.');
   }
   for (let attempt = 0; attempt < MAX_CAS_RETRIES; attempt++) {
-    const snapshot = await loadSnapshot(dek);
+    const [snapshot, pendingSnapshot] = await Promise.all([
+      loadSnapshot(dek),
+      loadRecord(PENDING_LINK_GRANT_KEY),
+    ]);
+    if (pendingSnapshot) {
+      throw new Error('Ein bestätigter Kopplungs-Nachweis wartet noch auf Relay-Zustellung.');
+    }
     const current = snapshot.list;
     if (!current || !(await verifyDeviceList(current, id.master.publicKey, id.epoch))) {
       throw new Error('Aktuelle Geräteliste ungültig — Kopplung abgebrochen.');
@@ -239,10 +373,36 @@ export async function issueAndSaveLinkGrant(
       request,
       offer,
     );
-    // Even an idempotent retry rewrites the identical signed list under a fresh
-    // record nonce. That gives it a CAS linearization point and proves no revoke
-    // won after the snapshot was read.
-    if (await commitSnapshot(dek, snapshot, issued.newList)) return issued;
+    const sealedPayload = await sealPayload(
+      request.deviceDhPub,
+      SEALED_LINK_GRANT,
+      await encodeLinkGrant(issued.grant),
+    );
+    const [listRecord, intentRecord] = await Promise.all([
+      sealOwnDeviceListRecord(dek, issued.newList),
+      sealPendingLinkGrantRecord(dek, {
+        recipientSignPub: request.deviceSignPub,
+        sealedPayload,
+        createdAt: Date.now(),
+      }),
+    ]);
+    // Linearize the authoritative list and its retry payload together. The
+    // second precondition serializes linking across tabs and prevents a revoke
+    // from racing ahead while an older grant is still awaiting delivery.
+    if (
+      await compareAndSwapRecords(
+        [
+          [KEY, snapshot.record],
+          [PENDING_LINK_GRANT_KEY, pendingSnapshot],
+        ],
+        [
+          [KEY, listRecord],
+          [PENDING_LINK_GRANT_KEY, intentRecord],
+        ],
+      )
+    ) {
+      return { ...issued, sealedPayload, pendingRecord: intentRecord };
+    }
   }
   throw new Error('Geräteliste wurde gleichzeitig zu oft geändert — Kopplung neu starten.');
 }

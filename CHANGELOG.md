@@ -6,6 +6,42 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Feature: Duress-Passwort → Decoy-Konto (Schutz bei Nötigung)
+
+- Ein **zweites Passwort** am Sperrbildschirm entsperrt **nicht** das echte Konto,
+  sondern **crypto-erased es unwiderruflich** und öffnet ein **vollwertiges
+  Schein-Konto** (eigene Identität, Kontakte, Chats). Von außen sieht das aus wie
+  ein ganz normales Entsperren.
+- Das Decoy lebt in einer eigenen Datenbank und wird beim Auslösen **in den
+  kanonischen Slot migriert** — ein beschlagnahmtes Gerät zeigt danach ein
+  einziges gewöhnliches Konto (kein „decoy"-Name, kein leerer Rest).
+- **Vorbefüllen** unter Einstellungen → „Decoy-Konto befüllen" (nur aus dem echten
+  Konto erreichbar); das Decoy selbst zeigt keinerlei Hinweis auf ein echtes Konto.
+- **Crash-fest**: witness-gebundenes, monotones Promotion-Journal (`pending →
+  copied`), Quell-Fence **vor** dem realen Wipe, batched OOM-sichere Migration,
+  idempotenter Wiederanlauf beim Boot, Löschung der Quelle **erst nach bestätigter**
+  IndexedDB-Deletion, Cross-Tab-Lockdown + Mutation-Lease.
+- **Konstante Argon2-Kosten** bei jedem Fehlversuch (auch während des Lockouts),
+  damit die Zeit nie verrät, ob ein Duress-Passwort gesetzt ist. Mindestlänge 12.
+- Biometrie und Duress **koexistieren**; Face ID startet nicht mehr automatisch,
+  wenn Duress scharf ist (ein erzwungenes Gesicht darf nicht das Echte öffnen).
+- Ehrliche Grenze: die Deniability ist **verhaltensbasiert, nicht at-rest** — vor
+  dem Auslösen sind der `decoyArmed`-Marker und die zweite Datenbank forensisch
+  erkennbar. Details in SECURITY.md.
+
+### Härtung: Security-Remediation (Audit 27.07. → Re-Audit 28.07.2026)
+
+- Die kritischen/hohen Befunde **F-01..F-26** aus dem Audit sind geschlossen;
+  zusätzlich wurden 7 neue Crash-/Cross-Tab-/Zustellrennen (**R-01..R-07**) gefunden
+  und behoben: origin-weite **Single-Writer-Sperre** für den offenen Vault,
+  absturzsichere Decoy-Promotion, Restore-/Duress-**Fences**, Application-first-
+  Inbox-Commit **ohne Ratchet-/OPK-Verlust** bei Storagefehlern, crashfeste
+  Linking-/Bootstrap-Übergänge, richtungs-/raumgebundene **Recall-Namespaces** +
+  Attachment-Crypto-Erase, geschlossene **CSP-** und strukturelle **SW-Shell**-Prüfung.
+- Voller Bericht: `SECURITY_REMEDIATION_2026-07-28.md`. Abschlusslauf grün
+  (Client-/Worker-`tsc`, 805 Test-Assertions, Build, Wrangler-Dry-Run, `npm audit`
+  0/0). Deployment + Live-Verifikation beider Origins stehen noch aus.
+
 ### Feature: Sealed Sender (Absender-Metadaten verbergen)
 
 - Der komplette Wire-Envelope wird vor dem Senden in einen **anonymen Box an den

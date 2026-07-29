@@ -45,6 +45,15 @@ ok('Legacy-Marker ohne Quota-Eigentümer blockiert neue Auto-Transfers',
   S.automaticRecvReservationBytes([{ size: 1, receivedBytes: 0 }], 'room-a') === Number.MAX_SAFE_INTEGER);
 ok('fehlende Größenmetadaten failen geschlossen',
   !S.mayAutoReceiveAttachment([{ mine: false, file: { attId: 'legacy' } }], 1));
+ok('inline empfangene Bytes im Message-Record zählen ebenfalls',
+  S.storedReceivedAttachmentBytes([
+    { mine: false, file: { dataB64: 'AQID' } },
+    { mine: true, file: { dataB64: 'AQID' } },
+  ]) === 3);
+ok('missgebildetes Inline-Base64 failt geschlossen',
+  S.storedReceivedAttachmentBytes([
+    { mine: false, file: { dataB64: '%%%not-base64%%%' } },
+  ]) === Number.MAX_SAFE_INTEGER);
 // NEGATIVE CONTROL: the old per-file-only policy admitted every individually small file.
 const oldPerFileOnly = (bytes) => bytes <= 30 * MiB;
 ok('Negativkontrolle: alte Einzeldateigrenze hätte kumulatives Flooding erlaubt',
@@ -101,6 +110,11 @@ ok('Auto-Pull ist ausdrücklich nicht als Nutzer-Pull markiert',
   /void pullAttachment\([\s\S]*?false,\s*\);/.test(messenger));
 ok('R2-Downloads laufen durch dieselbe globale Reservierungsprüfung',
   /downloadR2Message[\s\S]*?originCanReserve\(valid\.size\)[\s\S]*?r2ReservationsRef\.current\.set/.test(messenger));
+ok('Datei, Reply, Self-Sync und Gruppe nutzen das gemeinsame Inline-Admission-Gate',
+  messenger.includes('async function inboundFileRefFor') &&
+  messenger.includes('await inboundFileRefFor(inboundRoomId') &&
+  messenger.includes('await inboundFileRefFor(g.id') &&
+  messenger.includes('appendFreshInboundMessage(displayRoom, synced)'));
 
 console.log('\n[Account-Wipe: Push-Reihenfolge]');
 const wipeStart = messenger.indexOf('async function doWipeAccount');

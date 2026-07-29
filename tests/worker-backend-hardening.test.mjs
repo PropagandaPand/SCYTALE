@@ -21,6 +21,17 @@ const wrangler = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 const lifecycle = JSON.parse(readFileSync(new URL('../r2-lifecycle.json', import.meta.url), 'utf8'));
 
+console.log('\n[worker: beide produktiven Origins bleiben HTTPS-only]');
+ok('Custom Domain und absichtlich unterstützter workers.dev-Origin sind fest allowgelistet',
+  index.includes("'skytale.chat', 'scytale.illogical.workers.dev'") &&
+  /PROD_HOSTS\.has\(url\.hostname\) && url\.protocol !== 'https:'/.test(index));
+ok('workers.dev bleibt aktiviert und wird nicht als Migrationsrest dokumentiert',
+  /workers_dev\s*=\s*true/.test(wrangler) &&
+  wrangler.includes('intentionally supported') &&
+  !wrangler.includes('AFTER every client has migrated'));
+ok('HSTS wird auf beiden expliziten Produktionshosts gesetzt',
+  /url\.protocol === 'https:' && PROD_HOSTS\.has\(url\.hostname\)/.test(index));
+
 console.log('\n[worker: relay trust boundaries]');
 ok('outer Worker overwrites the internal actor header before DO routing',
   /relayHeaders\.set\('x-scytale-relay-actor', actor\)/.test(index) &&

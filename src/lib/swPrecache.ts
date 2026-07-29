@@ -42,8 +42,25 @@ type CacheWriter = Pick<Cache, 'put'>;
 type AssetFetcher = (path: string) => Promise<Response>;
 
 function manifestPath(url: string): string {
-  const parsed = new URL(url, 'https://local.invalid');
-  if (parsed.origin !== 'https://local.invalid' || parsed.search || parsed.hash) {
+  // Workbox emits canonical relative paths while tests/config may supply the
+  // equivalent root-relative form. Accept those two path-only forms, but never
+  // an authority, a scheme, a backslash URL, or dot-segment normalization.
+  if (
+    !url ||
+    url.startsWith('//') ||
+    url.includes('\\') ||
+    /^[A-Za-z][A-Za-z0-9+.-]*:/.test(url)
+  ) {
+    throw new Error(`Ungültige Precache-URL: ${url}`);
+  }
+  const canonical = url.startsWith('/') ? url : `/${url}`;
+  const parsed = new URL(canonical, 'https://local.invalid');
+  if (
+    parsed.origin !== 'https://local.invalid' ||
+    parsed.search ||
+    parsed.hash ||
+    parsed.pathname !== canonical
+  ) {
     throw new Error(`Ungültige Precache-URL: ${url}`);
   }
   return parsed.pathname;
@@ -56,17 +73,38 @@ async function sha256Hex(response: Response): Promise<string> {
   return hex(digest);
 }
 
-function expectedContentType(path: string): RegExp | null {
+function expectedContentTypes(path: string): readonly string[] | null {
   const clean = path.split(/[?#]/, 1)[0].toLowerCase();
-  if (clean.endsWith('.js')) return /^(?:text|application)\/javascript\b/;
-  if (clean.endsWith('.css')) return /^text\/css\b/;
-  if (clean.endsWith('.html') || clean === '/') return /^text\/html\b/;
-  if (clean.endsWith('.svg')) return /^image\/svg\+xml\b/;
-  if (clean.endsWith('.png')) return /^image\/png\b/;
-  if (clean.endsWith('.woff2')) return /^font\/woff2\b/;
-  if (clean.endsWith('.woff')) return /^(?:font\/woff|application\/font-woff)\b/;
-  if (clean.endsWith('.webmanifest')) return /^(?:application\/manifest\+json|application\/json)\b/;
+  if (clean.endsWith('.js')) return ['text/javascript', 'application/javascript'];
+  if (clean.endsWith('.css')) return ['text/css'];
+  if (clean.endsWith('.html') || clean === '/') return ['text/html'];
+  if (clean.endsWith('.svg')) return ['image/svg+xml'];
+  if (clean.endsWith('.png')) return ['image/png'];
+  if (clean.endsWith('.woff2')) return ['font/woff2'];
+  if (clean.endsWith('.woff')) return ['font/woff', 'application/font-woff'];
+  if (clean.endsWith('.webmanifest')) return ['application/manifest+json', 'application/json'];
   return null;
+}
+
+function contentTypeEssence(raw: string): string | null {
+  // MIME/HTTP parsing uses ASCII OWS, not JavaScript's wider Unicode `trim`.
+  // Reject combined/ambiguous header values and compare the exact type/subtype
+  // before optional parameters; `text/html+evil` is not HTML.
+  if (!raw || /[^\x09\x20-\x7e]/.test(raw) || raw.includes(',')) return null;
+  const semicolon = raw.indexOf(';');
+  if (
+    semicolon >= 0 &&
+    !/^[\t ]*charset[\t ]*=[\t ]*(?:utf-8|"utf-8")[\t ]*$/i.test(
+      raw.slice(semicolon + 1),
+    )
+  ) {
+    return null;
+  }
+  const essence = (semicolon < 0 ? raw : raw.slice(0, semicolon))
+    .replace(/^[\t ]+|[\t ]+$/g, '')
+    .toLowerCase();
+  const token = "[!#$%&'*+.^_`|~0-9a-z-]+";
+  return new RegExp(`^${token}/${token}$`).test(essence) ? essence : null;
 }
 
 async function assertCacheable(
@@ -77,9 +115,12 @@ async function assertCacheable(
   if (!response.ok || response.redirected || response.type === 'error' || response.type === 'opaque') {
     throw new Error(`Precache-Abruf fehlgeschlagen: ${path}`);
   }
-  const expected = expectedContentType(path);
-  const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
-  if (expected && !expected.test(contentType)) {
+  if (response.headers.has('content-disposition')) {
+    throw new Error(`Precache-Antwort erzwingt einen Download: ${path}`);
+  }
+  const expected = expectedContentTypes(path);
+  const contentType = contentTypeEssence(response.headers.get('content-type') ?? '');
+  if (expected && (!contentType || !expected.includes(contentType))) {
     throw new Error(`Unerwarteter Content-Type für ${path}`);
   }
   if (!revision || !/^[a-f0-9]{64}$/.test(revision)) {
@@ -87,6 +128,80 @@ async function assertCacheable(
   }
   if ((await sha256Hex(response)) !== revision) {
     throw new Error(`Precache-Revision stimmt nicht: ${path}`);
+  }
+}
+
+const REQUIRED_SHELL_CSP = new Map<string, ReadonlySet<string>>([
+  ['default-src', new Set(["'self'"])],
+  ['base-uri', new Set(["'self'"])],
+  ['object-src', new Set(["'none'"])],
+  ['frame-ancestors', new Set(["'none'"])],
+  ['form-action', new Set(["'self'"])],
+  ['script-src', new Set(["'self'", "'wasm-unsafe-eval'"])],
+  ['style-src', new Set(["'self'", "'unsafe-inline'"])],
+  ['img-src', new Set(["'self'", 'data:', 'blob:'])],
+  ['media-src', new Set(["'self'", 'blob:'])],
+  ['font-src', new Set(["'self'"])],
+  ['connect-src', new Set(["'self'"])],
+  ['worker-src', new Set(["'self'"])],
+  ['manifest-src', new Set(["'self'"])],
+]);
+
+/**
+ * The edge response, not merely the Worker source, is the security boundary for
+ * an edge-rewritten HTML shell. Require one unambiguous, enforced policy whose
+ * security-critical directives exactly match the narrow policy the application needs.
+ */
+function assertStrictShellCsp(response: Response): void {
+  const raw = response.headers.get('content-security-policy');
+  if (!raw) throw new Error('Shell hat keine erzwungene Content-Security-Policy.');
+
+  // CSP's grammar uses ASCII whitespace. JavaScript `\s` additionally accepts
+  // NBSP and other Unicode separators which Chromium does NOT treat as CSP
+  // token boundaries. Accepting those here could make this validator see
+  // `script-src 'self'` while the browser ignores the malformed directive and
+  // executes an otherwise tolerated edge-injected inline script.
+  if (/[^\x09\x20-\x7e]/.test(raw)) {
+    throw new Error('Shell-CSP enthält Nicht-ASCII- oder Steuerzeichen.');
+  }
+
+  // Fetch combines repeated response headers with a comma. Multiple policies
+  // are normally intersected by browsers, but rejecting the combined syntax
+  // avoids relying on differing CSP/header parsers at this trust boundary.
+  if (raw.includes(',')) throw new Error('Shell hat eine mehrdeutige Content-Security-Policy.');
+
+  const directives = new Map<string, string[]>();
+  for (const rawDirective of raw.split(';')) {
+    const directive = rawDirective.replace(/^[\t ]+|[\t ]+$/g, '');
+    if (!directive) continue;
+    const [rawName, ...rawValues] = directive.split(/[\t ]+/);
+    const name = rawName.toLowerCase();
+    if (!/^[a-z0-9-]+$/.test(name) || directives.has(name)) {
+      throw new Error('Shell hat eine ungültige Content-Security-Policy.');
+    }
+    directives.set(name, rawValues.map((value) => value.toLowerCase()));
+  }
+
+  for (const [name, expected] of REQUIRED_SHELL_CSP) {
+    const actual = directives.get(name);
+    if (
+      !actual ||
+      actual.length !== expected.size ||
+      actual.some((source) => !expected.has(source))
+    ) {
+      throw new Error(`Shell-CSP muss ${name} in der erwarteten strikten Form erzwingen.`);
+    }
+  }
+
+  // CSP has many sink-specific directives (frame-src, style-src-elem, …) which
+  // override a checked fallback directive. Accepting arbitrary extras would let
+  // an edge rewrite weaken exactly one phishing/execution sink while all required
+  // directives still look strict. The production policy is deliberately closed,
+  // so require that exact directive set.
+  for (const name of directives.keys()) {
+    if (!REQUIRED_SHELL_CSP.has(name)) {
+      throw new Error(`Shell-CSP enthält die unerwartete Direktive ${name}.`);
+    }
   }
 }
 
@@ -126,49 +241,366 @@ export async function populateBuildPrecache(
   // every fetch and can NEVER match a build-time hash. Byte-verifying it therefore bricks
   // every client the instant the edge injects — a fleet-wide update freeze.
   //
-  // Integrity of the EXECUTABLE code does not rest on the shell's bytes: the response CSP
-  // (script-src 'self', no 'unsafe-inline') makes any inline or cross-origin script inert,
-  // and this worker's fetch handler only ever serves manifest-verified same-origin assets.
-  // So verify the shell STRUCTURALLY instead — every same-origin script/stylesheet it pulls
-  // must be a byte-verified precache entry, and it must boot a verified module — then cache
-  // the served shell as-is (an injected inline challenge script is inert under the CSP).
+  // Integrity of the EXECUTABLE code does not rest on the shell's bytes: the delivered CSP
+  // must exactly match the application's closed policy, which makes inline/cross-origin
+  // scripts and injected phishing sinks inert, and this worker's fetch handler only ever
+  // serves manifest-verified same-origin assets. So verify that header and the shell
+  // STRUCTURALLY before caching the served shell as-is.
   const shell = await fetchAsset('/');
   if (!shell.ok || shell.redirected || shell.type === 'error' || shell.type === 'opaque') {
     throw new Error('Shell-Abruf fehlgeschlagen: /');
   }
-  if (!/^text\/html\b/.test(shell.headers.get('content-type')?.toLowerCase() ?? '')) {
+  if (shell.headers.has('content-disposition')) {
+    throw new Error('Shell darf keinen Content-Disposition-Header enthalten.');
+  }
+  if (contentTypeEssence(shell.headers.get('content-type') ?? '') !== 'text/html') {
     throw new Error('Shell hat unerwarteten Content-Type.');
   }
+  // `Refresh` is a non-standard response-header equivalent of meta refresh and
+  // can navigate a standalone PWA cross-origin; CSP does not constrain top-level
+  // navigation. Never persist an edge-injected navigation instruction.
+  if (shell.headers.has('refresh')) {
+    throw new Error('Shell darf keinen Refresh-Header enthalten.');
+  }
+  assertStrictShellCsp(shell);
   assertShellReferencesOnlyVerified(await shell.clone().text(), seen);
   await cache.put('/index.html', shell);
 }
 
+interface ShellTag {
+  name: string;
+  closing: boolean;
+  selfClosing: boolean;
+  attributes: Map<string, string | null>;
+}
+
 /**
- * Structural integrity of the app shell. The HTML document may be edge-rewritten (a CDN can
- * inject bot-detection / challenge scripts), so its bytes cannot be pinned. What still holds:
- * the shell must not pull any same-origin script or stylesheet we did not byte-verify, and it
- * must boot a verified module. Inline and cross-origin scripts are independently neutralised by
- * the response CSP (script-src 'self', no 'unsafe-inline') — an injected inline challenge script
- * is inert and needs no policing here. This is defence in depth over the fetch handler, which
- * already refuses to serve any non-manifest script/style at runtime.
+ * Parse only the deliberately tiny HTML subset emitted by our build. This is
+ * intentionally not a forgiving browser parser: malformed/error-recovery syntax
+ * is rejected so the validator and Chromium cannot disagree about active markup.
+ */
+function parseShellTag(raw: string): ShellTag {
+  if (
+    !raw.startsWith('<') ||
+    !raw.endsWith('>') ||
+    raw.slice(1, -1).includes('<') ||
+    /^<[\t\n\f\r ]/.test(raw) ||
+    /^<\/[\t\n\f\r ]/.test(raw)
+  ) {
+    throw new Error('Shell enthält mehrdeutige HTML-Syntax.');
+  }
+  // Browsers do not recognize whitespace between `<` (or `</`) and the tag
+  // name. Never trim it into a valid tag: doing so would let this validator
+  // close an element which Chromium keeps open, hiding the rest of the shell.
+  let inner = raw.slice(1, -1).replace(/[\t\n\f\r ]+$/g, '');
+  const closing = inner.startsWith('/');
+  if (closing) {
+    inner = inner.slice(1).replace(/[\t\n\f\r ]+$/g, '');
+    if (!/^[A-Za-z][A-Za-z0-9]*$/.test(inner)) {
+      throw new Error('Shell enthält einen ungültigen End-Tag.');
+    }
+    return {
+      name: inner.toLowerCase(),
+      closing: true,
+      selfClosing: false,
+      attributes: new Map(),
+    };
+  }
+
+  let selfClosing = false;
+  if (inner.endsWith('/')) {
+    selfClosing = true;
+    inner = inner.slice(0, -1).replace(/[\t\n\f\r ]+$/g, '');
+  }
+  const nameMatch = /^[A-Za-z][A-Za-z0-9]*/.exec(inner);
+  if (!nameMatch) throw new Error('Shell enthält einen ungültigen Start-Tag.');
+  const name = nameMatch[0].toLowerCase();
+  const attributes = new Map<string, string | null>();
+  let cursor = nameMatch[0].length;
+  while (cursor < inner.length) {
+    const spacing = /^[\t\n\f\r ]+/.exec(inner.slice(cursor));
+    if (!spacing) throw new Error(`Shell enthält ungültige Attribute an ${name}.`);
+    cursor += spacing[0].length;
+    if (cursor === inner.length) break;
+    const attrMatch = /^[A-Za-z][A-Za-z0-9-]*/.exec(inner.slice(cursor));
+    if (!attrMatch) throw new Error(`Shell enthält ein ungültiges Attribut an ${name}.`);
+    const attrName = attrMatch[0].toLowerCase();
+    if (attributes.has(attrName)) throw new Error(`Shell enthält das Attribut ${attrName} mehrfach.`);
+    cursor += attrMatch[0].length;
+    const afterAttributeName = cursor;
+    const afterName = /^[\t\n\f\r ]*/.exec(inner.slice(cursor))?.[0] ?? '';
+    cursor += afterName.length;
+    let value: string | null = null;
+    if (inner[cursor] === '=') {
+      cursor++;
+      const afterEquals = /^[\t\n\f\r ]*/.exec(inner.slice(cursor))?.[0] ?? '';
+      cursor += afterEquals.length;
+      const quote = inner[cursor];
+      if (quote !== '"' && quote !== "'") {
+        throw new Error(`Shell muss ${attrName} in Anführungszeichen setzen.`);
+      }
+      const end = inner.indexOf(quote, cursor + 1);
+      if (end < 0) throw new Error(`Shell enthält einen offenen Attributwert an ${name}.`);
+      value = inner.slice(cursor + 1, end);
+      if (!value || /[&<>\u0000]/.test(value)) {
+        throw new Error(`Shell enthält einen mehrdeutigen Attributwert an ${name}.`);
+      }
+      cursor = end + 1;
+    } else {
+      // Leave separating whitespace for the next loop iteration. Consuming it
+      // here would make a boolean attribute followed by another attribute look
+      // concatenated to this strict parser.
+      cursor = afterAttributeName;
+    }
+    attributes.set(attrName, value);
+  }
+  return { name, closing: false, selfClosing, attributes };
+}
+
+function requireOnlyAttributes(
+  tag: ShellTag,
+  allowed: readonly string[],
+): void {
+  for (const name of tag.attributes.keys()) {
+    if (!allowed.includes(name)) {
+      throw new Error(`Shell enthält das unerwartete Attribut ${name} an ${tag.name}.`);
+    }
+  }
+}
+
+function requireVerifiedShellRef(ref: string | null | undefined, verified: ReadonlySet<string>): string {
+  if (!ref) throw new Error('Shell enthält eine Ressource ohne Ziel.');
+  // Accept only a canonical root-relative path. An absolute reference to the
+  // parser's synthetic base (`https://local.invalid/...`) would otherwise look
+  // same-origin here while being cross-origin in the real SKYTALE document.
+  if (!ref.startsWith('/') || ref.startsWith('//') || ref.includes('\\')) {
+    throw new Error(`Shell referenziert eine nicht verifizierte Ressource: ${ref}`);
+  }
+  const parsed = new URL(ref, 'https://local.invalid');
+  if (
+    parsed.origin !== 'https://local.invalid' ||
+    parsed.search ||
+    parsed.hash ||
+    parsed.pathname !== ref ||
+    !verified.has(ref)
+  ) {
+    throw new Error(`Shell referenziert eine nicht verifizierte Ressource: ${ref}`);
+  }
+  return ref;
+}
+
+/**
+ * Structural integrity of the app shell. Its bytes may be edge-rewritten because
+ * Cloudflare injects a per-request inline JavaScript-Detections snippet. The
+ * closed CSP makes that no-attribute inline script inert; everything that can
+ * render, navigate, restyle, brand, or load a resource is checked against a
+ * strict grammar and the byte-verified build manifest.
  */
 export function assertShellReferencesOnlyVerified(html: string, verified: ReadonlySet<string>): void {
-  const refs: string[] = [];
-  // <script …> that carries a src attribute (inline scripts have none — and are CSP-inert).
-  // `[^>]*?` cannot cross the tag's own '>', so an inline script body's `s.src=…` is ignored.
-  for (const m of html.matchAll(/<script\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']/gi)) refs.push(m[1]);
-  // <link rel="stylesheet"|"modulepreload" … href="…">, attribute order-independent.
-  for (const m of html.matchAll(/<link\b[^>]*>/gi)) {
-    if (!/\brel\s*=\s*["']?(?:stylesheet|modulepreload)\b/i.test(m[0])) continue;
-    const href = /\bhref\s*=\s*["']([^"']+)["']/i.exec(m[0]);
-    if (href) refs.push(href[1]);
-  }
+  if (html.includes('<!--')) throw new Error('Shell darf keine HTML-Kommentare enthalten.');
+  if (html.includes('\u0000')) throw new Error('Shell darf keine NUL-Zeichen enthalten.');
+
+  const doctype = /^[\t\n\f\r ]*<!doctype[\t\n\f\r ]+html[\t\n\f\r ]*>/i.exec(html);
+  if (!doctype) throw new Error('Shell muss mit einem eindeutigen HTML-Doctype beginnen.');
+
+  const stack: string[] = [];
+  let cursor = doctype[0].length;
+  let sawHtml = false;
+  let sawHead = false;
+  let closedHead = false;
+  let sawBody = false;
+  let closedBody = false;
+  let sawApp = false;
+  let closedApp = false;
+  let sawTitle = false;
+  let titleText = '';
   let bootsVerifiedModule = false;
-  for (const ref of refs) {
-    const parsed = new URL(ref, 'https://local.invalid');
-    if (parsed.origin !== 'https://local.invalid') throw new Error(`Shell zieht eine fremde Ressource: ${ref}`);
-    if (!verified.has(parsed.pathname)) throw new Error(`Shell referenziert nicht verifizierte Ressource: ${parsed.pathname}`);
-    if (parsed.pathname.endsWith('.js')) bootsVerifiedModule = true;
+
+  const parent = (): string | undefined => stack[stack.length - 1];
+  while (cursor < html.length) {
+    if (html[cursor] !== '<') {
+      const next = html.indexOf('<', cursor);
+      const end = next < 0 ? html.length : next;
+      const text = html.slice(cursor, end);
+      if (parent() === 'title') titleText += text;
+      else if (/[^\t\n\f\r ]/.test(text)) {
+        throw new Error('Shell enthält sichtbaren Text außerhalb des Titels.');
+      }
+      cursor = end;
+      continue;
+    }
+
+    const tagEnd = html.indexOf('>', cursor + 1);
+    if (tagEnd < 0) throw new Error('Shell enthält einen offenen HTML-Tag.');
+    const raw = html.slice(cursor, tagEnd + 1);
+    const tag = parseShellTag(raw);
+
+    if (!tag.closing && tag.name === 'script') {
+      if (tag.selfClosing || (parent() !== 'head' && parent() !== 'body')) {
+        throw new Error('Shell enthält ein Script außerhalb von Head/Body.');
+      }
+      // Find the FIRST sequence a browser can treat as a script end tag. Do not
+      // skip malformed forms such as `</script x>`: Chromium closes the raw-text
+      // element there even though a narrower regex might hide subsequent active
+      // markup inside the apparent script body.
+      const closeStartPattern = /<\/script(?=[\t\n\f\r />])/gi;
+      closeStartPattern.lastIndex = tagEnd + 1;
+      const closeStart = closeStartPattern.exec(html);
+      if (!closeStart) throw new Error('Shell enthält ein Script ohne eindeutigen End-Tag.');
+      const closeEnd = html.indexOf('>', closeStart.index + closeStart[0].length);
+      if (closeEnd < 0) throw new Error('Shell enthält einen offenen Script-End-Tag.');
+      const closeRaw = html.slice(closeStart.index, closeEnd + 1);
+      if (!/^<\/script[\t\n\f\r ]*>$/i.test(closeRaw)) {
+        throw new Error('Shell enthält einen mehrdeutigen Script-End-Tag.');
+      }
+      const scriptBody = html.slice(tagEnd + 1, closeStart.index);
+      const src = tag.attributes.get('src');
+      if (src !== undefined) {
+        requireOnlyAttributes(tag, ['type', 'crossorigin', 'src']);
+        if (
+          parent() !== 'head' ||
+          tag.attributes.get('type') !== 'module' ||
+          (tag.attributes.get('crossorigin') !== null &&
+            tag.attributes.get('crossorigin') !== 'anonymous') ||
+          /[^\t\n\f\r ]/.test(scriptBody)
+        ) {
+          throw new Error('Shell enthält ein nicht kanonisches externes App-Script.');
+        }
+        const path = requireVerifiedShellRef(src, verified);
+        if (!path.endsWith('.js')) throw new Error('Shell-App-Script hat keinen JavaScript-Pfad.');
+        bootsVerifiedModule = true;
+      } else {
+        // The only tolerated edge delta is the CSP-inert, no-attribute inline
+        // JavaScript-Detections snippet observed on the production origin.
+        if (tag.attributes.size !== 0) {
+          throw new Error('Shell enthält ein unerwartet attributiertes Inline-Script.');
+        }
+      }
+      cursor = closeEnd + 1;
+      continue;
+    }
+
+    if (tag.closing) {
+      if (stack.pop() !== tag.name) throw new Error('Shell enthält falsch verschachtelte HTML-Tags.');
+      if (tag.name === 'head') closedHead = true;
+      if (tag.name === 'body') closedBody = true;
+      if (tag.name === 'div') closedApp = true;
+      cursor = tagEnd + 1;
+      continue;
+    }
+
+    switch (tag.name) {
+      case 'html':
+        if (sawHtml || stack.length !== 0 || tag.selfClosing) throw new Error('Shell enthält kein eindeutiges html-Element.');
+        requireOnlyAttributes(tag, ['lang']);
+        if (tag.attributes.get('lang') !== 'de') throw new Error('Shell enthält eine unerwartete Dokumentensprache.');
+        sawHtml = true;
+        stack.push('html');
+        break;
+      case 'head':
+        if (!sawHtml || sawHead || parent() !== 'html' || tag.attributes.size || tag.selfClosing) {
+          throw new Error('Shell enthält keinen eindeutigen Head.');
+        }
+        sawHead = true;
+        stack.push('head');
+        break;
+      case 'body':
+        if (!closedHead || sawBody || parent() !== 'html' || tag.attributes.size || tag.selfClosing) {
+          throw new Error('Shell enthält keinen unveränderten Body.');
+        }
+        sawBody = true;
+        stack.push('body');
+        break;
+      case 'title':
+        if (parent() !== 'head' || sawTitle || tag.attributes.size || tag.selfClosing) {
+          throw new Error('Shell enthält keinen eindeutigen Titel.');
+        }
+        sawTitle = true;
+        stack.push('title');
+        break;
+      case 'div':
+        if (
+          parent() !== 'body' ||
+          sawApp ||
+          tag.selfClosing ||
+          tag.attributes.size !== 1 ||
+          tag.attributes.get('id') !== 'app'
+        ) {
+          throw new Error('Shell muss genau den unveränderten App-Mount enthalten.');
+        }
+        sawApp = true;
+        stack.push('div');
+        break;
+      case 'meta': {
+        if (parent() !== 'head') throw new Error('Shell enthält Meta-Daten außerhalb des Head.');
+        requireOnlyAttributes(tag, ['charset', 'name', 'content']);
+        const charset = tag.attributes.get('charset');
+        const name = tag.attributes.get('name');
+        const content = tag.attributes.get('content');
+        const valid =
+          (tag.attributes.size === 1 && charset?.toLowerCase() === 'utf-8') ||
+          (tag.attributes.size === 2 &&
+            name === 'viewport' &&
+            content ===
+              'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content') ||
+          (tag.attributes.size === 2 && name === 'theme-color' && content === '#0b0c0e');
+        if (!valid) throw new Error('Shell enthält unerwartete Meta-Daten.');
+        break;
+      }
+      case 'link': {
+        if (parent() !== 'head') throw new Error('Shell enthält eine Link-Ressource außerhalb des Head.');
+        requireOnlyAttributes(tag, ['rel', 'href', 'type', 'crossorigin']);
+        const rel = tag.attributes.get('rel');
+        const href = tag.attributes.get('href');
+        if (
+          !rel ||
+          !['stylesheet', 'modulepreload', 'icon', 'apple-touch-icon', 'manifest'].includes(rel)
+        ) {
+          throw new Error('Shell enthält eine unerwartete Link-Beziehung.');
+        }
+        if (
+          tag.attributes.has('crossorigin') &&
+          tag.attributes.get('crossorigin') !== null &&
+          tag.attributes.get('crossorigin') !== 'anonymous'
+        ) {
+          throw new Error('Shell enthält eine unerwartete Cross-Origin-Einstellung.');
+        }
+        const type = tag.attributes.get('type');
+        if (
+          (rel === 'icon' && type !== 'image/svg+xml' && type !== 'image/png') ||
+          (rel !== 'icon' && type !== undefined)
+        ) {
+          throw new Error('Shell enthält einen unerwarteten Link-Typ.');
+        }
+        requireVerifiedShellRef(href, verified);
+        break;
+      }
+      default:
+        throw new Error(`Shell enthält das unerwartete HTML-Element ${tag.name}.`);
+    }
+    if (tag.selfClosing && tag.name !== 'meta' && tag.name !== 'link') {
+      throw new Error(`Shell enthält ein unerwartet selbstschließendes ${tag.name}-Element.`);
+    }
+    cursor = tagEnd + 1;
+  }
+
+  if (
+    stack.length !== 0 ||
+    !sawHtml ||
+    !sawHead ||
+    !closedHead ||
+    !sawBody ||
+    !closedBody ||
+    !sawApp ||
+    !closedApp
+  ) {
+    throw new Error('Shell ist strukturell unvollständig.');
+  }
+  if (
+    !sawTitle ||
+    titleText.replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, '') !== 'SKYTALE'
+  ) {
+    throw new Error('Shell enthält nicht den erwarteten Produkttitel.');
   }
   if (!bootsVerifiedModule) throw new Error('Shell lädt kein verifiziertes App-Modul.');
 }

@@ -23,17 +23,109 @@ export {
   offerReceivedOnN,
   beginLinkOnP,
   confirmLinkSession,
+  createConfirmedNewDeviceLinkIntent,
+  restoreConfirmedNewDeviceLinkSession,
+  restoreDiscardedNewDeviceLinkSession,
+  verifyConfirmedNewDeviceLinkGrant,
+  verifyDiscardedNewDeviceLinkGrant,
+  confirmedLinkGrantRows,
+  confirmedLinkGrantAlreadyInstalled,
   completeLinkOnN,
   completeLinkOnP,
+  LinkGrantDeliveryCancelledError,
+  LinkGrantDeliveryPendingError,
   abortLink,
 } from '../src/lib/linkflow';
-export { aggregateDelivery, hasMessage } from '../src/lib/messages';
+export {
+  CONFIRMED_NEW_DEVICE_LINK_KEY,
+  classifyLinkGrantRelayRow,
+  drainLinkGrantCandidates,
+  saveConfirmedNewDeviceLinkIntent,
+  loadConfirmedNewDeviceLinkIntent,
+  loadDiscardedNewDeviceLinkIntents,
+  discardConfirmedNewDeviceLinkIntent,
+  clearConfirmedNewDeviceLinkIntent,
+} from '../src/lib/linkRecovery';
+export {
+  PENDING_LINK_GRANT_KEY,
+  PendingLinkGrantCorruptionError,
+  sealPendingLinkGrantRecord,
+  loadPendingLinkGrant,
+  clearPendingLinkGrant,
+  clearPendingLinkGrantAndRecover,
+  recoverPendingLinkGrantAtBoot,
+} from '../src/lib/linkIntent';
+export {
+  cancelPendingLinkGrantAndRevokeDevice,
+  loadOrCreateOwnDeviceList,
+  revokeDevice,
+} from '../src/lib/devices';
+export {
+  aggregateDelivery,
+  hasMessage,
+  recallRegistryKey,
+  recallRegistryHas,
+  migrateLegacyRecalledMids,
+  moveRecallRegistryRoom,
+  applyRecallRegistry,
+  prepareRecalledMessageForAppend,
+} from '../src/lib/messages';
+export { RelayClient } from '../src/lib/relay';
+export {
+  withVaultDb,
+  switchVaultDb,
+  currentDbName,
+  deleteVaultDb,
+  neutralizeVaultDb,
+  vaultDbExists,
+  loadVaultDbEnvelope,
+  migrateVaultDb,
+  fenceVaultDbWrites,
+  ACCOUNT_RESTORE_LEASE_MS,
+  beginAccountRestore,
+  cancelAccountRestore,
+  stageRestoreRecord,
+  loadHeader,
+  saveHeader,
+  compareAndSwapHeader,
+  compareAndSwapRecordsWithDeletes,
+  saveRecord,
+  loadRecord,
+  pinTaskAccount,
+  clearTaskAccount,
+} from '../src/lib/db';
+export {
+  createBoundVault,
+  unlockBoundVault,
+  setDuressPassword,
+  removeDuressPassword,
+  openDecoyForPopulate,
+  completeDecoyPromotion,
+  completeDuressRemoval,
+  duressEnabled,
+  MIN_DURESS_PASSPHRASE_LENGTH,
+  DuressTooShortError,
+} from '../src/lib/vaultService';
+export {
+  PROMOTE_MARKER,
+  promoteMarkerPresent,
+  decoyPromotionJournal,
+  markPromoteDecoy,
+  markPromoteDecoyCopied,
+  clearPromoteDecoy,
+  DURESS_REMOVE_MARKER,
+  duressRemovalMarkerPresent,
+  markDuressRemoval,
+  clearDuressRemoval,
+} from '../src/lib/wipe';
 export { derivePrfKek } from '../src/lib/biometric';
 export { isGroupMember, decideInvite } from '../src/lib/groups';
 export { encSection, decSection, backupMetaAad, backupAttAad } from '../src/lib/backupSections';
 export { importBackup, validateBackupManifest } from '../src/lib/backup';
 export { encryptBlob, decryptBlob, BLOB_CHUNK } from '../src/crypto/blob';
 export { backgroundLockExpired } from '../src/lib/backgroundLock';
+export { createVaultRuntimeLockManager } from '../src/lib/runtimeLock';
+export { requireExactBootstrapDelivery } from '../src/lib/bootstrap';
 export { consumeExactByteStream, ExactStreamLengthError } from '../src/lib/exactStream';
 export {
   MAX_AUDIO_ANALYSIS_BYTES,

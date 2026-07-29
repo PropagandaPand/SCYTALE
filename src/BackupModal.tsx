@@ -1,12 +1,12 @@
 import { useState } from 'react';
 import { exportBackup, importBackup } from './lib/backup';
-import { unlockBoundVault, DuressWipedError } from './lib/vaultService';
+import { verifyRealPassphrase } from './lib/vaultService';
 import { t } from './lib/i18n';
 import { tb } from './lib/tnodes';
 
 /**
  * Encrypted recovery backup — export/import. SECURITY: export requires a SECOND
- * authentication (re-enter the vault passphrase, verified via unlockBoundVault)
+ * authentication (re-enter the real vault passphrase via verifyRealPassphrase)
  * so an unlocked vault + physical access can't be a one-click exfil, plus a
  * SEPARATE export passphrase that encrypts the file (full Argon2id). Import
  * overwrites the local identity/state, then reloads.
@@ -15,10 +15,14 @@ export function BackupModal({
   mode,
   dek,
   onClose,
+  onBeforeImport,
+  onImportFailed,
 }: {
   mode: 'export' | 'import';
   dek: CryptoKey;
   onClose: () => void;
+  onBeforeImport?: () => Promise<void>;
+  onImportFailed?: () => Promise<void> | void;
 }) {
   const [vaultPass, setVaultPass] = useState('');
   const [exportPass, setExportPass] = useState('');
@@ -34,8 +38,9 @@ export function BackupModal({
     if (exportPass !== exportPass2) return setErr(t('Export-Passphrasen stimmen nicht überein.'));
     setBusy(true);
     try {
-      // Second auth: an unlocked vault is not enough — prove the passphrase now.
-      await unlockBoundVault(vaultPass); // throws on wrong passphrase / lockout
+      // Second auth: an unlocked vault is not enough — prove the REAL passphrase now. (Real-only:
+      // the duress passphrase does not fire the decoy switch from inside the mounted account.)
+      await verifyRealPassphrase(vaultPass); // throws on wrong passphrase / lockout
       const blob = await exportBackup(dek, exportPass); // already a Blob (streamed sections)
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -47,7 +52,6 @@ export function BackupModal({
       setTimeout(() => URL.revokeObjectURL(url), 2000);
       setDone(t('Backup exportiert. Bewahre die Datei UND die Export-Passphrase getrennt und sicher auf.'));
     } catch (e) {
-      if (e instanceof DuressWipedError) return location.reload(); // duress password entered here too → wipe + boot fresh
       setErr(e instanceof Error ? e.message : t('Export fehlgeschlagen.'));
     } finally {
       setBusy(false);
@@ -59,6 +63,7 @@ export function BackupModal({
     if (!file) return setErr(t('Bitte eine Backup-Datei wählen.'));
     setBusy(true);
     try {
+      await onBeforeImport?.();
       // Pass the File itself: importBackup reads it section by section, so a large
       // backup is never loaded into one array.
       const failed = await importBackup(dek, exportPass, file);
@@ -71,6 +76,7 @@ export function BackupModal({
     } catch (e) {
       setErr(e instanceof Error ? e.message : t('Import fehlgeschlagen.'));
       setBusy(false);
+      await onImportFailed?.();
     }
   }
 

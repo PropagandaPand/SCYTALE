@@ -809,7 +809,7 @@ async function commitStagedRestore(
   attachments: (stageId: string) => Promise<void>,
 ): Promise<void> {
   const stageId = newStageId();
-  beginAccountRestore();
+  await beginAccountRestore();
   let committed = false;
   try {
     await stageMetadata(dek, stageId, blob);
@@ -822,7 +822,7 @@ async function commitStagedRestore(
   } finally {
     // A successful replacement stays write-locked until BackupModal reloads.
     // On failure, no generation changed and ordinary app writes may resume.
-    if (!committed) cancelAccountRestore();
+    if (!committed) await cancelAccountRestore();
   }
 }
 

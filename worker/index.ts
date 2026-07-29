@@ -51,7 +51,10 @@ const ETAG_RE = /^[A-Za-z0-9"_-]{1,256}$/;
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
 const OBJECT_KEY_RE = /^[a-f0-9]{32}$/;
 const ROOM_RE = /^[a-f0-9]{64}$/;
-const PROD_HOST = 'skytale.chat';
+// Both origins are intentionally supported production entry points. The
+// workers.dev hostname must remain available for already-installed PWAs and is
+// held to the same HTTPS/header policy as the custom domain.
+const PROD_HOSTS = new Set(['skytale.chat', 'scytale.illogical.workers.dev']);
 
 /** Enforce the declared part size against the REAL streamed bytes. The quota
  *  coordinator reserves this exact amount before R2 accepts any data. */
@@ -222,9 +225,9 @@ function applySecurityHeaders(headers: Headers, url: URL): void {
   headers.set('Cross-Origin-Resource-Policy', 'same-origin');
   // Camera (QR scanner) + microphone (voice messages), same-origin only; rest off.
   headers.set('Permissions-Policy', 'camera=(self), microphone=(self), geolocation=(), payment=(), usb=()');
-  if (url.protocol === 'https:' && url.hostname === PROD_HOST) {
-    // Deliberately scope HSTS to the audited host. includeSubDomains/preload may
-    // only be added after every subdomain has independently proven HTTPS-only.
+  if (url.protocol === 'https:' && PROD_HOSTS.has(url.hostname)) {
+    // Deliberately scope HSTS to the two audited production hosts.
+    // includeSubDomains/preload would be inappropriate for either parent domain.
     headers.set('Strict-Transport-Security', 'max-age=63072000');
   }
 }
@@ -258,7 +261,7 @@ export default {
 
     // Repository-controlled HTTPS enforcement. The Cloudflare zone should additionally
     // enable Always Use HTTPS, but this keeps the application fail-closed after deploy.
-    if (url.hostname === PROD_HOST && url.protocol !== 'https:') {
+    if (PROD_HOSTS.has(url.hostname) && url.protocol !== 'https:') {
       url.protocol = 'https:';
       return new Response(null, {
         status: 308,

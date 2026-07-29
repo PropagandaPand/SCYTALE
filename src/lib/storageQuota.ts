@@ -28,6 +28,7 @@ interface StoredMessageLike {
   file?: {
     attId?: string;
     size?: number;
+    dataB64?: string;
     pull?: unknown;
   };
 }
@@ -115,7 +116,19 @@ export function storedReceivedAttachmentBytes(messages: ReadonlyArray<StoredMess
   let total = 0;
   for (const message of messages) {
     const file = message.file;
-    if (message.mine || !file?.attId || file.pull || seen.has(file.attId)) continue;
+    if (message.mine || !file || file.pull) continue;
+    if (typeof file.dataB64 === 'string') {
+      // Inline legacy/sticker bytes still consume the sealed message record.
+      // Reject malformed/unbounded metadata rather than letting it disappear
+      // from the automatic receive budget.
+      if (
+        file.dataB64.length > Number.MAX_SAFE_INTEGER / 3 ||
+        !/^[A-Za-z0-9+/]*={0,2}$/.test(file.dataB64)
+      ) return Number.MAX_SAFE_INTEGER;
+      total = saturatingAdd(total, Math.floor((file.dataB64.length * 3) / 4));
+      continue;
+    }
+    if (!file.attId || seen.has(file.attId)) continue;
     // A referenced attachment without trustworthy size metadata must not turn
     // the cap into a fail-open policy for legacy/corrupt records.
     if (!validBytes(file.size)) return Number.MAX_SAFE_INTEGER;

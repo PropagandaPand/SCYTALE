@@ -224,18 +224,169 @@ export async function allMessageRoomIds(): Promise<string[]> {
   return (await listRecordKeys(recordKey(''))).map((k) => k.slice(recordKey('').length));
 }
 
-// Recall registry: mids that were recalled but whose ORIGINAL had not arrived yet
-// (out-of-order, or a re-delivery after the original was tombstoned+dropped). Persisted
-// so a recalled message can't reappear after a reload when its original re-delivers.
-// Globally unique mids, so one flat set suffices.
+// Recall registry: messages that were recalled but whose ORIGINAL had not arrived yet
+// (out-of-order, or a re-delivery after the original was tombstoned+dropped). A MID is
+// known to the peer and is therefore NOT a global namespace: it must be bound to both
+// the local room and the locally assigned direction. The encrypted record stays an
+// array of strings for backup compatibility; new entries carry their own v2 prefix.
 const recalledKey = 'recalled-mids';
 const recalledAad = utf8.encode('scytale:recalled-mids:v1');
+const scopedRecallPrefix = 'v2:';
+
+export function recallRegistryKey(roomId: string, mine: boolean, mid: string): string {
+  // Room ids never contain ':' (the contact/group validators enforce this). MIDs
+  // may contain it for group dedup ids, so parsing consumes only the first fields.
+  return `${scopedRecallPrefix}${mine ? '1' : '0'}:${roomId}:${mid}`;
+}
+
+function parseRecallRegistryKey(
+  value: string,
+): { roomId: string; mine: boolean; mid: string } | null {
+  if (!value.startsWith(scopedRecallPrefix)) return null;
+  const directionAt = scopedRecallPrefix.length;
+  if (
+    (value[directionAt] !== '0' && value[directionAt] !== '1') ||
+    value[directionAt + 1] !== ':'
+  ) {
+    return null;
+  }
+  const roomStart = directionAt + 2;
+  const roomEnd = value.indexOf(':', roomStart);
+  if (roomEnd <= roomStart || roomEnd === value.length - 1) return null;
+  const roomId = value.slice(roomStart, roomEnd);
+  const mid = value.slice(roomEnd + 1);
+  if (roomId.includes(':') || !mid) return null;
+  const mine = value[directionAt] === '1';
+  return recallRegistryKey(roomId, mine, mid) === value ? { roomId, mine, mid } : null;
+}
+
+export function recallRegistryHas(
+  registry: ReadonlySet<string>,
+  roomId: string,
+  mine: boolean,
+  mid: string,
+): boolean {
+  return registry.has(recallRegistryKey(roomId, mine, mid));
+}
+
+/**
+ * Safely migrate the old flat MID set after histories have loaded. Legacy data
+ * did not retain room or direction, so an unmatched value cannot be scoped and
+ * is discarded. Only existing received-direction tombstones are reconstructed:
+ * carrying a legacy value into mine=true could preserve the peer-reflection bug
+ * this migration closes. Existing own tombstones remain durable in their room
+ * log and normal direction-scoped dedup still protects them.
+ */
+export function migrateLegacyRecalledMids(
+  values: readonly string[],
+  rooms: Readonly<Record<string, readonly ChatMessage[]>>,
+): string[] {
+  const migrated = new Set<string>();
+  const legacy = new Set<string>();
+  for (const value of values) {
+    if (typeof value !== 'string') continue;
+    const parsed = parseRecallRegistryKey(value);
+    if (parsed) migrated.add(recallRegistryKey(parsed.roomId, parsed.mine, parsed.mid));
+    else if (!value.startsWith(scopedRecallPrefix) && value) legacy.add(value);
+  }
+  if (legacy.size) {
+    for (const [roomId, messages] of Object.entries(rooms)) {
+      for (const message of messages) {
+        if (
+          !message.mine &&
+          message.recalled === true &&
+          message.mid &&
+          legacy.has(message.mid)
+        ) {
+          migrated.add(recallRegistryKey(roomId, false, message.mid));
+        }
+      }
+    }
+  }
+  return [...migrated].sort();
+}
+
+/** Rebind scoped recall intents when a contact's authenticated room id changes.
+ * `keepOld` stages both keys before storage is moved; a crash then leaves at
+ * least one key matching whichever room generation survives. */
+export function moveRecallRegistryRoom(
+  values: Iterable<string>,
+  oldRoomId: string,
+  newRoomId: string,
+  keepOld = false,
+): string[] {
+  const moved = new Set<string>();
+  for (const value of values) {
+    const parsed = parseRecallRegistryKey(value);
+    if (!parsed || parsed.roomId !== oldRoomId) {
+      moved.add(value);
+      continue;
+    }
+    if (keepOld) moved.add(value);
+    moved.add(recallRegistryKey(newRoomId, parsed.mine, parsed.mid));
+  }
+  return [...moved].sort();
+}
+
+export interface RecallApplication {
+  message: ChatMessage;
+  /** A locally materialized blob that lost its only message reference. */
+  attachmentIdToWipe?: string;
+}
+
+export function applyRecallRegistry(
+  registry: ReadonlySet<string>,
+  roomId: string,
+  message: ChatMessage,
+): RecallApplication {
+  if (!message.mid || !recallRegistryHas(registry, roomId, message.mine, message.mid)) {
+    return { message };
+  }
+  const alreadyTombstoned =
+    message.recalled === true &&
+    message.text === undefined &&
+    message.file === undefined &&
+    message.reply === undefined;
+  if (alreadyTombstoned) return { message };
+  return {
+    message: {
+      ...message,
+      recalled: true,
+      text: undefined,
+      file: undefined,
+      reply: undefined,
+    },
+    // A pull/R2 descriptor has not materialized local bytes yet. Wiping its
+    // attacker-controlled id could collide with an unrelated local attachment.
+    attachmentIdToWipe:
+      message.file?.attId && !message.file.pull && !message.file.r2
+        ? message.file.attId
+        : undefined,
+  };
+}
+
+/**
+ * Resolve a pending recall before the message log can drop the attachment
+ * reference. Awaiting the injected wipe makes the operation crash-safe: a
+ * failed wipe aborts the append and leaves the relay row retryable.
+ */
+export async function prepareRecalledMessageForAppend(
+  registry: ReadonlySet<string>,
+  roomId: string,
+  message: ChatMessage,
+  wipeAttachment: (id: string) => Promise<void>,
+): Promise<ChatMessage> {
+  const applied = applyRecallRegistry(registry, roomId, message);
+  if (applied.attachmentIdToWipe) await wipeAttachment(applied.attachmentIdToWipe);
+  return applied.message;
+}
 
 export async function loadRecalledMids(dek: CryptoKey): Promise<string[]> {
   const rec = await loadRecord(recalledKey);
   if (!rec) return [];
   try {
-    return JSON.parse(utf8.decode(await open(dek, rec, recalledAad))) as string[];
+    const parsed: unknown = JSON.parse(utf8.decode(await open(dek, rec, recalledAad)));
+    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : [];
   } catch {
     return [];
   }

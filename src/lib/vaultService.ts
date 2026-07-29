@@ -21,8 +21,10 @@ import {
   WrongPassphraseError,
   VaultCorruptError,
   type VaultHeader,
+  type SealedRecord,
 } from '../crypto';
 import { getOrCreateDeviceKey } from './deviceKey';
+import { buildDecoySeedRecords } from './decoySeed';
 import {
   loadHeader,
   saveHeader,
@@ -280,8 +282,8 @@ async function recoverBindingSuffix(header: VaultHeader): Promise<string> {
 /**
  * Create the self-contained DECOY vault in its own database ('scytale-decoy'): a fresh
  * non-extractable device key + a vault whose DEK is sealed under the DURESS passphrase and bound to
- * THAT device key. Isolated via withVaultDb so provisioning never touches the live real DB. The
- * decoy's identity + records are created lazily the first time the decoy account is opened.
+ * THAT device key. Isolated via withVaultDb so provisioning never touches the live real DB. A
+ * canonical identity plus local-only cover contacts/history are seeded atomically while arming.
  */
 async function createDecoyVaultInDb(
   duressPassphrase: string,
@@ -298,9 +300,13 @@ async function createDecoyVaultInDb(
   );
   // Match the real header's KDF cost exactly; otherwise an older/calibrated
   // real vault and a default-cost decoy would disclose the armed state by time.
-  const { header } = await createVault(augment(duressPassphrase, hex(bindingSecret)), argon2);
+  const { header, dek } = await createVault(augment(duressPassphrase, hex(bindingSecret)), argon2);
   header.deviceWrap = { iv, ciphertext };
   const witness = await vaultHeaderWitness(header);
+  // Seed the decoy with believable fake contacts + chats (sealed under the decoy DEK) so it looks
+  // lived-in when opened under coercion. Best-effort — a seed failure still leaves a working (empty)
+  // decoy. Built BEFORE the transaction (async crypto), written inside it so provisioning is atomic.
+  const seed = await buildDecoySeedRecords(dek).catch(() => [] as Array<[string, SealedRecord]>);
   await withVaultDb(DECOY_DB, async (d) => {
     // Replace the complete decoy generation atomically. Relying on deleteDB
     // leaves a blocked deletion request racing this open and can retain records
@@ -313,6 +319,7 @@ async function createDecoyVaultInDb(
     await tx.objectStore('kv').clear();
     await tx.objectStore('device').put(deviceKey, 'local_device_key');
     await tx.objectStore('meta').put(header, 'vault');
+    for (const [key, record] of seed) await tx.objectStore('records').put(record, key);
     await tx.done;
   });
   return witness;

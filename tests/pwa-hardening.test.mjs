@@ -661,12 +661,91 @@ ok('Service Worker nutzt den versionierten Namen tatsächlich',
   swSource.includes('versionedPrecacheName(__BUILD_HASH__, manifest)'));
 ok('fehlgeschlagener Install löscht den privaten Kandidaten und wirft weiter',
   /caches\.delete\(cacheName\)[\s\S]*?throw error/.test(swSource));
-ok('unbekannte Script-/Style-Requests fallen nicht ins Live-Netz',
-  /req\.destination === 'script'[\s\S]*?cacheUnavailable\(\)/.test(swSource));
+// The runtime fetch handler is the fleet's trust boundary: it must serve only cached, verified bytes
+// and NEVER fall through to the live network (a compromised deploy could otherwise inject script).
+// The old assertion was a lax `script ... cacheUnavailable` regex that stayed green even if a fetch()
+// were spliced into the miss path; anchor on the whole handler instead.
+const fetchHandler = swSource.slice(
+  swSource.indexOf("sw.addEventListener('fetch'"),
+  swSource.indexOf("sw.addEventListener('push'"),
+);
+ok('SW-fetch-Handler ruft zur Laufzeit NIE fetch() — kein Live-Netz für Shell/Assets',
+  fetchHandler.length > 0 && !/\bfetch\s*\(/.test(fetchHandler));
+ok('Executable-Miss: Geschwister-Precache, sonst fail-closed (kein Netz-Fallthrough)',
+  /findInAnyScytalePrecache\(req\)\) \?\? cacheUnavailable\(\)/.test(fetchHandler) &&
+  /req\.destination === 'script' \|\| req\.destination === 'style' \|\| req\.destination === 'worker'/.test(fetchHandler));
+ok('Asset-Reihenfolge: aktiver Precache zuerst, dann Cross-Precache, dann fail-closed',
+  /cache\.match\(req\)\) \?\? \(await findInAnyScytalePrecache\(req\)\) \?\? cacheUnavailable\(\)/.test(fetchHandler));
+ok('Navigation → cachedShell() (nie Netz)', /req\.mode === 'navigate'[\s\S]*?cachedShell\(\)/.test(fetchHandler));
+// NEGATIVE CONTROL: a network fallthrough in the miss path would flip the no-fetch invariant to FAIL.
+const handlerWithNetworkFallthrough = fetchHandler.replace('cacheUnavailable()', 'fetch(req)');
+ok('Negativkontrolle: ein fetch(req)-Fallthrough im Handler bräche die kein-Netz-Invariante',
+  /\bfetch\s*\(/.test(handlerWithNetworkFallthrough));
 ok('alter globale Cache-Name ist entfernt', !swSource.includes("const PRECACHE = 'scytale-precache'"));
 ok('Update-Prompt wird nicht fälschlich als Origin-Trust-Boundary dokumentiert',
   swSource.includes('this prompt is release UX, not a trust boundary') &&
   !swSource.includes('must change ONLY when they explicitly accept'));
+
+// ── Behavioral: cross-precache lookup serves verified bytes, never the network ──
+// Drives the REAL findInAnyScytalePrecache against a stubbed Cache Storage. This is the extracted
+// core of the fetch handler's build-skew fix; a source regex can't prove it stays read-only.
+console.log('\n[SW: Cross-Precache-Lookup — Verhalten + kein Netz]');
+{
+  const ACTIVE = 'scytale-precache-buildA-aaaa';
+  const SIBLING = 'scytale-precache-buildB-bbbb';
+  const CONTROL = 'scytale-control-v1'; // push-control cache — NOT a scytale precache
+  const assetUrl = 'https://skytale.test/assets/app-abc123.js';
+  const mkResp = (label) => new Response(label, { status: 200 });
+  // A CacheStorage stub: caches.open is create-if-absent (matches the platform + our litter note).
+  const makeCaches = (store) => ({
+    keys: async () => [...store.keys()],
+    open: async (name) => {
+      if (!store.has(name)) store.set(name, new Map());
+      const entries = store.get(name);
+      return { match: async (r) => entries.get(typeof r === 'string' ? r : r.url) };
+    },
+  });
+
+  const savedCaches = globalThis.caches;
+  const savedFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = () => {
+    fetchCalls++;
+    throw new Error('findInAnyScytalePrecache darf NIE ins Live-Netz greifen');
+  };
+
+  // CONTROL is inserted FIRST and holds a poisoned copy at the same URL. If the lookup wrongly
+  // trusted non-precache caches we would get 'CONTROL-poison'; getting 'SIBLING-asset' proves the
+  // isScytalePrecache filter holds AND that a sibling build's precache satisfies an active-cache miss.
+  const store1 = new Map();
+  store1.set(CONTROL, new Map([[assetUrl, mkResp('CONTROL-poison')]]));
+  store1.set(SIBLING, new Map([[assetUrl, mkResp('SIBLING-asset')]]));
+  store1.set(ACTIVE, new Map()); // active precache present but lacks the concurrent build's hashed asset
+  globalThis.caches = makeCaches(store1);
+  const hit = await S.findInAnyScytalePrecache(new Request(assetUrl));
+  ok('Miss im aktiven Precache wird aus Geschwister-scytale-Precache bedient',
+    hit !== undefined && (await hit.text()) === 'SIBLING-asset');
+
+  // Asset present in NO scytale precache → undefined, and the network is never touched.
+  const store2 = new Map();
+  store2.set(ACTIVE, new Map());
+  store2.set(SIBLING, new Map());
+  globalThis.caches = makeCaches(store2);
+  const miss = await S.findInAnyScytalePrecache(new Request(assetUrl));
+  ok('Asset in keiner scytale-Precache → undefined (Caller fällt fail-closed)', miss === undefined);
+  ok('Negativkontrolle: Cross-Precache-Lookup ruft NIE fetch() (kein Live-Netz)', fetchCalls === 0);
+
+  // NEGATIVE CONTROL: the very same asset present ONLY in the non-precache control cache stays a miss.
+  const store3 = new Map();
+  store3.set(CONTROL, new Map([[assetUrl, mkResp('CONTROL-poison')]]));
+  globalThis.caches = makeCaches(store3);
+  const controlOnly = await S.findInAnyScytalePrecache(new Request(assetUrl));
+  ok('Negativkontrolle: Asset nur im control-Cache → Miss (nur scytale-Precaches werden vertraut)',
+    controlOnly === undefined);
+
+  globalThis.caches = savedCaches;
+  globalThis.fetch = savedFetch;
+}
 
 console.log('\n[Medien: automatische Voll-Decodes sind begrenzt]');
 ok('normales Bild bleibt inline',

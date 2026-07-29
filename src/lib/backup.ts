@@ -62,6 +62,15 @@ import { getAttachmentMeta, allAttachmentIds, type AttachmentMeta } from './atta
 import { loadRetiredMasters } from './denylist';
 import { loadOrCreateOwnDeviceList } from './devices';
 import { loadDeviceNames, type DeviceNames } from './devicenames';
+import { loadPendingGroupMutationSnapshots } from './groupMutations';
+import {
+  fromGroupRemovalTombstoneWire,
+  groupRemovalTombstoneRecordKey,
+  loadGroupRemovalTombstones,
+  sealGroupRemovalTombstoneRecord,
+  toGroupRemovalTombstoneWire,
+  type GroupRemovalTombstoneWire,
+} from './groupTombstones';
 import {
   loadRecord,
   stageRestoreRecord,
@@ -165,6 +174,8 @@ interface BackupBlob {
   profile: MyProfile;
   contacts: string[]; // b64 serializeContact each (incl. ratchet state)
   groups: GroupInvite[];
+  /** Monotonic barriers that prevent a removed group from being resurrected. */
+  groupTombstones?: GroupRemovalTombstoneWire[];
   messages: Record<string, ChatMessage[]>;
   stickers?: Sticker[]; // optional: backups written before stickers existed
   // The GLOBAL retired-master denylist (base64 master pubs). MUST travel with the
@@ -226,6 +237,11 @@ async function gather(dek: CryptoKey, attMeta: Record<string, AttachmentManifest
     profile: await loadProfile(dek),
     contacts: await Promise.all(contacts.map(async (c) => b64encode(await serializeContact(c)))),
     groups: await Promise.all(groups.map((g) => toInvite(g))),
+    groupTombstones: await Promise.all(
+      (await loadGroupRemovalTombstones(dek)).map((snapshot) =>
+        toGroupRemovalTombstoneWire(snapshot.tombstone),
+      ),
+    ),
     messages,
     stickers: await loadStickers(dek),
     retiredMasters: [...(await loadRetiredMasters(dek))],
@@ -340,6 +356,8 @@ async function stageMetadata(dek: CryptoKey, stageId: string, blob: BackupBlob):
   }
   boundedArray(blob.contacts, 'Kontakt');
   boundedArray(blob.groups, 'Gruppen');
+  const tombstoneWires = blob.groupTombstones ?? [];
+  boundedArray(tombstoneWires, 'Gruppen-Tombstone');
   if (!isObject(blob.messages) || Object.keys(blob.messages).length > MAX_RECORDS_PER_KIND) {
     throw new Error('Ungültiger oder zu großer Nachrichtenindex im Backup.');
   }
@@ -430,6 +448,22 @@ async function stageMetadata(dek: CryptoKey, stageId: string, blob: BackupBlob):
     groups.push(group);
   }
 
+  const groupTombstones = [];
+  const tombstoneIds = new Set<string>();
+  for (const encoded of tombstoneWires) {
+    if (!isObject(encoded)) {
+      throw new Error('Ungültiger Gruppen-Tombstone im Backup.');
+    }
+    const tombstone = await fromGroupRemovalTombstoneWire(
+      encoded as unknown as GroupRemovalTombstoneWire,
+    );
+    if (tombstoneIds.has(tombstone.groupId) || roomIds.has(tombstone.groupId)) {
+      throw new Error('Inkonsistenter Gruppen-Tombstone im Backup.');
+    }
+    tombstoneIds.add(tombstone.groupId);
+    groupTombstones.push(tombstone);
+  }
+
   for (const [roomId, messages] of Object.entries(blob.messages)) {
     validId(roomId, 'Nachrichtenraum');
     boundedArray(messages, 'Nachrichten', MAX_MESSAGES_PER_ROOM);
@@ -500,6 +534,13 @@ async function stageMetadata(dek: CryptoKey, stageId: string, blob: BackupBlob):
     utf8.encode(JSON.stringify(groups.map((g) => g.id))),
     aad.groups,
   );
+  for (const tombstone of groupTombstones) {
+    await stageRestoreRecord(
+      stageId,
+      groupRemovalTombstoneRecordKey(tombstone.groupId),
+      await sealGroupRemovalTombstoneRecord(dek, tombstone),
+    );
+  }
 
   for (const [roomId, messages] of Object.entries(blob.messages)) {
     const raw = crypto.getRandomValues(new Uint8Array(32)) as Uint8Array<ArrayBuffer>;
@@ -706,6 +747,11 @@ async function exportAttachment(
  * chunks; the encrypted metadata carries their complete size/chunk manifest.
  */
 export async function exportBackup(dek: CryptoKey, exportPassphrase: string): Promise<Blob> {
+  if ((await loadPendingGroupMutationSnapshots(dek)).length > 0) {
+    throw new Error(
+      'Eine Gruppenänderung wartet noch auf bestätigte Zustellung. Backup danach erneut starten.',
+    );
+  }
   const source = new Map<string, AttachmentMeta>();
   const attMeta: Record<string, AttachmentManifest> = Object.create(null) as Record<string, AttachmentManifest>;
   let totalPlain = 0;
@@ -729,6 +775,11 @@ export async function exportBackup(dek: CryptoKey, exportPassphrase: string): Pr
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const key = await deriveExportKey(exportPassphrase, salt, DEFAULT_ARGON2);
   const metaPlain = await gather(dek, attMeta);
+  if ((await loadPendingGroupMutationSnapshots(dek)).length > 0) {
+    throw new Error(
+      'Während des Backups wurde eine Gruppenänderung gestartet. Backup danach erneut starten.',
+    );
+  }
   if (metaPlain.length + GCM_TAG > MAX_META_CT) throw new Error('Backup-Metadaten sind zu groß.');
   const metaSec = await encSection(key, metaPlain, v4MetaAad());
   const bodyParts: BlobPart[] = [new Blob([metaSec.ct])];

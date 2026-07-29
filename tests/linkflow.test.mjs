@@ -22,12 +22,14 @@ console.log('\n[Kopplungs-Krypto: Offer trägt den Master, SAS bindet ihn]');
 
 // 1. N builds the QR request; P decodes it.
 const req = { deviceSignPub: nSign.publicKey, deviceDhPub: nDh.publicKey, sasEphPub: nEph.publicKey,
+  protocolVersion: S.PROTOCOL_VERSION,
   signedPreKey: { id: 3, pub: nDh.publicKey, signature: await S.sign(nDh.publicKey, nSign.privateKey) } };
 const qr = await S.encodeLinkRequest(req);
 const gotReq = await S.decodeLinkRequest(qr);
 ok('QR-Roundtrip erhält N-Keys',
   sodium.to_hex(gotReq.deviceDhPub) === sodium.to_hex(nDh.publicKey) &&
-  sodium.to_hex(gotReq.sasEphPub) === sodium.to_hex(nEph.publicKey));
+  sodium.to_hex(gotReq.sasEphPub) === sodium.to_hex(nEph.publicKey) &&
+  gotReq.protocolVersion === S.PROTOCOL_VERSION);
 
 // 2. P's offer carries P's master (public) + ephemeral. Roundtrip through bytes.
 const offerBytes = S.encodeLinkOffer({ sasEphPub: pEph.publicKey, masterPub: master.publicKey, epoch });
@@ -73,6 +75,22 @@ const { grant, newList } = await S.createLinkGrant(
 );
 ok('Grant cross-signt N', await S.verifyLinkGrant(grant, nSign.publicKey, nDh.publicKey, gotReq.signedPreKey, gotReq, offer));
 ok('neue Liste v2 enthält N', newList.version === 2 && S.deviceInList(newList, nSign.publicKey));
+ok('Grant übernimmt Ns signierte Protokoll-Capability',
+  newList.devices.find((device) =>
+    sodium.to_hex(device.signPub) === sodium.to_hex(nSign.publicKey),
+  )?.protocolVersion === S.PROTOCOL_VERSION);
+
+// The grant proof and signed DeviceList both bind the exact advertised
+// capability. A locally expected downgrade must not verify.
+ok('Grant verifiziert nicht gegen manipulierte Protokoll-Capability',
+  !(await S.verifyLinkGrant(
+    grant,
+    nSign.publicKey,
+    nDh.publicKey,
+    gotReq.signedPreKey,
+    { ...gotReq, protocolVersion: S.PROTOCOL_VERSION - 1 },
+    offer,
+  )));
 
 // Persist-before-send retries reuse the already-issued cert/list verbatim.
 const retried = await S.createLinkGrant(master.privateKey, master.publicKey, epoch, newList, gotReq, offer);

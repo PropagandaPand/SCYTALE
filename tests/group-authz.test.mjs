@@ -1,57 +1,274 @@
-// Group roster authorization (audit F-02). A group has no group-level signature,
-// so an incoming `ginvite`/`gremove` must be authorized against the CURRENT local
-// roster: any current member may manage, but non-members and removed members must
-// bounce off. These pure helpers (isGroupMember/decideInvite) carry that decision.
+// Group-v4 authority is a global owner-master-signed roster. Pairwise sender
+// authentication determines who transported a state, while the signature,
+// monotonic revision and previous-state hash determine whether it is admissible.
 import * as S from './.bundle/entry.js';
 
 let pass = 0, fail = 0;
-const ok = (n, c) => { if (c) { pass++; console.log('  ok  ', n); } else { fail++; console.log('  FAIL', n); } };
+const ok = (n, c) => {
+  if (c) {
+    pass++;
+    console.log('  ok  ', n);
+  } else {
+    fail++;
+    console.log('  FAIL', n);
+  }
+};
+const sodium = await S.getSodium();
 
-const key = (n) => new Uint8Array(32).fill(n);
-const mem = (n, name) => ({ signPub: key(100 + n), dhPub: key(n), name });
-const group = (members, extra = {}) => ({ id: 'grp_test', name: 'Team', members, createdAt: 1000, ...extra });
+const mkPerson = async (name) => {
+  const master = sodium.crypto_sign_keypair();
+  const sign = sodium.crypto_sign_keypair();
+  const dh = sodium.crypto_box_keypair();
+  const id = {
+    master: {
+      publicKey: new Uint8Array(master.publicKey),
+      privateKey: new Uint8Array(master.privateKey),
+    },
+    sign: {
+      publicKey: new Uint8Array(sign.publicKey),
+      privateKey: new Uint8Array(sign.privateKey),
+    },
+    dh: {
+      publicKey: new Uint8Array(dh.publicKey),
+      privateKey: new Uint8Array(dh.privateKey),
+    },
+    epoch: 1,
+    deviceCert: await S.signDeviceCert(
+      master.privateKey,
+      1,
+      sign.publicKey,
+      dh.publicKey,
+    ),
+  };
+  const spk = await S.generateSignedPreKey(id, 1);
+  const entry = {
+    signPub: id.sign.publicKey,
+    dhPub: id.dh.publicKey,
+    deviceCert: id.deviceCert,
+    signedPreKey: {
+      id: spk.id,
+      pub: spk.keyPair.publicKey,
+      signature: spk.signature,
+    },
+    protocolVersion: S.PROTOCOL_VERSION,
+  };
+  const deviceList = await S.signDeviceList(
+    master.privateKey,
+    master.publicKey,
+    1,
+    1,
+    [entry],
+  );
+  return {
+    name,
+    id,
+    deviceList,
+    bundle: S.currentBundle(id, {
+      signedPreKey: spk,
+      oneTimePreKeys: [],
+    }),
+  };
+};
 
-const alice = mem(1, 'Alice');
-const bob = mem(2, 'Bob');
-const carol = mem(3, 'Carol');
-const mallory = mem(9, 'Mallory');
+const asMember = (person) => ({
+  masterPub: person.id.master.publicKey,
+  epoch: 1,
+  signPub: person.id.sign.publicKey,
+  dhPub: person.id.dh.publicKey,
+  bundle: person.bundle,
+  deviceList: person.deviceList,
+  name: person.name,
+});
 
-console.log('\n[isGroupMember]');
-const g = group([alice, bob]);
-ok('Mitglied wird erkannt', S.isGroupMember(g, key(2)) === true);
-ok('Nicht-Mitglied wird abgelehnt', S.isGroupMember(g, key(9)) === false);
-// NEGATIVE CONTROL: must not blindly return true for a key not in the roster.
-ok('Negativkontrolle: kein Blind-True', S.isGroupMember(g, key(9)) !== true);
+const Alice = await mkPerson('Alice (Owner)');
+const Bob = await mkPerson('Bob');
+const Carol = await mkPerson('Carol');
+const Dave = await mkPerson('Dave');
+const Mallory = await mkPerson('Mallory');
 
-console.log('\n[decideInvite]');
-// A brand-new group is trust-on-first-invite (you are being invited).
-const dNew = S.decideInvite(undefined, group([alice, bob]), key(1));
-ok('neue Gruppe → accept', dNew.verdict === 'accept');
+const GROUP_ID = 'grp_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+const CREATED_AT = 1_700_000_000_000;
+const signState = async ({
+  owner = Alice,
+  roster,
+  localSelf,
+  revision,
+  previous,
+  name = 'Team',
+}) => S.signGroupState({
+  id: GROUP_ID,
+  name,
+  createdAt: CREATED_AT,
+  revision,
+  ownerMasterPub: owner.id.master.publicKey,
+  roster: roster.map((person) => person.id.master.publicKey),
+  previousStateHash: previous?.stateHash,
+  members: roster
+    .filter((person) => person !== localSelf)
+    .map(asMember),
+}, owner.id);
 
-// An authorized current member may change the roster and rename.
-const local = group([alice, bob], { createdAt: 555 });
-const incoming = group([alice, bob, carol], { name: 'Team ✦', createdAt: 999 });
-const dUpd = S.decideInvite(local, incoming, key(2)); // Bob is a member
-ok('autorisiertes Mitglied → update', dUpd.verdict === 'update');
-ok('neuer Roster übernommen (Carol dabei)', dUpd.verdict === 'update' && dUpd.group.members.length === 3);
-ok('Rename übernommen', dUpd.verdict === 'update' && dUpd.group.name === 'Team ✦');
-ok('Merge bewahrt lokales createdAt', dUpd.verdict === 'update' && dUpd.group.createdAt === 555);
+console.log('\n[Legacy-v1 bleibt ein enger Kompatibilitätspfad]');
 
-// RESURRECTION ATTACK: Mallory was removed (not in the local roster) but still
-// holds a pairwise session and knows the group id; she sends a ginvite re-adding
-// herself. She is not a current member → rejected, roster is NOT resurrected.
-const afterRemoval = group([alice, bob]);
-const forged = group([alice, bob, mallory]);
-const dRej = S.decideInvite(afterRemoval, forged, key(9)); // sender = Mallory
-ok('Resurrection: Ex-Mitglied → reject', dRej.verdict === 'reject');
-ok('reject trägt einen Grund', dRej.verdict === 'reject' && typeof dRej.reason === 'string' && dRej.reason.length > 0);
+const legacyAlice = {
+  signPub: Alice.id.sign.publicKey,
+  dhPub: Alice.id.dh.publicKey,
+  name: Alice.name,
+};
+const legacyBob = {
+  signPub: Bob.id.sign.publicKey,
+  dhPub: Bob.id.dh.publicKey,
+  name: Bob.name,
+};
+const legacy = {
+  id: 'grp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  name: 'Legacy',
+  members: [legacyAlice, legacyBob],
+  createdAt: 1234,
+  revision: 0,
+};
+ok('Legacy-Mitglied wird erkannt',
+  S.isGroupMember(legacy, Bob.id.dh.publicKey));
+ok('Legacy-Fremder wird abgelehnt',
+  !S.isGroupMember(legacy, Mallory.id.dh.publicKey));
 
-// STRANGER OVERWRITE: a contact who never was in the group tries to rewrite it.
-const dStranger = S.decideInvite(local, group([mallory]), key(9));
-ok('Fremder kann Gruppe nicht überschreiben', dStranger.verdict === 'reject');
+const legacyWire = await S.toInvite(legacy);
+const legacyRoundtrip = await S.fromInvite(legacyWire);
+ok('ownerlose Revision 0 wird ausdrücklich als v1 serialisiert',
+  legacyWire.v === 1 &&
+  legacyWire.revision === 0 &&
+  legacyWire.ownerMasterPub === null);
+ok('v1 wird ownerlos mit Revision 0 wieder geladen',
+  legacyRoundtrip.revision === 0 &&
+  legacyRoundtrip.ownerMasterPub === undefined &&
+  legacyRoundtrip.createdAt === legacy.createdAt);
 
-// NEGATIVE CONTROL: an authorized member must NOT be rejected.
-ok('Negativkontrolle: Mitglied nicht fälschlich abgewiesen', dUpd.verdict !== 'reject');
+let hybridRejected = false;
+try {
+  await S.toInvite({
+    ...legacy,
+    ownerMasterPub: Alice.id.master.publicKey,
+  });
+} catch {
+  hybridRejected = true;
+}
+ok('Owner bei Revision 0 ist kein Legacy-Zustand', hybridRejected);
+
+console.log('\n[Signierter v4-Genesisstand und Personalisierung]');
+
+const signedGenesis = await signState({
+  roster: [Alice, Bob, Carol],
+  localSelf: Bob,
+  revision: 1,
+});
+const genesisWire = await S.toInvite(signedGenesis);
+const local = await S.fromInvite(genesisWire);
+
+ok('v4-Codec prüft echte Owner-Signatur und State-Hash',
+  genesisWire.v === 4 &&
+  await S.verifyGroupState(local));
+ok('globales Roster enthält auch den lokalen Bob',
+  local.roster.length === 3 &&
+  local.roster.some((master) =>
+    S.bytesEqual(master, Bob.id.master.publicKey)));
+ok('personalisierte Transport-Directory lässt nur Bob selbst aus',
+  local.members.length === 2 &&
+  local.members.some((member) =>
+    S.bytesEqual(member.masterPub, Alice.id.master.publicKey)) &&
+  local.members.some((member) =>
+    S.bytesEqual(member.masterPub, Carol.id.master.publicKey)));
+ok('Ersteinladung muss vom signierenden Owner transportiert werden',
+  S.decideInvite(undefined, local, Alice.id.master.publicKey).verdict === 'accept' &&
+  S.decideInvite(undefined, local, Mallory.id.master.publicKey).verdict === 'reject');
+ok('Own-Device-Transport darf denselben Owner-Stand installieren',
+  S.decideInvite(undefined, local, Bob.id.master.publicKey, true).verdict === 'accept');
+
+const tamperedWire = structuredClone(genesisWire);
+tamperedWire.name = 'Manipuliert';
+let tamperedRejected = false;
+try {
+  await S.fromInvite(tamperedWire);
+} catch {
+  tamperedRejected = true;
+}
+ok('Änderung eines signierten Feldes wird schon im Codec verworfen',
+  tamperedRejected);
+
+console.log('\n[Owner-only, exakt sequenziell und hash-verkettet]');
+
+const next = await signState({
+  roster: [Alice, Bob, Carol, Dave],
+  localSelf: Bob,
+  revision: 2,
+  previous: local,
+  name: 'Team + Dave',
+});
+ok('Nicht-Owner darf auch einen echt owner-signierten Stand nicht einspielen',
+  S.decideInvite(local, next, Carol.id.master.publicKey).verdict === 'reject');
+
+const ownerUpdate = S.decideInvite(
+  local,
+  next,
+  Alice.id.master.publicKey,
+);
+ok('Owner-Transport übernimmt exakt Revision N+1',
+  ownerUpdate.verdict === 'update' &&
+  ownerUpdate.group.revision === 2 &&
+  S.isGroupMemberMaster(ownerUpdate.group, Dave.id.master.publicKey));
+ok('Nachfolger ist an den gepinnten State-Hash gebunden',
+  S.bytesEqual(next.previousStateHash, local.stateHash));
+
+const fork = await signState({
+  roster: [Alice, Bob, Carol],
+  localSelf: Bob,
+  revision: 1,
+  name: 'Gültig signierter Parallel-Fork',
+});
+ok('abweichender gültiger Stand derselben Revision wird abgelehnt',
+  S.decideInvite(local, fork, Alice.id.master.publicKey).verdict === 'reject');
+
+const skipped = await signState({
+  roster: [Alice, Bob, Carol, Dave],
+  localSelf: Bob,
+  revision: 3,
+  previous: local,
+  name: 'Übersprungene Revision',
+});
+ok('ein gültig signierter Sprung über N+1 wird abgelehnt',
+  S.decideInvite(local, skipped, Alice.id.master.publicKey).verdict === 'reject');
+
+const wrongLink = await signState({
+  roster: [Alice, Bob, Carol, Dave],
+  localSelf: Bob,
+  revision: 2,
+  previous: fork,
+  name: 'Falscher Vorgänger',
+});
+ok('N+1 mit falschem Vorgänger-Hash wird abgelehnt',
+  S.decideInvite(local, wrongLink, Alice.id.master.publicKey).verdict === 'reject');
+
+const ownerSwap = await signState({
+  owner: Mallory,
+  roster: [Mallory, Bob, Carol],
+  localSelf: Bob,
+  revision: 2,
+  previous: local,
+  name: 'Owner-Swap',
+});
+ok('Own-Device-Transport darf den gepinnten Owner nicht ersetzen',
+  S.decideInvite(
+    local,
+    ownerSwap,
+    Bob.id.master.publicKey,
+    true,
+  ).verdict === 'reject');
+
+ok('identischer Hash und identische Revision sind idempotent',
+  S.decideInvite(local, structuredClone(local), Alice.id.master.publicKey)
+    .verdict === 'noop');
+ok('Own-Device-Transport akzeptiert nur den echten hash-verketteten Nachfolger',
+  S.decideInvite(local, next, Bob.id.master.publicKey, true).verdict === 'update' &&
+  S.decideInvite(local, wrongLink, Bob.id.master.publicKey, true).verdict === 'reject');
 
 console.log(`\n${pass} ok, ${fail} fail`);
 process.exit(fail ? 1 : 0);

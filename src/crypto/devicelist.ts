@@ -37,6 +37,8 @@ export interface DeviceEntry {
   dhPub: Bytes; // X25519 device
   deviceCert: Bytes; // master sig over (epoch, signPub, dhPub)
   signedPreKey?: SignedPreKeyPublic; // present on 3d lists → enables initiating to a silent device
+  /** Master-signed receive capability; absent/0 means legacy or unknown. */
+  protocolVersion?: number;
 }
 
 export interface DeviceList {
@@ -48,6 +50,7 @@ export interface DeviceList {
 }
 
 const CTX = utf8.encode('SCYTALE-DEVLIST-v1');
+const CTX_CAPABILITIES = utf8.encode('SCYTALE-DEVLIST-v3');
 
 function cmpBytes(a: Bytes, b: Bytes): number {
   for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) return a[i] - b[i];
@@ -57,9 +60,17 @@ function cmpBytes(a: Bytes, b: Bytes): number {
 /** Canonical signed message: order-independent in the device set. */
 function listMsg(masterPub: Bytes, epoch: number, version: number, devices: DeviceEntry[]): Bytes {
   const sorted = [...devices].sort((x, y) => cmpBytes(x.signPub, y.signPub));
+  const carriesCapabilities = sorted.some(
+    (device) => device.protocolVersion !== undefined,
+  );
   // masterPub is signed along: it costs nothing and removes a whole class of
   // confusion where a signature verifies under a key the message never named.
-  const parts: Bytes[] = [CTX, masterPub, epochBytes(epoch), epochBytes(version)];
+  const parts: Bytes[] = [
+    carriesCapabilities ? CTX_CAPABILITIES : CTX,
+    masterPub,
+    epochBytes(epoch),
+    epochBytes(version),
+  ];
   // The SIGNED-prekey public is bound in too (when present), so the master vouches
   // for it and it can't be spliced/rolled back independently of the list version.
   // A device WITHOUT a signed prekey (legacy/v1 list) pushes nothing extra → the
@@ -67,6 +78,9 @@ function listMsg(masterPub: Bytes, epoch: number, version: number, devices: Devi
   for (const d of sorted) {
     parts.push(d.signPub, d.dhPub);
     if (d.signedPreKey) parts.push(d.signedPreKey.pub);
+    if (carriesCapabilities) {
+      parts.push(epochBytes(d.protocolVersion ?? 0));
+    }
   }
   return concatBytes(...parts);
 }
@@ -112,6 +126,14 @@ export async function verifyDeviceList(
     return false;
   }
   for (const d of list.devices) {
+    if (
+      d.protocolVersion !== undefined &&
+      (!Number.isSafeInteger(d.protocolVersion) ||
+        d.protocolVersion < 0 ||
+        d.protocolVersion > 0xffff)
+    ) {
+      return false;
+    }
     if (!(await verifyDeviceCert(list.masterPub, list.epoch, d.signPub, d.dhPub, d.deviceCert))) return false;
     // A carried signed prekey must be self-signed by the device it belongs to, so a
     // spliced/forged SPK is rejected everywhere the list is verified (Review fund 3).
@@ -148,17 +170,25 @@ interface WireSpk {
   signature: string;
 }
 interface DeviceListWire {
-  v: 1 | 2; // v2 (Stage 3d) added the optional per-device signedPreKey
+  v: 1 | 2 | 3; // v3 adds master-signed per-device protocol capability
   masterPub: string;
   epoch: number;
   version: number;
-  devices: { signPub: string; dhPub: string; deviceCert: string; signedPreKey?: WireSpk }[];
+  devices: {
+    signPub: string;
+    dhPub: string;
+    deviceCert: string;
+    signedPreKey?: WireSpk;
+    protocolVersion?: number;
+  }[];
   listSig: string;
 }
 
 export async function encodeDeviceList(list: DeviceList): Promise<Bytes> {
   const wire: DeviceListWire = {
-    v: 2,
+    v: list.devices.some((device) => device.protocolVersion !== undefined)
+      ? 3
+      : 2,
     masterPub: await b64encode(list.masterPub),
     epoch: list.epoch,
     version: list.version,
@@ -167,6 +197,9 @@ export async function encodeDeviceList(list: DeviceList): Promise<Bytes> {
         signPub: await b64encode(d.signPub),
         dhPub: await b64encode(d.dhPub),
         deviceCert: await b64encode(d.deviceCert),
+        ...(d.protocolVersion !== undefined
+          ? { protocolVersion: d.protocolVersion }
+          : {}),
         ...(d.signedPreKey
           ? {
               signedPreKey: {
@@ -185,7 +218,9 @@ export async function encodeDeviceList(list: DeviceList): Promise<Bytes> {
 
 export async function decodeDeviceList(bytes: Bytes): Promise<DeviceList> {
   const wire = JSON.parse(utf8.decode(bytes)) as DeviceListWire;
-  if (wire.v !== 1 && wire.v !== 2) throw new Error('Unbekanntes DeviceList-Format.');
+  if (wire.v !== 1 && wire.v !== 2 && wire.v !== 3) {
+    throw new Error('Unbekanntes DeviceList-Format.');
+  }
   return {
     masterPub: await b64decode(wire.masterPub),
     epoch: wire.epoch,
@@ -195,6 +230,11 @@ export async function decodeDeviceList(bytes: Bytes): Promise<DeviceList> {
         signPub: await b64decode(d.signPub),
         dhPub: await b64decode(d.dhPub),
         deviceCert: await b64decode(d.deviceCert),
+        ...(wire.v === 3 &&
+        Number.isSafeInteger(d.protocolVersion) &&
+        (d.protocolVersion as number) >= 0
+          ? { protocolVersion: d.protocolVersion }
+          : {}),
         ...(d.signedPreKey
           ? {
               signedPreKey: {
@@ -224,5 +264,6 @@ export function bundleFromDeviceEntry(masterPub: Bytes, epoch: number, entry: De
     identityDhPub: entry.dhPub,
     signedPreKey: { id: entry.signedPreKey.id, pub: entry.signedPreKey.pub, signature: entry.signedPreKey.signature },
     oneTimePreKey: undefined,
+    protocolVersion: entry.protocolVersion,
   };
 }

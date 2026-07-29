@@ -41,6 +41,8 @@ export interface PreKeyBundle {
   identityDhPub: Bytes; // X25519 device
   signedPreKey: { id: number; pub: Bytes; signature: Bytes };
   oneTimePreKey?: { id: number; pub: Bytes };
+  /** Authenticated only when derived from a verified master-signed DeviceList. */
+  protocolVersion?: number;
 }
 
 async function newX25519(): Promise<KeyPair> {

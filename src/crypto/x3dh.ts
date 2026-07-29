@@ -18,6 +18,7 @@ import { getSodium } from './sodium';
 import { dhAgree, verify } from './identity';
 import type { IdentityKeys } from './identity';
 import type { PreKeyBundle } from './prekeys';
+import type { DeviceList } from './devicelist';
 import { verifyDeviceCert, epochBytes } from './master';
 import { hkdfSha256 } from './kdf';
 import { concatBytes, utf8 } from './codec';
@@ -47,6 +48,14 @@ export interface InitialMessageHeader {
   signedPreKeyId: number;
   oneTimePreKeyId?: number;
   /**
+   * Optional, independently master-signed directory checkpoint. A newly linked
+   * sender device includes the current list so a recipient can authorise that
+   * device before the first X3DH message even when ordinary devlist gossip is
+   * reordered behind it. It is adopted only after signature/rollback checks
+   * and persisted only after this message's AEAD authenticates.
+   */
+  senderDeviceList?: DeviceList;
+  /**
    * UNPROVEN origin hint: "I was previously master X". Not signed, not signable
    * (a signed one would be the rotation chain). Carried so the recipient can
    * offer a merge affordance when this contact re-appears under a new master —
@@ -71,6 +80,7 @@ export class X3DHError extends Error {
 export async function initiateX3DH(
   me: IdentityKeys,
   bundle: PreKeyBundle,
+  senderDeviceList?: DeviceList,
 ): Promise<{ header: InitialMessageHeader; session: X3DHSession }> {
   // Verification order (nothing touches DH material until all checks pass):
   //   1. device cert against the master  2. signed-prekey signature
@@ -125,6 +135,7 @@ export async function initiateX3DH(
     ephemeralPub: ekPub,
     signedPreKeyId: bundle.signedPreKey.id,
     oneTimePreKeyId: bundle.oneTimePreKey?.id,
+    senderDeviceList,
     // Unproven origin hint — see InitialMessageHeader.previousMaster. Outside the
     // AD above ON PURPOSE: it must not authenticate anything, only prompt a merge.
     previousMaster: me.previousMasterPub,

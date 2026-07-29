@@ -50,6 +50,7 @@ import {
   type DeviceList,
   bytesEqual,
   getSodium,
+  PROTOCOL_VERSION,
   type Bytes,
 } from '../crypto';
 import { installLinkedIdentity } from './identity';
@@ -107,6 +108,7 @@ function confirmationSnapshot(session: LinkSession): string {
       sign: bytesSnapshot(request.deviceSignPub),
       dh: bytesSnapshot(request.deviceDhPub),
       eph: bytesSnapshot(request.sasEphPub),
+      protocolVersion: request.protocolVersion,
       spkId: request.signedPreKey.id,
       spk: bytesSnapshot(request.signedPreKey.pub),
       spkSig: bytesSnapshot(request.signedPreKey.signature),
@@ -354,6 +356,7 @@ export async function startLinkOnN(
     deviceSignPub: id.sign.publicKey,
     deviceDhPub: id.dh.publicKey,
     sasEphPub: myEph.publicKey,
+    protocolVersion: PROTOCOL_VERSION,
     signedPreKey: ownSpk,
   };
   return {

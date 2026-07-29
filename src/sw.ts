@@ -21,6 +21,7 @@
 /// <reference lib="webworker" />
 import { bumpBadge } from './lib/badge';
 import {
+  findInAnyScytalePrecache,
   isScytalePrecache,
   populateBuildPrecache,
   versionedPrecacheName,
@@ -105,11 +106,39 @@ function cacheUnavailable(): Response {
   });
 }
 
+// A styled, self-healing page for a genuinely MISSING SHELL (navigation with no precache hit).
+// Better than a blank white crash on old iOS (a bare 503 renders as a white unstyled page): show a
+// branded "loading" that auto-reloads ONCE per session (sessionStorage-guarded so a permanently
+// broken precache can't loop) plus a manual retry. Inline-only — the shell's own assets are exactly
+// what is missing. The app always renders dark, so match that background.
+function navFallback(): Response {
+  const html =
+    '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+    '<title>SKYTALE</title>' +
+    '<style>html,body{margin:0;height:100%;background:#0b0c0e;color:#e7e9ec;' +
+    'font:15px/1.6 -apple-system,system-ui,sans-serif;display:flex;align-items:center;justify-content:center}' +
+    'b{color:#12a488}button{margin-top:14px;padding:10px 18px;border:0;border-radius:10px;' +
+    'background:#12a488;color:#fff;font:inherit}</style>' +
+    '<div style="text-align:center;padding:24px"><p><b>SKYTALE</b></p><p id="m">Lädt…</p>' +
+    '<button onclick="location.reload()">Neu laden</button></div>' +
+    '<script>function stop(){var el=document.getElementById("m");if(el)el.textContent=' +
+    '"Konnte nicht laden — tippe Neu laden.";}try{var k="skytale-nav-retry";' +
+    'if(sessionStorage.getItem(k)){stop();}else{sessionStorage.setItem(k,"1");' +
+    'setTimeout(function(){location.reload()},1500);}}catch(e){stop();}</script>';
+  return new Response(html, {
+    status: 200,
+    headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
+  });
+}
+
 async function cachedShell(): Promise<Response> {
   const cache = await caches.open(await PRECACHE);
   const cached = await cache.match('/index.html');
   if (cached) return cached;
-  return cacheUnavailable();
+  const anyShell = await findInAnyScytalePrecache(
+    new Request(new URL('/index.html', sw.location.origin).toString()),
+  );
+  return anyShell ?? navFallback();
 }
 
 sw.addEventListener('fetch', (event) => {
@@ -130,15 +159,19 @@ sw.addEventListener('fetch', (event) => {
   if (!ASSET_SET.has(url.pathname)) {
     // Executable build resources must never fall through to the live deployment:
     // that would combine a consented shell with unconsented script/style bytes.
+    // But a CONCURRENT build's precache may legitimately hold this hashed asset during
+    // an update window (the shell served was a different build) — that is verified,
+    // content-addressed bytes from a scytale precache, never the network, so serve it
+    // before failing closed. Closes the blank-page-on-push-tap build skew.
     if (req.destination === 'script' || req.destination === 'style' || req.destination === 'worker') {
-      event.respondWith(cacheUnavailable());
+      event.respondWith((async () => (await findInAnyScytalePrecache(req)) ?? cacheUnavailable())());
     }
     return;
   }
   event.respondWith(
     (async () => {
       const cache = await caches.open(await PRECACHE);
-      return (await cache.match(req)) ?? cacheUnavailable();
+      return (await cache.match(req)) ?? (await findInAnyScytalePrecache(req)) ?? cacheUnavailable();
     })(),
   );
 });

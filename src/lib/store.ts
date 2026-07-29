@@ -3,7 +3,7 @@
  * with the DEK before it touches IndexedDB. A small sealed index lists the
  * known room ids.
  */
-import { seal, open, utf8 } from '../crypto';
+import { seal, open, utf8, type SealedRecord } from '../crypto';
 import { serializeContact, deserializeContact, type Contact } from './session';
 import { loadRecord, saveRecord, saveRecordsAtomically, secureDeleteRecord } from './db';
 import { cryptoEraseRoom } from './messages';
@@ -71,6 +71,19 @@ export async function removeContact(dek: CryptoKey, roomId: string): Promise<voi
   await secureDeleteRecord(`contact:${roomId}`);
   const ids = (await loadIndex(dek)).filter((id) => id !== roomId);
   await saveIndex(dek, ids);
+}
+
+/** Build the sealed `contact:<roomId>` record WITHOUT writing it, reusing the exact same AAD +
+ *  serialization as saveContact. For seeding the decoy account into its own database at provision
+ *  time (the caller writes the returned [key, record] via a raw withVaultDb handle, not the active
+ *  DB). Keeping this next to saveContact means the seed can never drift from the real seal format. */
+export async function sealContactRecord(dek: CryptoKey, c: Contact): Promise<[string, SealedRecord]> {
+  return [`contact:${c.roomId}`, await seal(dek, await serializeContact(c), contactAad(c.roomId))];
+}
+
+/** Build the sealed `contact-index` record (list of roomIds) WITHOUT writing it. Decoy-seed helper. */
+export async function sealContactIndexRecord(dek: CryptoKey, ids: string[]): Promise<[string, SealedRecord]> {
+  return ['contact-index', await seal(dek, utf8.encode(JSON.stringify(ids)), INDEX_AAD)];
 }
 
 export async function loadContacts(dek: CryptoKey): Promise<Contact[]> {

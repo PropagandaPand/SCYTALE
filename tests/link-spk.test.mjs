@@ -39,6 +39,7 @@ const req = {
   deviceSignPub: N.id.sign.publicKey,
   deviceDhPub: N.id.dh.publicKey,
   sasEphPub: (sodium.crypto_box_keypair()).publicKey,
+  protocolVersion: S.PROTOCOL_VERSION,
   signedPreKey: N.spkPub,
 };
 // createLinkGrant now also binds P's offer transcript (F-04); a valid matching offer.
@@ -51,6 +52,8 @@ const pe = newList.devices.find((d) => eqh(d.signPub, P.id.sign.publicKey));
 const ne = newList.devices.find((d) => eqh(d.signPub, N.id.sign.publicKey));
 ok('P-Eintrag behält seinen SPK', pe?.signedPreKey?.id === P.spk.id && eqh(pe.signedPreKey.pub, P.spk.keyPair.publicKey));
 ok('N-Eintrag bekommt seinen SPK aus dem Request', ne?.signedPreKey?.id === N.spk.id && eqh(ne.signedPreKey.pub, N.spk.keyPair.publicKey));
+ok('N-Eintrag bekommt seine signierte Protokoll-Capability',
+  ne?.protocolVersion === S.PROTOCOL_VERSION);
 
 // Both entries yield an initiable bundle (a peer can fan out to either).
 ok('bundleFromDeviceEntry(P) initiierbar', S.bundleFromDeviceEntry(master.publicKey, 1, pe) !== null);

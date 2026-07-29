@@ -659,19 +659,31 @@ Node/npm version.)
   **network correlation** (sender IP → recipient inbox), which crypto does not cover (would need Tor/a mixnet). The
   same residual surface as Signal's sealed sender; traffic analysis stays hard.
 - **Push timing** necessarily goes to Apple/Google (that a device got *some* message) → hence content-free + opt-in.
-- **Groups v1/v2**: "soft" membership via pairwise fan-out without cryptographic re-keying — a removed member keeps
-  old history. Real forward/post-compromise security on membership change would need sender keys / MLS (v3). The
-  **sender display** of a group message is nonetheless **not** forgeable: it is derived from the cryptographically
-  authenticated pairwise contact, **never** from the accompanying `senderName` field, and a message from a
-  non/removed member is discarded. `ensureMemberContact` checks **denylist + device cert** when creating a member
-  contact — a stale roster cannot re-pin an abandoned master over the group surface.
-- **Device revocation does NOT apply in groups** (a 3c limit): the bearer guard checks the master-signed device
-  list only for 1:1 contacts. Group members are created via `ensureMemberContact` without a `peerDeviceList`, so
-  the guard is off for them. Kept as an executable target in `tests/group-revocation.xfail.test.mjs`.
-- **Groups × devices (a 3e limit):** 3d fan-out + self-sync are **1:1-only**. A group message reaches **no second
-  device** of a member, and my own second device never sees group messages from my other device. A visible in-chat
-  hint says so rather than letting it read as message loss. Also open: **attachment cardinality** in groups (Σ
-  devices × members is an availability lever). Both as executable targets in `tests/group-device-fanout.xfail.test.mjs`.
+- **Groups v3 use pairwise E2EE, not a shared group cipher.** The owner distributes
+  a monotonic, personalised roster inside existing authenticated ratchets. Every
+  member is identified by its stable master key and carries a verified,
+  master-signed DeviceList/SPK directory. Members that never saved one another
+  can therefore establish independent X3DH + Double-Ratchet sessions directly.
+  One logical MID is copied to every current member device and to the sender's
+  linked devices; ratchets are persisted before any ciphertext is dispatched.
+- **Membership and revocation.** Only the pinned owner may add/remove members or
+  rename a v3 group. Content is bound to the exact roster revision; stale,
+  conflicting, non-member and removed-member frames are discarded. A removal
+  stops future fan-out to that master and a durable encrypted mutation marker
+  retries partial roster/remove delivery after crashes. Per-device DeviceList
+  acknowledgements keep revocation gossip active until every known target device
+  has acknowledged it. Hidden group contacts cannot inject invisible direct-chat
+  content and are crypto-erased when no group references them.
+- **Honest group limits.** A removed member retains history already delivered;
+  E2EE cannot erase plaintext already read or stored by a modified client.
+  Exclusion is effective on a sender once it has processed the owner's new
+  revision—an offline/stale sender may still operate on its old local view until
+  the queued update arrives. Groups are not MLS, provide no global asynchronous
+  consensus or owner-equivocation transparency, and identity labels introduced
+  by the owner still require an out-of-band safety-number comparison. Mixed
+  legacy clients may not understand v3 revision semantics. Group attachments
+  remain inline-only and are bounded by per-file, device-count and aggregate
+  fan-out budgets.
 - **Self-sync covers SENT messages only** (receive-sync redundancy deferred): my other devices see what I send, and
   received messages via the peer's fan-out to my device list. If a peer does NOT reach my devices (a pre-3d client,
   or one that hasn't learned my list), the received message is missing on my second device until they see the list.

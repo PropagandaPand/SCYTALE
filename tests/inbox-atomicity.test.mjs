@@ -44,11 +44,11 @@ ok('transiente Storage-/Restore-/Korruptionsfehler behalten den Relay-Eintrag',
   inbox.includes('e instanceof StaleAccountGenerationError') &&
   inbox.includes('e instanceof MessageCorruptionError') &&
   inbox.includes('if (!retainRelayRow)'));
-ok('vor der Einladung gepufferte Gruppenframes werden nicht geackt',
-  source.includes('throw new DeferredInboxApplicationError()') &&
-  source.includes('e instanceof DeferredInboxApplicationError'));
+ok('unbekannte Gruppenframes werden verworfen und können die Relay-Inbox nicht blockieren',
+  source.includes('Nachricht für unbekannte Gruppe verworfen') &&
+  !source.includes('DeferredInboxApplicationError'));
 ok('Gruppen-Dedup bindet die authentifizierte Sender-Identität',
-  source.includes('const messageId = `g:${bytesToB64(contact.peerDhPub)}:${wireMid}`'));
+  source.includes('const messageId = `g:${bytesToB64(contact.peerMasterPub)}:${wireMid}`'));
 ok('Bootstrap-Profil wird erst nach erfolgreicher Persistenz im RAM veröffentlicht',
   bootstrap.indexOf('await saveProfile(dek, next)') <
     bootstrap.indexOf('myProfileRef.current = next'));

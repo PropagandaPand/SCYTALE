@@ -3,7 +3,7 @@
  * (AES-256-GCM) before it touches IndexedDB — at rest it's ciphertext, bound
  * per room via AAD. Loaded on unlock so conversations survive lock/reload.
  */
-import { seal, open, utf8, type Bytes } from '../crypto';
+import { seal, open, utf8, type Bytes, type SealedRecord } from '../crypto';
 import { loadRecord, saveRecord, deleteRecord, listRecordKeys, secureDeleteRecord } from './db';
 
 /**
@@ -155,6 +155,24 @@ async function ensureRoomKey(dek: CryptoKey, roomId: string): Promise<CryptoKey>
   const raw = crypto.getRandomValues(new Uint8Array(32)) as Uint8Array<ArrayBuffer>;
   await saveRecord(roomKeyKey(roomId), await seal(dek, raw, roomKeyAad(roomId)));
   return importRoomKey(raw);
+}
+
+/** Build the sealed `roomkey:<roomId>` + `msgs:<roomId>` records for a fresh room WITHOUT writing
+ *  them (a new random per-room key each time), reusing the exact same AADs + layout as saveMessages.
+ *  For seeding the decoy account into its own database at provision time — the caller writes the
+ *  returned [key, record] pairs via a raw withVaultDb handle. Colocated with the real seal so the
+ *  seed can never drift from the format the decoy will later read back. */
+export async function sealRoomRecords(
+  dek: CryptoKey,
+  roomId: string,
+  msgs: ChatMessage[],
+): Promise<Array<[string, SealedRecord]>> {
+  const raw = crypto.getRandomValues(new Uint8Array(32)) as Uint8Array<ArrayBuffer>;
+  const rk = await importRoomKey(raw);
+  return [
+    [roomKeyKey(roomId), await seal(dek, raw, roomKeyAad(roomId))],
+    [recordKey(roomId), await seal(rk, utf8.encode(JSON.stringify(msgs)), aad(roomId))],
+  ];
 }
 
 /** Crypto-erase a whole room: destroy the per-room key (the guarantee), then delete the

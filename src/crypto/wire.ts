@@ -12,6 +12,11 @@ import { getSodium } from './sodium';
 import type { InitialMessageHeader } from './x3dh';
 import type { RatchetHeader, RatchetMessage } from './ratchet';
 import type { PreKeyBundle } from './prekeys';
+import {
+  decodeDeviceList,
+  encodeDeviceList,
+  type DeviceList,
+} from './devicelist';
 import type { Bytes } from './types';
 
 interface RatchetHeaderWire {
@@ -32,6 +37,7 @@ interface InitialHeaderWire {
   ek: string;
   spk: number;
   opk: number | null;
+  dl?: string | null; // optional master-signed sender DeviceList checkpoint
   pm?: string | null; // previousMaster (unproven origin hint), optional
 }
 
@@ -51,6 +57,9 @@ export async function encodeInitialHeader(h: InitialMessageHeader): Promise<Init
     ek: await b64encode(h.ephemeralPub),
     spk: h.signedPreKeyId,
     opk: h.oneTimePreKeyId ?? null,
+    dl: h.senderDeviceList
+      ? await b64encode(await encodeDeviceList(h.senderDeviceList))
+      : null,
     pm: h.previousMaster ? await b64encode(h.previousMaster) : null,
   };
 }
@@ -64,6 +73,9 @@ export async function decodeInitialHeader(o: InitialHeaderWire): Promise<Initial
     ephemeralPub: await b64decode(o.ek),
     signedPreKeyId: o.spk,
     oneTimePreKeyId: o.opk ?? undefined,
+    senderDeviceList: o.dl
+      ? await decodeDeviceList(await b64decode(o.dl))
+      : undefined,
     previousMaster: o.pm ? await b64decode(o.pm) : undefined,
   };
 }
@@ -83,8 +95,10 @@ export async function decodeInitialHeader(o: InitialHeaderWire): Promise<Initial
  *   4 = can receive view-once (byte 18 + chunk `vo`), R2 large files (byte 19) and the
  *       unlink request (byte 20). Sending any of those to a pv<4 device would make it
  *       throw-and-drop, so those sends MUST gate on deviceProtocolVersion >= 4.
+ *   5 = group-v3 sync to sibling devices (frame byte 21).
+ *   6 = owner-master-signed group-v4 state, state-hash-bound content/removals.
  */
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 6;
 
 export type Envelope =
   | { type: 'prekey'; conv: string; x3dh: InitialMessageHeader; message: RatchetMessage; pv?: number }
@@ -128,6 +142,7 @@ export class EnvelopeError extends Error {
 
 const KEY_LEN = 32;
 const SIG_LEN = 64;
+const MAX_HEADER_DEVICE_LIST_BYTES = 64 * 1024;
 
 function reqStr(v: unknown, what: string): string {
   if (typeof v !== 'string' || v.length === 0) throw new EnvelopeError(what);
@@ -192,6 +207,18 @@ async function decMsgChecked(m: unknown): Promise<RatchetMessage> {
 async function decodeInitialHeaderChecked(x: unknown): Promise<InitialMessageHeader> {
   if (!x || typeof x !== 'object') throw new EnvelopeError('X3DH-Header fehlt');
   const o = x as Record<string, unknown>;
+  let senderDeviceList: DeviceList | undefined;
+  if (o.dl !== null && o.dl !== undefined) {
+    const encoded = await reqB64(o.dl, 'senderDeviceList');
+    if (encoded.length > MAX_HEADER_DEVICE_LIST_BYTES) {
+      throw new EnvelopeError('senderDeviceList zu groß');
+    }
+    try {
+      senderDeviceList = await decodeDeviceList(encoded);
+    } catch {
+      throw new EnvelopeError('senderDeviceList');
+    }
+  }
   return {
     masterPub: reqBytes(await reqB64(o.mp, 'masterPub'), KEY_LEN, 'masterPub Länge'),
     epoch: reqUint(o.ep, 'epoch'),
@@ -201,6 +228,7 @@ async function decodeInitialHeaderChecked(x: unknown): Promise<InitialMessageHea
     ephemeralPub: reqBytes(await reqB64(o.ek, 'ephemeralPub'), KEY_LEN, 'ephemeralPub Länge'),
     signedPreKeyId: reqUint(o.spk, 'signedPreKeyId'),
     oneTimePreKeyId: o.opk === null || o.opk === undefined ? undefined : reqUint(o.opk, 'oneTimePreKeyId'),
+    senderDeviceList,
     // Optional, unproven, length-checked only. It authorises nothing, so a bad
     // value can at worst mean "no merge hint" — reject the wrong length rather
     // than truncate.

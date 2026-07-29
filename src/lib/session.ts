@@ -75,12 +75,24 @@ export interface Contact {
   verifiedSuggestionDismissed?: boolean;
   /**
    * The highest (epoch, version) of MY device list this peer has acknowledged
-   * (listack). Drives reliable re-gossip: I keep offering my current list until the
-   * peer's ack catches up, so a peer that was offline at link time still learns my
-   * new device and can fan out to it. Monotonic, forward-only.
+   * (listack). Legacy single-device watermark; new code keeps the authoritative
+   * value per peer device below.
    */
   peerAckedListEV?: { epoch: number; version: number };
+  /**
+   * Per-target-device acknowledgement of MY current DeviceList. A person-level
+   * watermark is insufficient: one secondary device acknowledging a revocation
+   * must not stop retries to another device that never received it.
+   */
+  peerAckedListByDevice?: Record<string, { epoch: number; version: number }>;
   hidden?: boolean; // group-member-only contact — kept out of the 1:1 list
+  /**
+   * Explicit local simulation contact used only by the provisioned decoy
+   * account. It is never connected to a relay and text sends are local echoes.
+   * An explicit bit is safer than inferring this from "no bundle/session",
+   * because legitimate bootstrap contacts can temporarily have that shape.
+   */
+  localOnly?: boolean;
   /**
    * This contact predates a device-linking identity swap: they still have our
    * OLD master pinned. Sending is blocked (see sendContent) because anything we
@@ -193,7 +205,12 @@ export function sessionFor(contact: Contact, deviceSignPub: Bytes): Session | un
  *  forward-compatible feature on `deviceProtocolVersion(...) >= N` — a stale or
  *  unknown device stays 0 and keeps the backward-compatible path. */
 export function deviceProtocolVersion(contact: Contact, deviceSignPub: Bytes): number {
-  return sessionFor(contact, deviceSignPub)?.pv ?? 0;
+  const authenticatedSession = sessionFor(contact, deviceSignPub)?.pv;
+  if (authenticatedSession !== undefined) return authenticatedSession;
+  const certifiedDirectory = contact.peerDeviceList?.devices.find((device) =>
+    bytesEqual(device.signPub, deviceSignPub),
+  )?.protocolVersion;
+  return certifiedDirectory ?? 0;
 }
 
 /** Sending to a contact that still pins our pre-linking master is refused: the
@@ -738,18 +755,72 @@ export async function acceptRotation(
 }
 
 /** Encrypt outgoing text into a wire envelope; establishes the session if needed. */
-/** A group's roster, shared E2E so every member can reach every other member. */
+/**
+ * A group's roster, shared inside an authenticated pairwise ratchet.
+ *
+ * v3 identifies a PERSON by their stable master key and carries that master's
+ * signed device directory. Every recipient can therefore initiate an
+ * independent X3DH/Double-Ratchet session to every authorised device even when
+ * the two people never saved one another as normal contacts. Optional fields
+ * keep old, already-sealed v1/v2 groups importable; new writers always emit v3.
+ */
 export interface GroupInvite {
+  v?: 1 | 4;
   id: string;
   name: string;
-  members: { signPub: string; dhPub: string; bundle: string | null; name: string | null }[];
+  revision?: number;
+  createdAt?: number;
+  ownerMasterPub?: string | null;
+  /** Owner-master signature over the global, personalization-independent state. */
+  stateSignature?: string | null;
+  previousStateHash?: string | null;
+  stateHash?: string | null;
+  dissolved?: boolean;
+  /** Complete, personalization-independent set of member master identities. */
+  roster?: string[] | null;
+  members: {
+    masterPub?: string | null;
+    epoch?: number | null;
+    signPub: string;
+    dhPub: string;
+    bundle: string | null;
+    deviceList?: string | null;
+    name: string | null;
+  }[];
+}
+
+/** Compact signed owner state carried to a member that is no longer in the
+ * roster. It proves removal without disclosing or trusting directory overlays. */
+export interface GroupStateProof {
+  v: 4;
+  id: string;
+  name: string;
+  revision: number;
+  createdAt: number;
+  ownerMasterPub: string;
+  stateSignature: string;
+  previousStateHash: string;
+  stateHash: string;
+  dissolved: boolean;
+  roster: string[];
+}
+
+export interface BootstrapGroupTombstone {
+  groupId: string;
+  ownerMasterPub: Bytes;
+  revision: number;
+  stateHash: Bytes;
+  blockReadd: boolean;
 }
 
 /** One stage of a bootstrap snapshot sent to a freshly linked OWN device (Erst-Sync). */
 export type BootstrapPart =
   | { t: 'profile'; name?: string; avatar?: string } // avatar = avatarB64 (JPEG)
   | { t: 'roster'; contacts: RosterEntry[] }
+  | { t: 'groups'; groups: GroupInvite[] }
+  | { t: 'gtombstones'; tombstones: BootstrapGroupTombstone[] }
   | { t: 'history'; pm: Bytes; idx: number; total: number; msgs: HistoryMessage[] }
+  | { t: 'ghistory'; groupId: string; idx: number; total: number; msgs: HistoryMessage[] }
   // Closes an initial sync: only THIS part stops the receiver from re-pulling,
   // so an interrupted transfer is retried until every chunk actually arrived.
   | { t: 'done'; skipped: number };
@@ -807,10 +878,15 @@ export type MessageContent =
   | { kind: 'text'; text: string }
   | { kind: 'file'; name: string; mime: string; data: Bytes; viewOnce?: boolean }
   | { kind: 'profile'; name?: string; avatar?: Bytes }
-  | { kind: 'group'; groupId: string; senderName?: string; inner: MessageContent }
+  | { kind: 'group'; groupId: string; revision?: number; stateHash?: Bytes; senderName?: string; inner: MessageContent }
   | { kind: 'ginvite'; group: GroupInvite }
-  | { kind: 'gremove'; groupId: string } // "you were removed from this group"
-  | { kind: 'gleave'; groupId: string } // "I left this group"
+  | { kind: 'gremove'; state: GroupStateProof } // signed "you were removed"
+  | { kind: 'gremoveLegacy'; groupId: string; revision?: number }
+  | { kind: 'gleave'; groupId: string; revision?: number; stateHash?: Bytes } // owner-coordinated leave request
+  // A copy of my own outgoing group message for sibling devices. The complete
+  // tailored roster lets a newly linked device install the group atomically
+  // with the message. Self-gated on receive and pv>=5-gated on send.
+  | { kind: 'groupsync'; group: GroupInvite; innerMid: string; ts: number; inner: MessageContent }
   | { kind: 'devlist'; list: DeviceList } // E2E gossip of my updated device list
   | { kind: 'rotation'; statement: RotationStatement } // dual-signed master rotation (proven door)
   // Self-sync (Stage 3d): a copy of a message I sent, mirrored to my OWN other
@@ -968,11 +1044,33 @@ export async function frameContent(c: MessageContent): Promise<Bytes> {
     return out;
   }
   if (c.kind === 'group') {
-    const json = JSON.stringify({ g: c.groupId, s: c.senderName ?? '', i: bytesToB64(await frameContent(c.inner)) });
+    const json = JSON.stringify({
+      g: c.groupId,
+      r: c.revision ?? null,
+      h: c.stateHash ? bytesToB64(c.stateHash) : null,
+      s: c.senderName ?? '',
+      i: bytesToB64(await frameContent(c.inner)),
+    });
     return prefixed(3, utf8.encode(json));
   }
-  if (c.kind === 'gremove') return prefixed(5, utf8.encode(c.groupId));
-  if (c.kind === 'gleave') return prefixed(6, utf8.encode(c.groupId));
+  if (c.kind === 'gremove') {
+    return prefixed(5, utf8.encode(JSON.stringify(c.state)));
+  }
+  if (c.kind === 'gremoveLegacy') {
+    return prefixed(5, utf8.encode(c.groupId));
+  }
+  if (c.kind === 'gleave') {
+    return prefixed(
+      6,
+      utf8.encode(
+        JSON.stringify({
+          g: c.groupId,
+          r: c.revision ?? null,
+          h: c.stateHash ? bytesToB64(c.stateHash) : null,
+        }),
+      ),
+    );
+  }
   if (c.kind === 'devlist') return prefixed(7, await encodeDeviceList(c.list));
   if (c.kind === 'rotation') return prefixed(8, encodeRotation(c.statement));
   if (c.kind === 'sync') {
@@ -997,6 +1095,27 @@ export async function frameContent(c: MessageContent): Promise<Bytes> {
               o: p.total,
               h: p.msgs.map((x) => ({ i: x.mine, t: x.ts, d: x.mid, x: x.text, s: x.sender ?? null })),
             }
+          : p.t === 'ghistory'
+            ? {
+                t: 'ghistory',
+                g: p.groupId,
+                n: p.idx,
+                o: p.total,
+                h: p.msgs.map((x) => ({ i: x.mine, t: x.ts, d: x.mid, x: x.text, s: x.sender ?? null })),
+              }
+          : p.t === 'groups'
+            ? { t: 'groups', g: p.groups }
+          : p.t === 'gtombstones'
+            ? {
+                t: 'gtombstones',
+                z: p.tombstones.map((tombstone) => ({
+                  g: tombstone.groupId,
+                  o: bytesToB64(tombstone.ownerMasterPub),
+                  r: tombstone.revision,
+                  h: bytesToB64(tombstone.stateHash),
+                  b: tombstone.blockReadd,
+                })),
+              }
           : p.t === 'done'
             ? { t: 'done', k: p.skipped }
           : {
@@ -1039,6 +1158,19 @@ export async function frameContent(c: MessageContent): Promise<Bytes> {
   }
   if (c.kind === 'attreq') return prefixed(17, utf8.encode(JSON.stringify({ t: c.tid })));
   if (c.kind === 'unlinkreq') return prefixed(20, new Uint8Array(0));
+  if (c.kind === 'groupsync') {
+    return prefixed(
+      21,
+      utf8.encode(
+        JSON.stringify({
+          g: c.group,
+          id: c.innerMid,
+          t: c.ts,
+          i: bytesToB64(await frameContent(c.inner)),
+        }),
+      ),
+    );
+  }
   if (c.kind === 'r2')
     return prefixed(
       19,
@@ -1064,13 +1196,59 @@ export async function unframeContent(bytes: Bytes): Promise<MessageContent> {
   }
   if (bytes[0] === 3) {
     const j = JSON.parse(utf8.decode(bytes.slice(1)));
-    return { kind: 'group', groupId: j.g, senderName: j.s || undefined, inner: await unframeContent(b64ToBytes(j.i)) };
+    return {
+      kind: 'group',
+      groupId: j.g,
+      revision: Number.isSafeInteger(j.r) && j.r >= 0 ? Number(j.r) : undefined,
+      stateHash: typeof j.h === 'string' ? b64ToBytes(j.h) : undefined,
+      senderName: j.s || undefined,
+      inner: await unframeContent(b64ToBytes(j.i)),
+    };
   }
   if (bytes[0] === 4) {
     return { kind: 'ginvite', group: JSON.parse(utf8.decode(bytes.slice(1))) as GroupInvite };
   }
-  if (bytes[0] === 5) return { kind: 'gremove', groupId: utf8.decode(bytes.slice(1)) };
-  if (bytes[0] === 6) return { kind: 'gleave', groupId: utf8.decode(bytes.slice(1)) };
+  if (bytes[0] === 5) {
+    const raw = utf8.decode(bytes.slice(1));
+    if (!raw.startsWith('{')) {
+      return { kind: 'gremoveLegacy', groupId: raw };
+    }
+    const parsed = JSON.parse(raw) as GroupStateProof & {
+      g?: unknown;
+      r?: unknown;
+    };
+    if (parsed.v !== 4) {
+      return {
+        kind: 'gremoveLegacy',
+        groupId: String(parsed.g),
+        revision:
+          Number.isSafeInteger(parsed.r) && Number(parsed.r) >= 0
+            ? Number(parsed.r)
+            : undefined,
+      };
+    }
+    return {
+      kind: 'gremove',
+      state: parsed,
+    };
+  }
+  if (bytes[0] === 6) {
+    const raw = utf8.decode(bytes.slice(1));
+    let groupId = raw;
+    let revision: number | undefined;
+    let stateHash: Bytes | undefined;
+    if (raw.startsWith('{')) {
+      const parsed = JSON.parse(raw) as { g?: unknown; r?: unknown; h?: unknown };
+      groupId = String(parsed.g);
+      revision =
+        Number.isSafeInteger(parsed.r) && Number(parsed.r) >= 0
+          ? Number(parsed.r)
+          : undefined;
+      stateHash =
+        typeof parsed.h === 'string' ? b64ToBytes(parsed.h) : undefined;
+    }
+    return { kind: 'gleave', groupId, revision, stateHash };
+  }
   if (bytes[0] === 7) return { kind: 'devlist', list: await decodeDeviceList(bytes.slice(1)) };
   if (bytes[0] === 8) return { kind: 'rotation', statement: decodeRotation(bytes.slice(1)) };
   if (bytes[0] === 9) {
@@ -1107,6 +1285,54 @@ export async function unframeContent(bytes: Bytes): Promise<MessageContent> {
             sender: x.s ?? undefined,
           }));
         parts.push({ t: 'history', pm: b64ToBytes(p.m), idx: Number(p.n) || 0, total: Number(p.o) || 0, msgs });
+      } else if (p.t === 'ghistory') {
+        const rawH: WireHistoryMsg[] = Array.isArray(p.h) ? p.h : [];
+        const msgs: HistoryMessage[] = rawH
+          .filter((x) => typeof x.d === 'string' && x.d.length > 0 && Number.isFinite(Number(x.t)))
+          .map((x) => ({
+            mine: x.i === true,
+            ts: Number(x.t),
+            mid: String(x.d),
+            text: String(x.x ?? ''),
+            sender: x.s ?? undefined,
+          }));
+        parts.push({
+          t: 'ghistory',
+          groupId: String(p.g),
+          idx: Number(p.n) || 0,
+          total: Number(p.o) || 0,
+          msgs,
+        });
+      } else if (p.t === 'groups' && Array.isArray(p.g)) {
+        parts.push({ t: 'groups', groups: p.g as GroupInvite[] });
+      } else if (p.t === 'gtombstones' && Array.isArray(p.z)) {
+        if (p.z.length > 64) {
+          throw new Error('Zu viele Gruppen-Tombstones in einem Bootstrap-Frame.');
+        }
+        const tombstones: BootstrapGroupTombstone[] = [];
+        for (const raw of p.z) {
+          const ownerMasterPub = b64ToBytes(raw.o);
+          const stateHash = b64ToBytes(raw.h);
+          if (
+            typeof raw.g !== 'string' ||
+            !/^grp_[0-9a-f]{32}$/.test(raw.g) ||
+            ownerMasterPub.length !== 32 ||
+            !Number.isSafeInteger(raw.r) ||
+            Number(raw.r) < 1 ||
+            stateHash.length !== 32 ||
+            typeof raw.b !== 'boolean'
+          ) {
+            throw new Error('Ungültiger Gruppen-Tombstone im Bootstrap.');
+          }
+          tombstones.push({
+            groupId: raw.g,
+            ownerMasterPub,
+            revision: Number(raw.r),
+            stateHash,
+            blockReadd: raw.b,
+          });
+        }
+        parts.push({ t: 'gtombstones', tombstones });
       } else if (p.t === 'done') {
         parts.push({ t: 'done', skipped: Number(p.k) || 0 });
       } else if (p.t === 'roster') {
@@ -1180,6 +1406,16 @@ export async function unframeContent(bytes: Bytes): Promise<MessageContent> {
     return { kind: 'attreq', tid: String(j.t) };
   }
   if (bytes[0] === 20) return { kind: 'unlinkreq' };
+  if (bytes[0] === 21) {
+    const j = JSON.parse(utf8.decode(bytes.slice(1)));
+    return {
+      kind: 'groupsync',
+      group: j.g as GroupInvite,
+      innerMid: String(j.id),
+      ts: Number(j.t),
+      inner: await unframeContent(b64ToBytes(j.i)),
+    };
+  }
   if (bytes[0] === 19) {
     const j = JSON.parse(utf8.decode(bytes.slice(1)));
     return {
@@ -1223,12 +1459,17 @@ async function encryptForDevice(
   target: DeviceTarget,
   content: MessageContent,
   mid: string,
+  senderDeviceList?: DeviceList,
 ): Promise<Bytes> {
   const key = deviceKey(target.signPub);
   let session = contact.sessions.get(key);
   if (!session?.ratchet) {
     if (!target.bundle) throw new Error('Kein Code/Prekey zum Initiieren an dieses Gerät.');
-    const { header, session: x3dh } = await initiateX3DH(me, target.bundle);
+    const { header, session: x3dh } = await initiateX3DH(
+      me,
+      target.bundle,
+      senderDeviceList,
+    );
     const ratchet = await initRatchetInitiator(x3dh.sharedSecret, target.bundle.signedPreKey.pub, x3dh.associatedData);
     session = { ratchet, pendingHeader: header, deviceSignPub: target.signPub };
     contact.sessions.set(key, session);
@@ -1239,7 +1480,15 @@ async function encryptForDevice(
   // `dev` (our device) lets the recipient route a 'msg' to the right per-sender-
   // device session when WE have several devices; a prekey carries it in the x3dh.
   const envelope = session.pendingHeader
-    ? ({ type: 'prekey', conv, x3dh: session.pendingHeader, message, pv: PROTOCOL_VERSION } as const)
+    ? ({
+        type: 'prekey',
+        conv,
+        x3dh: senderDeviceList
+          ? { ...session.pendingHeader, senderDeviceList }
+          : session.pendingHeader,
+        message,
+        pv: PROTOCOL_VERSION,
+      } as const)
     : ({ type: 'msg', conv, message, dev: me.sign.publicKey, pv: PROTOCOL_VERSION } as const);
   // Sealed Sender: wrap the whole envelope in an anonymous box to the recipient,
   // so the relay never sees the sender's X3DH identity keys or the conv id.
@@ -1281,6 +1530,7 @@ export async function fanoutDeliveries(
   exclude?: Bytes,
   only?: Bytes,
   minPv = 0,
+  senderDeviceList?: DeviceList,
 ): Promise<{ deliveries: FanoutDelivery[]; unreachable: Bytes[] }> {
   if (contact.staleIdentity) throw new StaleIdentityError();
   const deliveries: FanoutDelivery[] = [];
@@ -1293,7 +1543,17 @@ export async function fanoutDeliveries(
       continue;
     }
     try {
-      deliveries.push({ deviceSignPub: t.signPub, sealed: await encryptForDevice(me, contact, t, content, mid) });
+      deliveries.push({
+        deviceSignPub: t.signPub,
+        sealed: await encryptForDevice(
+          me,
+          contact,
+          t,
+          content,
+          mid,
+          senderDeviceList,
+        ),
+      });
     } catch {
       unreachable.push(t.signPub); // no session + no bundle → can't reach this device yet
     }
@@ -1414,20 +1674,44 @@ export async function sendGroupMessage(
   groupId: string,
   senderName: string | undefined,
   inner: MessageContent,
+  revision?: number,
+  stateHash?: Bytes,
 ): Promise<Bytes> {
-  return sendContent(me, contact, { kind: 'group', groupId, senderName, inner });
+  return sendContent(me, contact, {
+    kind: 'group',
+    groupId,
+    revision,
+    stateHash,
+    senderName,
+    inner,
+  });
 }
 
 export async function sendGroupInvite(me: IdentityKeys, contact: Contact, group: GroupInvite): Promise<Bytes> {
   return sendContent(me, contact, { kind: 'ginvite', group });
 }
 
-export async function sendGroupRemove(me: IdentityKeys, contact: Contact, groupId: string): Promise<Bytes> {
-  return sendContent(me, contact, { kind: 'gremove', groupId });
+export async function sendGroupRemove(
+  me: IdentityKeys,
+  contact: Contact,
+  state: GroupStateProof,
+): Promise<Bytes> {
+  return sendContent(me, contact, { kind: 'gremove', state });
 }
 
-export async function sendGroupLeave(me: IdentityKeys, contact: Contact, groupId: string): Promise<Bytes> {
-  return sendContent(me, contact, { kind: 'gleave', groupId });
+export async function sendGroupLeave(
+  me: IdentityKeys,
+  contact: Contact,
+  groupId: string,
+  revision?: number,
+  stateHash?: Bytes,
+): Promise<Bytes> {
+  return sendContent(me, contact, {
+    kind: 'gleave',
+    groupId,
+    revision,
+    stateHash,
+  });
 }
 
 /** Gossip our updated, master-signed device list to a contact (revocation). */
@@ -1502,6 +1786,13 @@ export async function receiveEnvelope(
     const x = envelope.x3dh;
     if (!bytesEqual(x.masterPub, contact.peerMasterPub)) {
       throw new Error('Nachricht gehört nicht zu dieser Unterhaltung — verworfen.');
+    }
+    if (x.senderDeviceList) {
+      // A valid, strictly newer list is an independently authenticated
+      // directory checkpoint. Adopt it on the isolated receive candidate before
+      // testing device presence; the caller persists the candidate only after
+      // the first ratchet ciphertext authenticates.
+      await applyDeviceListUpdate(contact, x.senderDeviceList, new Set());
     }
     if (!deviceAuthorized(contact, x.identitySignPub)) {
       throw new RevokedDeviceError();
@@ -1652,7 +1943,12 @@ export async function receiveEnvelope(
   // authenticated session. `listack` (byte 11) is intentionally NOT gated — an ack
   // over MY device list is legitimate from any peer and carries no injectable state.
   if (
-    (content.kind === 'sync' || content.kind === 'bootstrap' || content.kind === 'bootreq') &&
+    (
+      content.kind === 'sync' ||
+      content.kind === 'groupsync' ||
+      content.kind === 'bootstrap' ||
+      content.kind === 'bootreq'
+    ) &&
     !bytesEqual(contact.peerMasterPub, me.master.publicKey)
   ) {
     return {
@@ -1690,7 +1986,9 @@ interface ContactWire {
   verifiedSuggestion: boolean;
   verifiedSuggestionDismissed: boolean;
   peerAckedListEV: { epoch: number; version: number } | null;
+  peerAckedListByDevice?: Record<string, { epoch: number; version: number }> | null;
   hidden: boolean;
+  localOnly?: boolean;
   staleIdentity: boolean;
   pendingMaster: { masterPub: string; epoch: number; signPub: string; dhPub: string } | null;
   retiredMasters: string[];
@@ -1741,7 +2039,9 @@ export async function serializeContact(c: Contact): Promise<Bytes> {
     verifiedSuggestion: c.verifiedSuggestion ?? false,
     verifiedSuggestionDismissed: c.verifiedSuggestionDismissed ?? false,
     peerAckedListEV: c.peerAckedListEV ?? null,
+    peerAckedListByDevice: c.peerAckedListByDevice ?? null,
     hidden: c.hidden ?? false,
+    localOnly: c.localOnly ?? false,
     staleIdentity: c.staleIdentity ?? false,
     pendingMaster: c.pendingMaster
       ? {
@@ -1827,7 +2127,9 @@ export async function deserializeContact(bytes: Bytes): Promise<Contact> {
     verifiedSuggestion: wire.verifiedSuggestion || undefined,
     verifiedSuggestionDismissed: wire.verifiedSuggestionDismissed || undefined,
     peerAckedListEV: wire.peerAckedListEV ?? undefined,
+    peerAckedListByDevice: wire.peerAckedListByDevice ?? undefined,
     hidden: wire.hidden || undefined,
+    localOnly: wire.localOnly || undefined,
     staleIdentity: wire.staleIdentity || undefined,
     pendingMaster: wire.pendingMaster
       ? {

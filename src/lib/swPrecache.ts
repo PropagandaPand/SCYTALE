@@ -38,6 +38,33 @@ export function isScytalePrecache(name: string): boolean {
   return name === 'scytale-precache' || name.startsWith(PRECACHE_PREFIX);
 }
 
+/**
+ * Look up a request in ANY installed SKYTALE precache, not only the active build's.
+ *
+ * A precache is only ever populated by populateBuildPrecache, which SHA-256-verifies every hashed
+ * asset against the manifest revision before `cache.put` (the sole structural exception is the shell
+ * `/index.html`, validated by strict-CSP + reference checks because the CDN rewrites it per request).
+ * A hit is therefore trusted, content-addressed bytes from some SKYTALE build — safe to serve. This
+ * NEVER touches the live network (read-only over Cache Storage): a miss returns undefined so the
+ * caller can fail closed, it never falls through to `fetch`.
+ *
+ * Purpose: close the update-window build skew. A (possibly old-iOS, possibly uncontrolled)
+ * navigation that loaded a DIFFERENT build's shell than this worker's active precache would otherwise
+ * 503 its hashed JS/CSS and blank the page; during that window the concurrent build's precache is
+ * still installed and holds exactly those bytes. Only SKYTALE precaches are consulted
+ * (`isScytalePrecache`); the push-control cache and any other cache name are ignored.
+ */
+export async function findInAnyScytalePrecache(req: Request): Promise<Response | undefined> {
+  for (const name of await caches.keys()) {
+    if (!isScytalePrecache(name)) continue;
+    // A concurrent activate() cleanup may delete `name` between keys() and open(); caches.open then
+    // recreates it empty, match() returns undefined, and we fall through — never throws, never blanks.
+    const hit = await (await caches.open(name)).match(req);
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
 type CacheWriter = Pick<Cache, 'put'>;
 type AssetFetcher = (path: string) => Promise<Response>;
 

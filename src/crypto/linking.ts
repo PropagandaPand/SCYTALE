@@ -3,7 +3,7 @@
  * primary device.
  *
  *   1. N (new device)  --QR-->  P (primary, holds masterPriv)
- *        LinkRequest { deviceSignPub, deviceDhPub, sasEphPub }
+ *        LinkRequest { deviceSignPub, deviceDhPub, sasEphPub, protocolVersion }
  *
  *   2. P  --sealed LinkOffer-->  N        ← NO credential, only P's SAS ephemeral
  *        LinkOffer { sasEphPub }
@@ -56,6 +56,9 @@ export interface LinkRequest {
   deviceSignPub: Bytes; // Ed25519 of the new device
   deviceDhPub: Bytes; // X25519 of the new device
   sasEphPub: Bytes; // new device's SAS ephemeral
+  /** Receive capability of the new device. Bound into the QR, grant proof and
+   * master-signed DeviceList entry; it is never inferred by the primary. */
+  protocolVersion: number;
   // N's signed prekey (Stage 3d v2): so P can put it in the master-signed device
   // list and peers can fan out X3DH to this new device without it writing first.
   signedPreKey: SignedPreKeyPublic;
@@ -93,10 +96,10 @@ export interface LinkGrant {
   proof: Bytes;
 }
 
-// v3 has the same byte layout as v2, but changes the security semantics: every
-// field below is now bound into the human-confirmed SAS transcript.
-const REQ_VERSION = 3;
-const REQ_LEN = 1 + 32 + 32 + 32 + 4 + 32 + 64; // version | signPub | dhPub | sasEph | spkId | spkPub | spkSig
+// v4 appends the new device's receive capability. It is carried by the QR and
+// subsequently bound into both the master-signed DeviceList and grant proof.
+const REQ_VERSION = 4;
+const REQ_LEN = 1 + 32 + 32 + 32 + 4 + 32 + 64 + 4; // version | signPub | dhPub | sasEph | spkId | spkPub | spkSig | protocolVersion
 // v2 gained masterPub + epoch; v3 makes the complete offer/request pair the
 // canonical SAS transcript. Older decoders report a version mismatch instead
 // of accepting a payload with weaker semantics.
@@ -128,9 +131,29 @@ export function decodeLinkOffer(bytes: Bytes): LinkOffer {
   };
 }
 
+const MAX_PROTOCOL_VERSION = 0xffff;
+
+function assertProtocolVersion(value: number): void {
+  if (
+    !Number.isSafeInteger(value) ||
+    value < 1 ||
+    value > MAX_PROTOCOL_VERSION
+  ) {
+    throw new Error('Ungültige Protokoll-Version im Kopplungs-Code.');
+  }
+}
+
+function protocolVersionBytes(value: number): Bytes {
+  assertProtocolVersion(value);
+  const out = new Uint8Array(4);
+  new DataView(out.buffer).setUint32(0, value, false);
+  return out;
+}
+
 /** Compact QR: version(1) | signPub(32) | dhPub(32) | sasEphPub(32) | spkId(4, BE)
- *  | spkPub(32) | spkSig(64). */
+ *  | spkPub(32) | spkSig(64) | protocolVersion(4, BE). */
 export async function encodeLinkRequest(req: LinkRequest): Promise<string> {
+  assertProtocolVersion(req.protocolVersion);
   const s = await getSodium();
   const buf = new Uint8Array(REQ_LEN);
   buf[0] = REQ_VERSION;
@@ -140,6 +163,7 @@ export async function encodeLinkRequest(req: LinkRequest): Promise<string> {
   new DataView(buf.buffer).setUint32(97, req.signedPreKey.id);
   buf.set(req.signedPreKey.pub, 101);
   buf.set(req.signedPreKey.signature, 133);
+  new DataView(buf.buffer).setUint32(197, req.protocolVersion, false);
   return s.to_base64(buf, s.base64_variants.URLSAFE_NO_PADDING);
 }
 
@@ -164,11 +188,14 @@ export async function decodeLinkRequest(token: string): Promise<LinkRequest> {
   }
   if (buf.length !== REQ_LEN) throw new Error('Ungültiger Kopplungs-Code.');
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const protocolVersion = dv.getUint32(197, false);
+  assertProtocolVersion(protocolVersion);
   return {
     deviceSignPub: buf.slice(1, 33),
     deviceDhPub: buf.slice(33, 65),
     sasEphPub: buf.slice(65, 97),
     signedPreKey: { id: dv.getUint32(97), pub: buf.slice(101, 133), signature: buf.slice(133, 197) },
+    protocolVersion,
   };
 }
 
@@ -189,6 +216,7 @@ export async function createLinkGrant(
   req: LinkRequest,
   offer: LinkOffer,
 ): Promise<{ grant: LinkGrant; newList: DeviceList }> {
+  assertProtocolVersion(req.protocolVersion);
   if (!sameBytes(offer.masterPub, masterPub) || offer.epoch !== epoch) {
     throw new Error('Kopplungs-Angebot gehört nicht zur aktuellen Hauptidentität.');
   }
@@ -208,6 +236,7 @@ export async function createLinkGrant(
   if (existing) {
     const sameRequest =
       sameBytes(existing.dhPub, req.deviceDhPub) &&
+      existing.protocolVersion === req.protocolVersion &&
       !!existing.signedPreKey &&
       existing.signedPreKey.id === req.signedPreKey.id &&
       sameBytes(existing.signedPreKey.pub, req.signedPreKey.pub) &&
@@ -233,6 +262,7 @@ export async function createLinkGrant(
     dhPub: req.deviceDhPub,
     deviceCert,
     signedPreKey: req.signedPreKey, // so peers can fan out to the newly linked device
+    protocolVersion: req.protocolVersion,
   };
   const newList = await signDeviceList(masterPriv, masterPub, epoch, currentList.version + 1, [
     ...currentList.devices,
@@ -255,7 +285,7 @@ function sameBytes(a: Bytes, b: Bytes): boolean {
   return diff === 0;
 }
 
-const LINK_GRANT_PROOF_CTX = utf8.encode('SCYTALE-LINK-GRANT-PROOF-v2');
+const LINK_GRANT_PROOF_CTX = utf8.encode('SCYTALE-LINK-GRANT-PROOF-v3');
 
 async function linkGrantProofMessage(
   request: LinkRequest,
@@ -277,6 +307,7 @@ async function linkGrantProofMessage(
       ...offer,
       masterPub: asMasterPub(offer.masterPub),
     }),
+    protocolVersionBytes(request.protocolVersion),
     grant.deviceCert,
     listDigest,
   );
@@ -330,7 +361,12 @@ export async function verifyLinkGrant(
   // produces different emoji. See the SAS requirement in verifyLinkGrant's doc.
   if (!(await verifyDeviceList(list, grant.masterPub, grant.epoch))) return false;
   const mine = list.devices.find((d) => sameBytes(d.signPub, myDeviceSignPub));
-  if (!mine || !sameBytes(mine.dhPub, myDeviceDhPub) || !sameBytes(mine.deviceCert, grant.deviceCert)) {
+  if (
+    !mine ||
+    mine.protocolVersion !== request.protocolVersion ||
+    !sameBytes(mine.dhPub, myDeviceDhPub) ||
+    !sameBytes(mine.deviceCert, grant.deviceCert)
+  ) {
     return false;
   }
   if (

@@ -11,3 +11,6 @@ SECURITY.de.md
 
 # Local-only point-in-time security audit reports (never committed)
 SECURITY_AUDIT_*.md
+
+# Scratch/intermediate build artifacts (e.g. the decoy content JSON baked into decoyContent.ts)
+scratchpad/

@@ -58,6 +58,7 @@ if (typeof S.linkingSas === 'function') {
     deviceSignPub: nSign.publicKey,
     deviceDhPub: nDh.publicKey,
     sasEphPub: nEph.publicKey,
+    protocolVersion: S.PROTOCOL_VERSION,
     signedPreKey: {
       id: 7,
       pub: nSpk.publicKey,

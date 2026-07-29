@@ -938,10 +938,18 @@ export class RelayRoom extends DurableObject<Env> {
             sendJson(ws, { t: 'nack', mid, reason: 'full' });
             return;
           }
-          // A remote unauthenticated sender cannot decide whether the owner's
-          // device is woken. Until the wire protocol carries an owner-minted
-          // sender capability, only an authenticated owner/self-sync may be silent.
-          const silent = att.owner && m.silent === true ? 1 : 0;
+          // Honour the client's `silent` bit: a silent frame (delivery receipt, device-list gossip,
+          // self-sync, profile refresh) must NEVER arm a wake-up push — otherwise every routine
+          // control frame to an offline contact fires a content-free "Neue Nachricht" with nothing
+          // behind it (the phantom push). Honouring `silent` can only suppress the wake of the
+          // SENDER'S OWN frame: it can neither fabricate a wake nor suppress another party's real
+          // message (genuine user messages are sent silent:false and are still delivered + shown on
+          // next open). NOTE: the send path is auth-less (sealed sender), so `att.owner` is ALWAYS
+          // false for a send frame — gating on it (added in the 2026-07-27 remediation) forced
+          // silent=0 universally, breaking the feature, while buying no real protection (a sender can
+          // just set silent:false). A stricter "only an owner-minted sender may go silent" rule needs
+          // a per-recipient sender capability in the wire protocol — a deliberate follow-up.
+          const silent = m.silent === true ? 1 : 0;
           const inserted = this.ctx.storage.sql
             .exec<{ id: number }>(
               'INSERT INTO q (body, ts, silent) VALUES (?, ?, ?) RETURNING id',

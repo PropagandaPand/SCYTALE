@@ -118,9 +118,56 @@ export {
   clearDuressRemoval,
 } from '../src/lib/wipe';
 export { derivePrfKek } from '../src/lib/biometric';
-export { isGroupMember, decideInvite } from '../src/lib/groups';
+export {
+  GROUP_PROTOCOL_VERSION,
+  MAX_GROUP_MEMBERS,
+  MAX_GROUP_DEVICES_PER_MEMBER,
+  MAX_GROUP_FANOUT_DEVICES,
+  MAX_GROUP_NAME_BYTES,
+  MAX_GROUP_INLINE_ATTACHMENT_BYTES,
+  MAX_GROUP_ATTACHMENT_FANOUT_BYTES,
+  randomGroupId,
+  memberMasterPub,
+  memberEpoch,
+  mergeGroupDirectories,
+  groupBroadcastBundle,
+  signGroupState,
+  verifyGroupState,
+  toGroupStateProof,
+  fromGroupStateProof,
+  toInvite,
+  fromInvite,
+  isGroupMember,
+  isGroupMemberMaster,
+  isGroupOwner,
+  decideInvite,
+  classifyGroupFrame,
+  nextGroupRevision,
+  applyGroupMemberDeviceList,
+  groupFanoutToDevices,
+  boundedGroupAttachmentPolicy,
+} from '../src/lib/groups';
+export {
+  commitGroupMutation,
+  loadPendingGroupMutationSnapshots,
+  replacePendingGroupMutation,
+  savePendingGroupMutation,
+  loadPendingGroupMutations,
+  clearPendingGroupMutation,
+} from '../src/lib/groupMutations';
+export {
+  saveGroupRemovalTombstone,
+  loadGroupRemovalTombstone,
+  loadGroupRemovalTombstones,
+  clearGroupRemovalTombstone,
+  toGroupRemovalTombstoneWire,
+  fromGroupRemovalTombstoneWire,
+  sealGroupRemovalTombstoneRecord,
+  groupRemovalTombstoneRecordKey,
+  permitsGroupReadd,
+} from '../src/lib/groupTombstones';
 export { encSection, decSection, backupMetaAad, backupAttAad } from '../src/lib/backupSections';
-export { importBackup, validateBackupManifest } from '../src/lib/backup';
+export { exportBackup, importBackup, validateBackupManifest } from '../src/lib/backup';
 export { encryptBlob, decryptBlob, BLOB_CHUNK } from '../src/crypto/blob';
 export { backgroundLockExpired } from '../src/lib/backgroundLock';
 export { createVaultRuntimeLockManager } from '../src/lib/runtimeLock';
@@ -143,6 +190,7 @@ export {
 } from '../src/lib/r2Descriptor';
 export {
   PRECACHE_PREFIX,
+  findInAnyScytalePrecache,
   isScytalePrecache,
   populateBuildPrecache,
   versionedPrecacheName,

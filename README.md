@@ -96,7 +96,7 @@ current with the code.
 | Reliable inbound to a linked device (ack-driven device-list re-gossip) | ✅ |
 | Link initial-sync: full chat **history** to a linked device | 🚧 [#1](https://github.com/PropagandaPand/SCYTALE/issues/1) |
 | Device management (see / remove linked devices, device names) | 🚧 [#2](https://github.com/PropagandaPand/SCYTALE/issues/2) |
-| Groups × devices (a group message reaching a member's 2nd device) | ⏳ deferred |
+| Groups v3: owner roster, contactless key exchange, all-device fan-out, revocation | ✅ |
 
 A newly linked device now pulls your profile, contact list and relay-confirmed,
 chunked text history from the primary, so it is recognisably your account rather
@@ -152,8 +152,14 @@ out a man-in-the-middle.
   client-side scanning in the OS, physical access to an unlocked vault) — which
   is precisely the point of the objection to Chat Control.
 - **Multi-device:** see [Status](#status) — bounded text history reaches a newly
-  linked device, but historical attachments/legacy no-id messages do not; group
-  messages never reach a member's second device.
+  linked device, but historical attachments/legacy no-id messages do not. Group
+  state, bounded text history and new group messages fan out to current member
+  devices and the sender's linked devices.
+- **Groups:** v3 uses authenticated pairwise X3DH/Double-Ratchet copies per
+  authorised device, not MLS or one shared group key. A removed member keeps
+  already received history; exclusion governs future fan-out once the owner's
+  monotonic roster update has been processed. Safety-number comparison remains
+  the independent check for identities introduced through a group owner.
 
 ---
 

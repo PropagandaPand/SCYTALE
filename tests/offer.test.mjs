@@ -11,22 +11,29 @@ const dev = sodium.crypto_sign_keypair();
 const dh = sodium.crypto_box_keypair();
 const eph = sodium.crypto_box_keypair();
 const spk = { id: 7, pub: dh.publicKey, signature: await L.sign(dh.publicKey, dev.privateKey) }; // v2 (Stage 3d) carries N's signed prekey
-const req = { deviceSignPub: dev.publicKey, deviceDhPub: dh.publicKey, sasEphPub: eph.publicKey, signedPreKey: spk };
+const req = {
+  deviceSignPub: dev.publicKey,
+  deviceDhPub: dh.publicKey,
+  sasEphPub: eph.publicKey,
+  protocolVersion: L.PROTOCOL_VERSION,
+  signedPreKey: spk,
+};
 const token = await L.encodeLinkRequest(req);
 const rt = await L.decodeLinkRequest(token);
 ok('roundtrip erhält alle Keys + Signed Prekey',
   sodium.to_hex(rt.deviceSignPub) === sodium.to_hex(dev.publicKey) &&
   sodium.to_hex(rt.deviceDhPub) === sodium.to_hex(dh.publicKey) &&
   sodium.to_hex(rt.sasEphPub) === sodium.to_hex(eph.publicKey) &&
+  rt.protocolVersion === L.PROTOCOL_VERSION &&
   rt.signedPreKey.id === 7 && sodium.to_hex(rt.signedPreKey.pub) === sodium.to_hex(dh.publicKey));
 
-// A future "v4" payload: different version byte → version error, not "invalid".
-const v4 = new Uint8Array(1 + 32 + 32 + 32 + 16);
-v4[0] = 4;
-const v4tok = sodium.to_base64(v4, sodium.base64_variants.URLSAFE_NO_PADDING);
+// A future "v5" payload: different version byte → version error, not "invalid".
+const v5 = new Uint8Array(1 + 32 + 32 + 32 + 16);
+v5[0] = 5;
+const v5tok = sodium.to_base64(v5, sodium.base64_variants.URLSAFE_NO_PADDING);
 let msg = '';
-try { await L.decodeLinkRequest(v4tok); } catch (e) { msg = e.message; }
-ok('v4-Payload meldet Versions-Fehler, nicht "ungültig"', /Format-Version 4/.test(msg));
+try { await L.decodeLinkRequest(v5tok); } catch (e) { msg = e.message; }
+ok('v5-Payload meldet Versions-Fehler, nicht "ungültig"', /Format-Version 5/.test(msg));
 ok('Versions-Fehler nennt Update als Ausweg', /aktualisieren/i.test(msg));
 
 let msg2 = '';
@@ -34,10 +41,29 @@ try { await L.decodeLinkRequest('!!!not base64!!!'); } catch (e) { msg2 = e.mess
 ok('echter Müll bleibt "Ungültiger Kopplungs-Code"', /Ungültiger Kopplungs-Code/.test(msg2));
 
 let msg3 = '';
-const short = new Uint8Array([3, 1, 2, 3]); // current version byte, wrong length
+const short = new Uint8Array([4, 1, 2, 3]); // current version byte, wrong length
 try { await L.decodeLinkRequest(sodium.to_base64(short, sodium.base64_variants.URLSAFE_NO_PADDING)); }
 catch (e) { msg3 = e.message; }
 ok('richtige Version, falsche Länge -> ungültig', /Ungültiger Kopplungs-Code/.test(msg3));
+
+let invalidCapability = '';
+try { await L.encodeLinkRequest({ ...req, protocolVersion: 0 }); }
+catch (e) { invalidCapability = e.message; }
+ok('QR-Encoder lehnt Capability 0 strikt ab', /Protokoll-Version/.test(invalidCapability));
+
+const zeroCapabilityBytes = new Uint8Array(
+  sodium.from_base64(token, sodium.base64_variants.URLSAFE_NO_PADDING),
+);
+zeroCapabilityBytes.fill(0, zeroCapabilityBytes.length - 4);
+let invalidDecodedCapability = '';
+try {
+  await L.decodeLinkRequest(
+    sodium.to_base64(zeroCapabilityBytes, sodium.base64_variants.URLSAFE_NO_PADDING),
+  );
+} catch (e) {
+  invalidDecodedCapability = e.message;
+}
+ok('QR-Decoder lehnt Capability 0 strikt ab', /Protokoll-Version/.test(invalidDecodedCapability));
 
 // --- Offer ------------------------------------------------------------------
 console.log('\n[LinkOffer: SAS vor Credential]');
@@ -82,6 +108,10 @@ ok('Grant hat kein sasEphPub-Feld', grant.sasEphPub === undefined);
 ok('Grant verifiziert für N', await L.verifyLinkGrant(grant, dev.publicKey, dh.publicKey, req.signedPreKey, req, grantOffer));
 ok('neue Liste hat Version 2', newList.version === 2);
 ok('neue Liste enthält N', L.deviceInList(newList, dev.publicKey));
+ok('neue Liste bindet Ns Protokoll-Capability',
+  newList.devices.find((device) =>
+    sodium.to_hex(device.signPub) === sodium.to_hex(dev.publicKey),
+  )?.protocolVersion === L.PROTOCOL_VERSION);
 
 // Abort-before-commit leaves nothing: the ORIGINAL list is untouched.
 ok('Abbruch vor Commit: alte Liste unverändert (v1, ohne N)',

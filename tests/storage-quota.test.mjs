@@ -113,7 +113,7 @@ ok('R2-Downloads laufen durch dieselbe globale Reservierungsprüfung',
 ok('Datei, Reply, Self-Sync und Gruppe nutzen das gemeinsame Inline-Admission-Gate',
   messenger.includes('async function inboundFileRefFor') &&
   messenger.includes('await inboundFileRefFor(inboundRoomId') &&
-  messenger.includes('await inboundFileRefFor(g.id') &&
+  messenger.includes('await inboundFileRefFor(\n          groupId') &&
   messenger.includes('appendFreshInboundMessage(displayRoom, synced)'));
 
 console.log('\n[Account-Wipe: Push-Reihenfolge]');

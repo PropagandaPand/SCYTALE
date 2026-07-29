@@ -21,6 +21,7 @@ import {
   seal,
   open,
   utf8,
+  PROTOCOL_VERSION,
   type Bytes,
   type DeviceList,
   type IdentityKeys,
@@ -114,12 +115,19 @@ export async function loadOrCreateOwnDeviceList(
     const ownEntry = storedTrusted
       ? stored.devices.find((d) => eqSign(d.signPub, id.sign.publicKey))
       : undefined;
-    if (storedTrusted && (!ownSpk || (ownEntry?.signedPreKey && sameSpk(ownEntry.signedPreKey, ownSpk)))) {
+    const spkCurrent =
+      !ownSpk ||
+      (!!ownEntry?.signedPreKey && sameSpk(ownEntry.signedPreKey, ownSpk));
+    const capabilityCurrent =
+      ownEntry?.protocolVersion === PROTOCOL_VERSION;
+    if (storedTrusted && spkCurrent && capabilityCurrent) {
       return stored;
     }
     // A linked device cannot repair a foreign/unverified list and must never
-    // return it as authority merely because it was decryptable.
-    if (!isPrimaryDevice(id)) return null;
+    // return it as authority merely because it was decryptable. It may keep
+    // using an otherwise-current verified legacy list, but only the primary can
+    // bump its version and master-sign the missing receive capability.
+    if (!isPrimaryDevice(id)) return storedTrusted && spkCurrent ? stored : null;
     if (stored && !storedTrusted) {
       throw new Error('Gespeicherte Geräteliste gehört nicht zur aktuellen Identität.');
     }
@@ -130,6 +138,7 @@ export async function loadOrCreateOwnDeviceList(
       dhPub: id.dh.publicKey,
       deviceCert: id.deviceCert,
       signedPreKey: ownSpk,
+      protocolVersion: PROTOCOL_VERSION,
     };
     const devices = stored?.devices.length
       ? stored.devices.map((d) => (eqSign(d.signPub, id.sign.publicKey) ? ours : d))

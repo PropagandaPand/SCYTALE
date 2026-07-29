@@ -17,7 +17,6 @@ import {
   SEALED_LINK_OFFER,
   SEALED_LINK_GRANT,
   masterSafetyNumber,
-  identityFingerprint,
   isPrimaryDevice,
   verifyDeviceCert,
   bytesEqual,
@@ -61,10 +60,6 @@ import {
   makeContactFromHeader,
   sendMessage,
   sendProfile,
-  sendGroupMessage,
-  sendGroupInvite,
-  sendGroupRemove,
-  sendGroupLeave,
   receiveEnvelope,
   serializeContact,
   deserializeContact,
@@ -81,13 +76,11 @@ import {
   applyDeviceListUpdate,
   mergeRosterEntry,
   masterKeyB64,
-  sendDeviceList,
   sendListAck,
   MasterChangedError,
   RetiredIdentityError,
   RevokedDeviceError,
   inboxRoom,
-  computeRoomId,
   computeMasterRoomId,
   type Contact,
   type BootstrapPart,
@@ -105,7 +98,19 @@ import {
   loadGroups,
   removeGroup,
   isGroupMember,
+  isGroupMemberMaster,
+  isGroupOwner,
+  memberMasterPub,
+  nextGroupRevision,
+  applyGroupMemberDeviceList,
+  groupFanoutToDevices,
+  boundedGroupAttachmentPolicy,
+  groupBroadcastBundle,
   decideInvite,
+  classifyGroupFrame,
+  signGroupState,
+  toGroupStateProof,
+  fromGroupStateProof,
   type Group,
   type GroupMember,
 } from './lib/groups';
@@ -115,6 +120,22 @@ import {
   loadContacts,
   removeContact,
 } from './lib/store';
+import {
+  clearPendingGroupMutation,
+  commitGroupMutation,
+  discardPendingGroupMutation,
+  loadPendingGroupMutationSnapshots,
+  replacePendingGroupMutation,
+  type PendingGroupMutationSnapshot,
+} from './lib/groupMutations';
+import {
+  clearGroupRemovalTombstone,
+  loadGroupRemovalTombstone,
+  loadGroupRemovalTombstones,
+  permitsGroupReadd,
+  saveGroupRemovalTombstone,
+  type GroupRemovalTombstone,
+} from './lib/groupTombstones';
 import { StaleAccountGenerationError, currentDbName, pinTaskAccount, clearTaskAccount } from './lib/db';
 import {
   clearPendingLinkGrantAndRecover,
@@ -264,6 +285,13 @@ const AVATAR_IMPORT_CAP = 96 * 1024; // decoded-ish ceiling for a carried avatar
 const HISTORY_CHUNK_BYTES = 64 * 1024; // per history frame; measured in UTF-8 BYTES
 const GOSSIP_COOLDOWN_MS = 30_000; // first re-offer delay; doubles per attempt
 const GOSSIP_MAX_BACKOFF_MS = 60 * 60_000; // ceiling, so a never-acking peer stays cheap
+// Owner-state and member content use independent pairwise inboxes. A content
+// frame can therefore beat the just-committed roster frame. Buffer only this
+// tightly bounded, authenticated transition window and ACK its relay row.
+const GROUP_TRANSITION_MAX_IDS = 8;
+const GROUP_TRANSITION_MAX_PER_GROUP = 12;
+const GROUP_TRANSITION_MAX_BYTES = 2 * 1024 * 1024;
+const GROUP_TRANSITION_TTL_MS = 2 * 60_000;
 
 function pickAudioMime(): string {
   const cands = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
@@ -274,12 +302,6 @@ function pickAudioMime(): string {
 }
 
 const fmtRec = (s: number) => `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`;
-
-function eqBytes(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-  return true;
-}
 
 function hexOf(b: Uint8Array): string {
   let s = '';
@@ -313,13 +335,17 @@ function isTransientStorageFailure(e: unknown): boolean {
   return e instanceof Error && /indexeddb|database.*(closed|closing)|transaction.*abort/i.test(e.message);
 }
 
-/** Authenticated plaintext whose application prerequisite has not arrived yet.
- * Keep the relay row and the old ratchet state so it can be processed after the
- * prerequisite (currently a group invite) becomes durable. */
-class DeferredInboxApplicationError extends Error {
+class DeferredGroupTransitionError extends Error {
   constructor() {
-    super('Inbox-Anwendung bis zu einer Voraussetzung zurückgestellt.');
-    this.name = 'DeferredInboxApplicationError';
+    super('Gruppeninhalt wartet auf einen bereits angekündigten Owner-Rosterstand.');
+    this.name = 'DeferredGroupTransitionError';
+  }
+}
+
+class DuplicateGroupTransitionRowError extends Error {
+  constructor() {
+    super('Zusätzliche Relay-Zeile eines bereits gehaltenen Gruppenframes.');
+    this.name = 'DuplicateGroupTransitionRowError';
   }
 }
 
@@ -429,6 +455,7 @@ function isSilentFrame(kind: MessageContent['kind']): boolean {
     case 'devlist':
     case 'rotation':
     case 'sync':
+    case 'groupsync':
     case 'bootstrap':
     case 'listack':
     case 'bootreq':
@@ -518,6 +545,12 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   const seenIdsRef = useRef<Set<number>>(new Set());
   // Serializes ALL inbox processing through one promise chain (see enqueueInbox).
   const inboxQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  // Serializes only the short, local roster read-modify-write phase. Network
+  // delivery deliberately runs after this lock is released, so an inbound leave
+  // frame can persist its state without deadlocking against the inbox queue.
+  const groupMutationQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const groupMutationRetryRef = useRef<Promise<void> | null>(null);
+  const groupsBootReadyRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const stickerInputRef = useRef<HTMLInputElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -545,11 +578,28 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   // streaming — a repeated pull would otherwise multiply the frames.
   const historySendingRef = useRef<Set<string>>(new Set());
   const groupsRef = useRef<Group[]>([]);
-  // Buffered group messages carry the AUTHENTICATED sender key so the membership
-  // check can run on flush (once we have the roster from the invite).
-  const pendingGroupMsgsRef = useRef<
-    Map<string, { inner: MessageContent; senderDhPub: Bytes; senderLabel: string; mid: string }[]>
+  // Runtime proof that this exact owner revision was durably inserted into every
+  // currently known member-device inbox. Cleared on reload on purpose: the first
+  // post-reload message re-confirms state before content.
+  const confirmedGroupStateRef = useRef<Map<string, string>>(new Map());
+  const pendingGroupFramesRef = useRef<
+    Map<
+      string,
+      Array<{
+        revision: number;
+        stateHash: Bytes;
+        ackId: number;
+        sender: Contact;
+        senderKey: string;
+        inner: MessageContent;
+        mid: string;
+        bytes: number;
+        queuedAt: number;
+      }>
+    >
   >(new Map());
+  const pendingGroupBytesRef = useRef(0);
+  const expiredGroupTransitionsRef = useRef<Map<string, number>>(new Map());
   const viewRef = useRef<View>('list');
   const activeRoomRef = useRef<string | null>(null);
   const activeGroupRef = useRef<string | null>(null);
@@ -591,9 +641,8 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   const [chatMenu, setChatMenu] = useState(false);
   const [msgMenu, setMsgMenu] = useState<{ roomId: string; m: ChatMessage; x: number; y: number } | null>(null); // long-press popover, anchored at (x,y)
   const [forwardMsg, setForwardMsg] = useState<ChatMessage | null>(null); // message being forwarded → pick a contact
-  // True once this account has more than one linked device (from the own device
-  // list). Drives the "groups don't sync to your other devices yet" note (3e).
-  const [multiDevice, setMultiDevice] = useState(false);
+  // Setter forces UI refreshes when ownListRef changes.
+  const [, setMultiDevice] = useState(false);
   const [recording, setRecording] = useState(false);
   const [recSeconds, setRecSeconds] = useState(0);
   const [myAvatarB64, setMyAvatarB64] = useState('');
@@ -1608,6 +1657,14 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     return run;
   }
 
+  function enqueueGroupMutation<T>(task: () => Promise<T>): Promise<T> {
+    const run = groupMutationQueueRef.current
+      .catch(() => undefined)
+      .then(task);
+    groupMutationQueueRef.current = run.catch(() => undefined);
+    return run;
+  }
+
   // Listen on our own inbox and authenticate as its owner (Ed25519 sig over the
   // DO's challenge) so the relay hands us our queued + live messages.
   function connectInbox(room: string) {
@@ -1627,6 +1684,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
 
   // A send channel to a contact's inbox. Status = reachability dot for them.
   async function connectSend(contact: Contact) {
+    if (contact.localOnly) return;
     const room = await inboxRoom(contact.peerSignPub);
     sendRoomRef.current.set(contact.roomId, room);
     if (relaysRef.current.has(room)) return;
@@ -1635,7 +1693,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         setStatuses((prev) => ({ ...prev, [contact.roomId]: s }));
         // Coming back online is the strongest moment to re-offer my device list:
         // a peer that was offline when I linked a device learns it here.
-        if (s === 'open') void ensureListGossiped(contact);
+        if (s === 'open') {
+          void ensureListGossiped(contact);
+          void schedulePendingGroupMutationRetry();
+        }
       },
       onAck: (mid) => markStatus(mid, 'sent'),
       onNack: (mid, reason) => markStatus(mid, 'failed', reason === 'full'
@@ -1937,6 +1998,36 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     // permanent failure. It becomes reachable once its list SPK is gossiped.
     for (const u of unreachable) rows.push({ device: bytesToB64(u), deliveryId: '', status: 'stale' });
     return rows;
+  }
+
+  /** Control-frame fan-out without user-visible delivery rows or wake-up push. */
+  async function silentFanout(
+    contact: Contact,
+    content: MessageContent,
+    only?: Bytes,
+  ): Promise<void> {
+    const id = identityRef.current;
+    if (!id) return;
+    const { deliveries, unreachable } = await enqueueInbox(async () => {
+      const result = await fanoutDeliveries(
+        id,
+        contact,
+        content,
+        randomMid(),
+        undefined,
+        only,
+      );
+      await saveContact(dek, contact);
+      return result;
+    });
+    if (deliveries.length === 0 || unreachable.length > 0) {
+      throw new Error('Kontrollnachricht konnte nicht an jedes Zielgerät zugestellt werden.');
+    }
+    for (const delivery of deliveries) {
+      const room = await inboxRoom(delivery.deviceSignPub);
+      connectDeviceInbox(room);
+      relaysRef.current.get(room)?.send(delivery.sealed, randomMid(), true);
+    }
   }
 
   // Auto-push a large attachment as chunk frames straight to the peer's mailbox (1:1
@@ -2351,6 +2442,61 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           ]);
         }
       }
+      for (const group of groupsRef.current) {
+        const all = messagesRef.current[group.id] ?? [];
+        const msgs: HistoryMessage[] = [];
+        for (const message of all) {
+          if (
+            message.mid &&
+            typeof message.text === 'string' &&
+            message.text.length > 0
+          ) {
+            msgs.push({
+              mine: !!message.mine,
+              ts: message.ts,
+              mid: message.mid,
+              text: message.text,
+              sender: message.sender,
+            });
+          } else {
+            skipped++;
+          }
+        }
+        if (!msgs.length) continue;
+        const enc = new TextEncoder();
+        const chunks: HistoryMessage[][] = [];
+        let batch: HistoryMessage[] = [];
+        let bytes = 0;
+        for (const message of msgs) {
+          const size =
+            enc.encode(message.text).length +
+            (message.sender ? enc.encode(message.sender).length : 0) +
+            80;
+          if (batch.length && bytes + size > HISTORY_CHUNK_BYTES) {
+            chunks.push(batch);
+            batch = [];
+            bytes = 0;
+          }
+          batch.push(message);
+          bytes += size;
+        }
+        if (batch.length) chunks.push(batch);
+        for (let index = 0; index < chunks.length; index++) {
+          await sendBootstrapFrame(
+            targetSignPub,
+            `${baseBid}-gh-${group.id}-${index}`,
+            [
+              {
+                t: 'ghistory',
+                groupId: group.id,
+                idx: index,
+                total: chunks.length,
+                msgs: chunks[index],
+              },
+            ],
+          );
+        }
+      }
       // Only this frame stops the receiver from re-pulling.
       await sendBootstrapFrame(targetSignPub, `${baseBid}-done`, [{ t: 'done', skipped }]);
     } finally {
@@ -2361,6 +2507,11 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   async function sendBootstrapTo(targetSignPub: Bytes, bid: string) {
     const id = identityRef.current;
     if (!id || !isPrimaryDevice(id)) return; // only the primary answers a pull
+    if ((await loadPendingGroupMutationSnapshots(dek)).length > 0) {
+      throw new Error(
+        'Bootstrap wartet auf die bestätigte Zustellung einer Gruppenänderung.',
+      );
+    }
     const self = await ensureSelfContact();
     if (!self) return;
     const prof = myProfileRef.current;
@@ -2400,6 +2551,32 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       { t: 'roster', contacts },
     ];
     await sendBootstrapFrame(targetSignPub, bid, parts);
+    // Replay barriers precede all live group states. A newly linked device must
+    // never accept an old retained invitation in the gap before it learns that
+    // this account had already been removed or had left.
+    const tombstones = (await loadGroupRemovalTombstones(dek))
+      .slice(0, 4096)
+      .map((snapshot) => snapshot.tombstone);
+    for (let index = 0; index < tombstones.length; index += 64) {
+      await sendBootstrapFrame(
+        targetSignPub,
+        `${bid}-gt-${index / 64}`,
+        [
+          {
+            t: 'gtombstones',
+            tombstones: tombstones.slice(index, index + 64),
+          },
+        ],
+      );
+    }
+    // Group state travels before group history, one bounded frame per group.
+    for (const group of groupsRef.current) {
+      await sendBootstrapFrame(
+        targetSignPub,
+        `${bid}-g-${group.id}`,
+        [{ t: 'groups', groups: [await toInvite(group)] }],
+      );
+    }
     // Then the past messages, chunked, each frame independently applicable.
     await sendHistoryTo(targetSignPub, bid);
   }
@@ -2466,33 +2643,82 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
    *
    * ⚠️ Same rule as sendListAckTo: never await this from inside a queued task.
    */
+  function peerAckForDevice(
+    contact: Contact,
+    deviceSignPub: Bytes,
+  ): { epoch: number; version: number } | undefined {
+    const perDevice =
+      contact.peerAckedListByDevice?.[bytesToB64(deviceSignPub)];
+    if (perDevice) return perDevice;
+    // Backward compatibility: the old person-wide watermark can only safely
+    // stand for the pinned primary. It must never silence retries to siblings.
+    return bytesEqual(deviceSignPub, contact.peerSignPub)
+      ? contact.peerAckedListEV
+      : undefined;
+  }
+
+  function peerHasAckedListOnEveryDevice(
+    contact: Contact,
+    list: DeviceList,
+  ): boolean {
+    const targets =
+      contact.peerDeviceList?.devices.map((device) => device.signPub) ??
+      [contact.peerSignPub];
+    return targets.every((target) => {
+      const acked = peerAckForDevice(contact, target);
+      return (
+        !!acked &&
+        !isNewerDeviceList(
+          { epoch: list.epoch, version: list.version },
+          acked,
+        )
+      );
+    });
+  }
+
   async function ensureListGossiped(contact: Contact) {
     const id = identityRef.current;
     const list = ownListRef.current;
     if (!id || !list) return;
-    if (contact.hidden || contact.staleIdentity || !hasSession(contact)) return;
-    const acked = contact.peerAckedListEV;
-    if (acked && !isNewerDeviceList({ epoch: list.epoch, version: list.version }, acked)) return; // they're current
-    const last = listGossipAttemptRef.current.get(contact.roomId);
-    const sameList = last && last.epoch === list.epoch && last.version === list.version;
-    // EXPONENTIAL BACKOFF, capped. A peer on an older build never acks (it does not
-    // know the frame) and one that is offline cannot; without backoff every such
-    // contact would receive one frame per minute forever and eventually overflow
-    // their relay mailbox, which then nacks everyone's messages. Retries stay
-    // bounded but never stop entirely, so a peer that updates still converges.
-    const tries = sameList ? last!.tries : 0;
-    const wait = Math.min(GOSSIP_COOLDOWN_MS * 2 ** tries, GOSSIP_MAX_BACKOFF_MS);
-    if (sameList && Date.now() - last!.at < wait) return;
-    listGossipAttemptRef.current.set(contact.roomId, {
-      epoch: list.epoch,
-      version: list.version,
-      at: Date.now(),
-      tries: sameList ? tries + 1 : 0, // a NEW list restarts the schedule
-    });
-    try {
-      await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendDeviceList(id, contact, list)), undefined, true);
-    } catch {
-      /* unreachable right now — the next trigger retries */
+    if (contact.localOnly || contact.staleIdentity) return;
+    const targets =
+      contact.peerDeviceList?.devices.map((device) => device.signPub) ??
+      [contact.peerSignPub];
+    for (const target of targets) {
+      const acked = peerAckForDevice(contact, target);
+      if (
+        acked &&
+        !isNewerDeviceList(
+          { epoch: list.epoch, version: list.version },
+          acked,
+        )
+      ) {
+        continue;
+      }
+      const attemptKey = `${contact.roomId}:${bytesToB64(target)}`;
+      const last = listGossipAttemptRef.current.get(attemptKey);
+      const sameList =
+        last && last.epoch === list.epoch && last.version === list.version;
+      // Exponential, per-device retry. An ack from B1 cannot suppress B2.
+      const tries = sameList ? last.tries : 0;
+      const wait = Math.min(
+        GOSSIP_COOLDOWN_MS * 2 ** tries,
+        GOSSIP_MAX_BACKOFF_MS,
+      );
+      if (sameList && Date.now() - last.at < wait) continue;
+      listGossipAttemptRef.current.set(attemptKey, {
+        epoch: list.epoch,
+        version: list.version,
+        at: Date.now(),
+        tries: sameList ? tries + 1 : 0,
+      });
+      try {
+        // fanoutDeliveries can establish X3DH from the target's signed SPK, so
+        // hidden group contacts do not need a pre-existing session.
+        await silentFanout(contact, { kind: 'devlist', list }, target);
+      } catch {
+        /* unreachable right now — the next trigger retries this device */
+      }
     }
   }
 
@@ -2509,7 +2735,11 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
    * only FILLS GAPS — anything this device already pinned or verified wins, and
    * `verified` is never adopted from the wire (only suggested).
    */
-  async function applyBootstrapIfNew(bid: string, parts: BootstrapPart[]) {
+  async function applyBootstrapIfNew(
+    bid: string,
+    parts: BootstrapPart[],
+    source: Contact,
+  ) {
     const id = identityRef.current;
     if (!id) return;
     const isDone = parts.some((p) => p.t === 'done');
@@ -2535,6 +2765,66 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           setProfileName(next.name ?? '');
           setMyAvatarB64(next.avatarB64 ?? '');
         }
+      } else if (p.t === 'groups') {
+        for (const invite of p.groups) {
+          await applyGroupInvite(invite, source, true);
+        }
+      } else if (p.t === 'gtombstones') {
+        for (const tombstone of p.tombstones) {
+          const installed = await saveGroupRemovalTombstone(dek, tombstone);
+          const current = groupsRef.current.find(
+            (group) => group.id === installed.tombstone.groupId,
+          );
+          if (!current) continue;
+          const sameOwner =
+            !!current.ownerMasterPub &&
+            bytesEqual(
+              current.ownerMasterPub,
+              installed.tombstone.ownerMasterPub,
+            );
+          if (
+            !sameOwner ||
+            installed.tombstone.blockReadd ||
+            current.revision <= installed.tombstone.revision
+          ) {
+            await deleteGroupAction(
+              installed.tombstone.groupId,
+              installed.tombstone,
+            );
+          } else {
+            await clearGroupRemovalTombstone(installed);
+          }
+        }
+      } else if (p.t === 'ghistory') {
+        if (
+          !/^grp_[0-9a-f]{32}$/.test(p.groupId) ||
+          !groupsRef.current.some((group) => group.id === p.groupId)
+        ) {
+          continue;
+        }
+        let base = messagesRef.current[p.groupId];
+        if (base === undefined) {
+          const persisted = await loadMessages(dek, p.groupId);
+          base = messagesRef.current[p.groupId] ?? persisted;
+        }
+        const next = [...base];
+        let added = 0;
+        for (const history of p.msgs) {
+          if (hasMessage(next, history.mid, history.mine)) continue;
+          next.push({
+            mine: history.mine,
+            ts: history.ts,
+            mid: history.mid,
+            text: history.text,
+            sender: history.sender,
+          });
+          added++;
+        }
+        if (added) {
+          next.sort((a, b) => a.ts - b.ts);
+          await saveMessages(dek, p.groupId, next);
+        }
+        messagesRef.current[p.groupId] = added ? next : base;
       } else if (p.t === 'history') {
         // DISPLAY ROOM derived locally from (my master, pm) — never from the wire,
         // exactly like a roster entry. Missing messages are appended and the log
@@ -3139,16 +3429,22 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
 
   // P confirmed the emoji → atomically persist list + retry intent, publish the
   // committed list to RAM/self-contact, and only then expose the Grant to N.
-  // Gossip our updated device list to every contact with an established session
-  // (revocation transport). Only sendable sessions: not stale, not hidden group
-  // members, and a ratchet must already exist. Best-effort per contact.
-  async function gossipDeviceList(list: Parameters<typeof sendDeviceList>[2]) {
+  // Gossip our updated device list to every contact with an established session,
+  // including hidden group-member contacts. This is the revocation transport
+  // that keeps group fan-out on the same authoritative target set as 1:1.
+  async function gossipDeviceList(list: DeviceList) {
     const id = identityRef.current;
     if (!id) return;
     for (const c of contactsRef.current) {
-      if (c.hidden || c.staleIdentity || !hasSession(c)) continue;
+      if (
+        c.localOnly ||
+        c.staleIdentity ||
+        bytesEqual(c.peerMasterPub, id.master.publicKey)
+      ) {
+        continue;
+      }
       try {
-        await sendEnvelopeTo(c, await encryptAndPersist(c, () => sendDeviceList(id, c, list)), undefined, true);
+        await ensureListGossiped(c);
       } catch {
         /* unreachable contact — best effort, they learn it next time */
       }
@@ -3443,17 +3739,65 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       // A crash between the two leaves the relay row unacknowledged; on retry the
       // old ratchet can decrypt again and the message-level ids deduplicate an
       // application effect that had already reached disk.
-      if (content.kind === 'profile') {
+      const hiddenDirectContent =
+        contact.hidden &&
+        !bytesEqual(contact.peerMasterPub, id.master.publicKey) &&
+        (content.kind === 'text' ||
+          content.kind === 'file' ||
+          content.kind === 'reply' ||
+          content.kind === 'chunk' ||
+          content.kind === 'recall' ||
+          content.kind === 'attoffer' ||
+          content.kind === 'attreq' ||
+          content.kind === 'r2');
+      if (hiddenDirectContent) {
+        // A group-introduced hidden contact is authorised only as a transport
+        // peer for group/control frames. Letting ordinary 1:1 content fall
+        // through would create an invisible, undeletable storage channel.
+        console.warn('[group] Direkter Inhalt eines versteckten Mitgliedskontakts verworfen.');
+      } else if (content.kind === 'profile') {
         contact.peerName = content.name;
         contact.peerAvatarB64 = content.avatar ? bytesToB64(content.avatar) : undefined;
       } else if (content.kind === 'ginvite') {
-        await applyGroupInvite(content.group, contact);
+        await applyGroupInvite(
+          content.group,
+          contact,
+          bytesEqual(contact.peerMasterPub, id.master.publicKey),
+        );
       } else if (content.kind === 'group') {
-        await applyGroupMessage(content.groupId, content.senderName, content.inner, contact, mid);
+        await applyGroupMessage(
+          content.groupId,
+          content.revision,
+          content.stateHash,
+          content.senderName,
+          content.inner,
+          contact,
+          mid,
+          ackId,
+        );
+      } else if (content.kind === 'groupsync') {
+        await applyGroupSync(content, contact);
       } else if (content.kind === 'gremove') {
-        await applyGroupRemove(content.groupId, contact);
+        await applyGroupRemove(content.state, contact);
+      } else if (content.kind === 'gremoveLegacy') {
+        const legacy = groupsRef.current.find(
+          (group) => group.id === content.groupId,
+        );
+        if (
+          legacy &&
+          !legacy.ownerMasterPub &&
+          legacy.revision === 0 &&
+          isGroupMember(legacy, contact.peerMasterPub)
+        ) {
+          await deleteGroupAction(legacy.id);
+        }
       } else if (content.kind === 'gleave') {
-        await applyGroupLeave(content.groupId, contact);
+        await applyGroupLeave(
+          content.groupId,
+          content.revision,
+          content.stateHash,
+          contact,
+        );
       } else if (content.kind === 'devlist') {
         // Learn the peer's newer device list (revocation gossip). Verified +
         // rollback-checked + denylist-guarded inside applyDeviceListUpdate; on
@@ -3461,6 +3805,16 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         // advanced ratchet.
         if (await applyDeviceListUpdate(contact, content.list, retiredMastersRef.current)) {
           sweepRevokedDeliveries(contact); // fund 6: drop revoked devices from open bubbles
+          // The same independently signed directory is cached in every group
+          // roster containing this master. Merge by its own (epoch, version)
+          // clock; an owner roster revision is never allowed to roll it back.
+          const nextGroups: Group[] = [];
+          for (const group of groupsRef.current) {
+            const result = await applyGroupMemberDeviceList(group, content.list);
+            nextGroups.push(result.group);
+            if (result.applied) await saveGroup(dek, result.group);
+          }
+          groupsRef.current = nextGroups;
           // If this is MY OWN list (delivered from my primary to the self-contact),
           // adopt it as my stored own list too, so a secondary device's self-sync
           // targets a later-linked sibling as well (Review fund 4).
@@ -3497,8 +3851,20 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         if (mine && !isNewerDeviceList(claimed, { epoch: mine.epoch, version: mine.version })) {
           // Ignore an ack from the FUTURE (a version I never published) — it could
           // otherwise silence the gossip for a list the peer does not actually have.
-          if (!contact.peerAckedListEV || isNewerDeviceList(claimed, contact.peerAckedListEV)) {
-            contact.peerAckedListEV = claimed;
+          const from =
+            env.type === 'prekey'
+              ? env.x3dh.identitySignPub
+              : (env.dev ?? contact.peerSignPub);
+          const key = bytesToB64(from);
+          const previous = contact.peerAckedListByDevice?.[key];
+          if (!previous || isNewerDeviceList(claimed, previous)) {
+            contact.peerAckedListByDevice = {
+              ...(contact.peerAckedListByDevice ?? {}),
+              [key]: claimed,
+            };
+            if (bytesEqual(from, contact.peerSignPub)) {
+              contact.peerAckedListEV = claimed;
+            }
           }
         }
       } else if (content.kind === 'unlinkreq') {
@@ -3527,6 +3893,14 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
             // transaction. Keep the authenticated session but defer this dormant
             // rotation frame; a normal-session retry can carry it safely.
             console.warn('[recv] Rotation als erste Prekey-Nachricht zurückgestellt.');
+          } else if (masterReferencedByLiveGroup(contact.peerMasterPub)) {
+            // A contact-only master re-pin would leave signed group rosters on
+            // the old identity and either strand delivery or silently recreate a
+            // hidden old-master contact. Until an owner-authored roster
+            // migration exists, fail closed before touching the Contact.
+            throw new Error(
+              'Identitätswechsel ist blockiert, solange der Kontakt Mitglied einer Gruppe ist.',
+            );
           } else {
             const r = await acceptRotation(contact, content.statement, retiredMastersRef.current);
             await reKeyContactInMemory(r.oldRoomId, contact); // persists contact + moves storage
@@ -3622,7 +3996,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         if (!bytesEqual(contact.peerMasterPub, id.master.publicKey)) {
           console.warn('[recv] bootstrap von einem Nicht-Selbst-Kontakt — verworfen.');
         } else {
-          await applyBootstrapIfNew(content.bid, content.parts);
+          await applyBootstrapIfNew(content.bid, content.parts, contact);
         }
       } else if (content.kind === 'chunk') {
         // A piece of a large attachment: store it, and on the last chunk append the
@@ -3735,8 +4109,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         const myList = ownListRef.current;
         const peerBehind =
           !!myList &&
-          (!contact.peerAckedListEV ||
-            isNewerDeviceList({ epoch: myList.epoch, version: myList.version }, contact.peerAckedListEV));
+          !peerHasAckedListOnEveryDevice(contact, myList);
         if (
           peerBehind &&
           mid &&
@@ -3751,7 +4124,16 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       void ensureListGossiped(contact); // keep peers current on MY devices
       bump();
     } catch (e) {
-      if (isStorageFull(e)) {
+      if (e instanceof DeferredGroupTransitionError) {
+        // Bounded transition only: keep this exact ciphertext in the relay and
+        // discard the cloned ratchet advance. Once the owner state lands, the
+        // row re-decrypts and commits normally; a crash cannot lose it.
+        retainRelayRow = true;
+      } else if (e instanceof DuplicateGroupTransitionRowError) {
+        // ACK this additional relay row but deliberately do NOT commit its
+        // cloned ratchet. The original stable ackId remains retained as the
+        // crash-recovery copy until the signed owner state arrives.
+      } else if (isStorageFull(e)) {
         // Do NOT ack: the relay keeps the message and re-delivers it once there is
         // room again. Acking a message we could not store would delete it for good.
         setError('Speicher voll — Nachricht nicht gespeichert. Gib Speicher frei; sie wird erneut zugestellt.');
@@ -3766,10 +4148,6 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         // Fail closed and retain the ciphertext. Boot normally catches this
         // before connecting; this branch covers a runtime corruption signal.
         setError(t('Nachrichtenverlauf beschädigt — neue Nachricht wurde nicht bestätigt.'));
-        retainRelayRow = true;
-      } else if (e instanceof DeferredInboxApplicationError) {
-        // The authenticated frame is valid but cannot be made durable yet.
-        // Keep both relay ciphertext and the pre-receive ratchet state.
         retainRelayRow = true;
       } else if (isTransientStorageFailure(e)) {
         // IndexedDB can abort transiently without reporting a quota condition.
@@ -3803,8 +4181,43 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         return;
       }
       const contact = await makeContact(asMasterPub(id.master.publicKey), bundle);
-      if (contactsRef.current.some((c) => c.roomId === contact.roomId)) {
-        openChat(contact.roomId);
+      const existing = contactsRef.current.find(
+        (candidate) => candidate.roomId === contact.roomId,
+      );
+      if (existing) {
+        if (
+          !bytesEqual(existing.peerMasterPub, bundle.masterPub) ||
+          bundle.epoch < existing.peerEpoch
+        ) {
+          throw new Error('Der Verbindungscode passt nicht zum bereits gepinnten Kontaktstand.');
+        }
+        if (
+          existing.peerDeviceList &&
+          bundle.epoch === existing.peerDeviceList.epoch &&
+          !deviceInList(existing.peerDeviceList, bundle.identitySignPub)
+        ) {
+          throw new Error('Der Verbindungscode gehört zu einem widerrufenen Gerät.');
+        }
+        // A member first learned through a group becomes a normal visible
+        // contact when its code is scanned. Keep newer DeviceLists/sessions and
+        // local verification, but adopt the freshly verified initiator bundle.
+        existing.hidden = undefined;
+        existing.bundle = bundle;
+        existing.peerEpoch = Math.max(existing.peerEpoch, bundle.epoch);
+        existing.peerSignPub = bundle.identitySignPub;
+        existing.peerDhPub = bundle.identityDhPub;
+        if (
+          existing.peerDeviceList &&
+          bundle.epoch > existing.peerDeviceList.epoch
+        ) {
+          existing.peerDeviceList = undefined;
+          existing.sessions = new Map();
+        }
+        await saveContact(dek, existing);
+        await connectSend(existing);
+        setAddInput('');
+        openChat(existing.roomId);
+        bump();
         return;
       }
       contactsRef.current = [...contactsRef.current, contact];
@@ -3943,9 +4356,39 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         await migrateContactsToMaster();
         await ensureSelfContact(); // hidden self-contact for self-sync; refresh my device list
         for (const c of contactsRef.current) await connectSend(c);
-        const gs = await loadGroups(dek);
+        let gs = await loadGroups(dek);
+        for (const snapshot of await loadGroupRemovalTombstones(dek)) {
+          const stored = gs.find(
+            (group) => group.id === snapshot.tombstone.groupId,
+          );
+          if (!stored) continue;
+          const sameOwner =
+            !!stored.ownerMasterPub &&
+            bytesEqual(
+              stored.ownerMasterPub,
+              snapshot.tombstone.ownerMasterPub,
+            );
+          if (
+            !sameOwner ||
+            snapshot.tombstone.blockReadd ||
+            stored.revision <= snapshot.tombstone.revision
+          ) {
+            // Tombstone-first deletion may have crashed before erasing the live
+            // group. Finish it before any relay is connected.
+            await removeGroup(dek, stored.id);
+            gs = gs.filter((group) => group.id !== stored.id);
+          } else {
+            // A strictly newer accepted re-add was saved before its exact
+            // tombstone clear completed.
+            await clearGroupRemovalTombstone(snapshot);
+          }
+        }
         groupsRef.current = gs;
-        for (const g of gs) messagesRef.current[g.id] = await loadMessages(dek, g.id);
+        for (const g of gs) {
+          messagesRef.current[g.id] = await loadMessages(dek, g.id);
+          for (const member of g.members) await ensureMemberContact(member);
+        }
+        groupsBootReadyRef.current = true;
         // Include cardless/self-sync histories when reconstructing the scope of
         // legacy flat recall entries. Ambiguous legacy values are discarded.
         for (const roomId of await allMessageRoomIds()) {
@@ -3974,6 +4417,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       void bootLoad
         .then(async () => {
           await requestBootstrap();
+          await schedulePendingGroupMutationRetry();
           for (const c of contactsRef.current) await ensureListGossiped(c);
         })
         .catch(() => undefined);
@@ -4014,6 +4458,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     const onForeground = () => {
       if (document.visibilityState === 'visible') {
         for (const r of relaysRef.current.values()) r.reconnect();
+        void schedulePendingGroupMutationRetry();
       }
     };
     document.addEventListener('visibilitychange', onForeground);
@@ -4022,6 +4467,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     return () => {
       document.removeEventListener('visibilitychange', onForeground);
       window.removeEventListener('pageshow', onForeground);
+      groupsBootReadyRef.current = false;
       for (const r of relaysRef.current.values()) r.close();
       relaysRef.current.clear();
       for (const t of ackTimers.current.values()) clearTimeout(t);
@@ -4228,119 +4674,614 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     (room ? relaysRef.current.get(room) : undefined)?.send(envelope, mid, silent);
   }
 
-  // A hidden pairwise contact for a group member, so we can fan messages to them.
+  function groupMemberFromContact(contact: Contact): GroupMember {
+    return {
+      masterPub: contact.peerMasterPub,
+      epoch: contact.peerEpoch,
+      signPub: contact.peerSignPub,
+      dhPub: contact.peerDhPub,
+      bundle: contact.bundle ? groupBroadcastBundle(contact.bundle) : undefined,
+      deviceList: contact.peerDeviceList,
+      // A local nickname is private metadata and must never leak through a roster.
+      name: contact.peerName,
+    };
+  }
+
+  function reconcileMemberWithContact(
+    member: GroupMember,
+    contact: Contact,
+  ): GroupMember {
+    const current = groupMemberFromContact(contact);
+    return {
+      ...member,
+      ...current,
+      bundle: current.bundle ?? member.bundle,
+      deviceList: current.deviceList ?? member.deviceList,
+      name: member.name ?? current.name,
+    };
+  }
+
+  function ownGroupMember(): GroupMember | null {
+    const id = identityRef.current;
+    const pre = prekeysRef.current;
+    if (!id || !pre) return null;
+    return {
+      masterPub: id.master.publicKey,
+      epoch: id.epoch,
+      signPub: id.sign.publicKey,
+      dhPub: id.dh.publicKey,
+      bundle: groupBroadcastBundle(currentBundle(id, pre)),
+      deviceList: ownListRef.current ?? undefined,
+      name: myProfileRef.current.name,
+    };
+  }
+
+  function refreshGroupDirectories(group: Group): Group {
+    return {
+      ...group,
+      members: group.members.map((member) => {
+        const contact = contactsRef.current.find((candidate) =>
+          bytesEqual(candidate.peerMasterPub, memberMasterPub(member)),
+        );
+        if (!contact) return member;
+        return reconcileMemberWithContact(member, contact);
+      }),
+    };
+  }
+
+  // Upsert the hidden pairwise contact that backs one group member. DeviceLists
+  // are re-verified through the normal Contact path, so group-originated keys do
+  // not get a weaker revocation or rollback rule.
   async function ensureMemberContact(m: GroupMember): Promise<Contact | null> {
     const id = identityRef.current;
     if (!id) return null;
-    const myMaster = asMasterPub(id.master.publicKey);
-    const memberMaster = m.bundle?.masterPub;
-    // Master-based room when the roster entry carries a master (v2 bundles do);
-    // a legacy member without one stays on the device-DH room — frozen, since
-    // group device-revocation is v3 (it can't get a master room until re-invited
-    // with a v2 bundle). Resolve regime-robustly so a pre-flip member contact is
-    // found rather than duplicated.
-    let contact: Contact;
-    if (memberMaster) {
-      const roomId = await computeMasterRoomId(myMaster, asMasterPub(memberMaster));
-      const existing = await resolveContactByConv(contactsRef.current, roomId, id.dh.publicKey, myMaster);
-      if (existing) return existing;
-      // CREATION guards (Devil's-Advocate G2): a group roster is an unproven,
-      // attacker-relayable list, and receiveEnvelope never consults the denylist —
-      // so this is the choke point. Never mint a member contact for a RETIRED
-      // master (the abandoned-key downgrade the denylist exists to stop, reached
-      // here via the roster instead of 1:1 auto-create), and require the master to
-      // actually vouch (device cert) for the exact keys we are about to pin — else
-      // a stale/forged roster entry binds arbitrary device keys under a master.
-      if (retiredMastersRef.current.has(await masterKeyB64(memberMaster))) {
-        console.warn('[group] Mitglied unter verlassenem (widerrufenem) Master abgelehnt.');
-        return null;
-      }
-      const bundle = m.bundle;
-      const certOk =
-        !!bundle && (await verifyDeviceCert(memberMaster, bundle.epoch, m.signPub, m.dhPub, bundle.deviceCert));
-      if (!certOk) {
-        console.warn('[group] Mitglied mit ungültigem Device-Zertifikat abgelehnt.');
-        return null;
-      }
-      contact = {
-        roomId,
-        peerMasterPub: memberMaster,
-        peerEpoch: m.bundle?.epoch ?? 1,
-        peerSignPub: m.signPub,
-        peerDhPub: m.dhPub,
-        peerFingerprint: await identityFingerprint(memberMaster, memberMaster),
-        peerName: m.name,
-        ownMasterPub: myMaster,
-        regime: 'master',
-        bundle: m.bundle,
-        hidden: true,
-        sessions: new Map(),
-      };
-    } else {
-      const roomId = await computeRoomId(id.dh.publicKey, m.dhPub);
-      const existing = contactsRef.current.find((c) => c.roomId === roomId);
-      if (existing) return existing;
-      contact = {
-        roomId,
-        peerMasterPub: m.signPub, // legacy fallback (no master in the roster)
-        peerEpoch: 1,
-        peerSignPub: m.signPub,
-        peerDhPub: m.dhPub,
-        peerFingerprint: await identityFingerprint(m.signPub, m.dhPub),
-        peerName: m.name,
-        regime: 'device',
-        bundle: m.bundle,
-        hidden: true,
-        sessions: new Map(),
-      };
+    const master = memberMasterPub(m);
+    if (bytesEqual(master, id.master.publicKey)) return null;
+    if (retiredMastersRef.current.has(await masterKeyB64(master))) {
+      console.warn('[group] Mitglied unter verlassenem Master abgelehnt.');
+      return null;
     }
-    contactsRef.current = [...contactsRef.current, contact];
-    await connectSend(contact);
-    await saveContact(dek, contact);
-    return contact;
+    const myMaster = asMasterPub(id.master.publicKey);
+    let contact = contactsRef.current.find((candidate) =>
+      bytesEqual(candidate.peerMasterPub, master),
+    );
+    if (contact) {
+      if (m.deviceList) {
+        await applyDeviceListUpdate(contact, m.deviceList, retiredMastersRef.current);
+      }
+      if (
+        !contact.bundle &&
+        m.bundle &&
+        bytesEqual(m.bundle.masterPub, contact.peerMasterPub)
+      ) {
+        contact.bundle = groupBroadcastBundle(m.bundle);
+      }
+      if (!contact.peerName && m.name) contact.peerName = m.name;
+      await saveContact(dek, contact);
+      await connectSend(contact);
+      return contact;
+    }
+
+    const bundle = m.bundle ? groupBroadcastBundle(m.bundle) : undefined;
+    if (!bundle || !bytesEqual(bundle.masterPub, master)) {
+      console.warn('[group] Mitglied ohne verifiziertes, initiierbares Prekey-Bundle abgelehnt.');
+      return null;
+    }
+    try {
+      contact = await makeContact(myMaster, bundle);
+      contact.hidden = true;
+      contact.peerName = m.name;
+      if (
+        m.deviceList &&
+        !(await applyDeviceListUpdate(contact, m.deviceList, retiredMastersRef.current))
+      ) {
+        console.warn('[group] Geräteliste des Mitglieds konnte nicht übernommen werden.');
+        return null;
+      }
+      contactsRef.current = [...contactsRef.current, contact];
+      await saveContact(dek, contact);
+      await connectSend(contact);
+      return contact;
+    } catch (error) {
+      console.warn('[group] Versteckter Mitgliedskontakt abgelehnt:', error);
+      return null;
+    }
   }
 
-  async function sendGroupInvites(group: Group) {
+  async function confirmedFanout(
+    contact: Contact,
+    content: MessageContent,
+    minPv = 0,
+  ): Promise<void> {
     const id = identityRef.current;
-    const pre = prekeysRef.current;
-    if (!id || !pre) return;
-    const me: GroupMember = {
-      signPub: id.sign.publicKey,
-      dhPub: id.dh.publicKey,
-      bundle: currentBundle(id, pre),
-      name: myProfileRef.current.name,
-    };
-    for (const m of group.members) {
-      const contact = await ensureMemberContact(m);
-      if (!contact) continue;
-      const roster = [me, ...group.members.filter((x) => !eqBytes(x.dhPub, m.dhPub))];
-      const invite: GroupInvite = await toInvite({ ...group, members: roster });
-      try {
-        await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendGroupInvite(id, contact, invite)), undefined, true);
-      } catch {
-        /* retry when they come online */
+    if (!id) throw new Error('Keine lokale Identität.');
+    const { deliveries, unreachable } = await enqueueInbox(async () => {
+      const result = await fanoutDeliveries(
+        id,
+        contact,
+        content,
+        randomMid(),
+        undefined,
+        undefined,
+        minPv,
+        ownListRef.current ?? undefined,
+      );
+      await saveContact(dek, contact);
+      return result;
+    });
+    if (deliveries.length === 0) {
+      throw new Error(
+        `Gruppenstand konnte ${unreachable.length || 1} Gerät(en) nicht kryptographisch zugestellt werden.`,
+      );
+    }
+    await Promise.all(
+      deliveries.map(async (delivery) => {
+        const room = await inboxRoom(delivery.deviceSignPub);
+        connectDeviceInbox(room);
+        const relay = relaysRef.current.get(room);
+        if (!relay) throw new Error('Relay für Gruppenstand nicht verfügbar.');
+        await relay.sendConfirmed(delivery.sealed, isSilentFrame(content.kind));
+      }),
+    );
+    if (unreachable.length > 0) {
+      throw new Error(
+        `Gruppenstand wartet noch auf ${unreachable.length} autorisierte(s) Gerät(e).`,
+      );
+    }
+  }
+
+  async function syncGroupStateToOwnDevices(group: Group): Promise<void> {
+    const id = identityRef.current;
+    const self = await ensureSelfContact();
+    if (
+      !id ||
+      !self ||
+      !self.peerDeviceList ||
+      self.peerDeviceList.devices.length < 2
+    ) {
+      return;
+    }
+    const invite = await toInvite(group);
+    const { deliveries, unreachable } = await enqueueInbox(async () => {
+      const result = await fanoutDeliveries(
+        id,
+        self,
+        { kind: 'ginvite', group: invite },
+        randomMid(),
+        id.sign.publicKey,
+        undefined,
+        6,
+        ownListRef.current ?? undefined,
+      );
+      await saveContact(dek, self);
+      return result;
+    });
+    await Promise.all(
+      deliveries.map(async (delivery) => {
+        const room = await inboxRoom(delivery.deviceSignPub);
+        connectDeviceInbox(room);
+        const relay = relaysRef.current.get(room);
+        if (!relay) throw new Error('Eigenes Geräte-Relay nicht verfügbar.');
+        await relay.sendConfirmed(delivery.sealed, true);
+      }),
+    );
+    if (unreachable.length > 0) {
+      throw new Error('Gruppenstand wartet noch auf mindestens ein eigenes Gerät.');
+    }
+  }
+
+  async function sendGroupInvites(input: Group): Promise<Group> {
+    const id = identityRef.current;
+    const me = ownGroupMember();
+    if (!id || !me) throw new Error('Gruppenschlüssel nicht geladen.');
+    if (
+      input.ownerMasterPub &&
+      !bytesEqual(input.ownerMasterPub, id.master.publicKey)
+    ) {
+      throw new Error('Nur der Gruppen-Owner darf den Gruppenstand verteilen.');
+    }
+    const group = refreshGroupDirectories(input);
+    const targets: Array<{ contact: Contact; invite: GroupInvite }> = [];
+    for (const member of group.members) {
+      const contact = await ensureMemberContact(member);
+      if (!contact) {
+        throw new Error(`${member.name || 'Mitglied'} ist kryptographisch nicht erreichbar.`);
+      }
+      const targetMaster = memberMasterPub(member);
+      const roster = [
+        me,
+        ...group.members.filter(
+          (candidate) =>
+            !bytesEqual(memberMasterPub(candidate), targetMaster),
+        ),
+      ];
+      const invite = await toInvite({ ...group, members: roster });
+      targets.push({ contact, invite });
+    }
+    // Resolve and validate the complete target set before publishing the first
+    // owner state. A durable mutation marker covers partial relay failures.
+    for (const target of targets) {
+      await confirmedFanout(target.contact, {
+        kind: 'ginvite',
+        group: target.invite,
+      }, 6);
+    }
+    await syncGroupStateToOwnDevices(group);
+    confirmedGroupStateRef.current.set(
+      group.id,
+      group.stateHash
+        ? bytesToB64(group.stateHash)
+        : `legacy:${group.revision}`,
+    );
+    return group;
+  }
+
+  function assertGroupContactReady(
+    contact: Contact,
+    label: string,
+  ): void {
+    const devices = contact.peerDeviceList?.devices ?? [
+      {
+        signPub: contact.peerSignPub,
+        signedPreKey: contact.bundle?.signedPreKey,
+      },
+    ];
+    if (devices.length === 0) {
+      throw new Error(`${label} hat keine autorisierten Geräte.`);
+    }
+    for (const device of devices) {
+      if (deviceProtocolVersion(contact, device.signPub) < 6) {
+        throw new Error(
+          `${label} verwendet auf mindestens einem autorisierten Gerät noch kein Gruppenprotokoll v4.`,
+        );
+      }
+      const established =
+        !!contact.sessions.get(bytesToB64(device.signPub))?.ratchet;
+      const initiable =
+        !!device.signedPreKey ||
+        (bytesEqual(device.signPub, contact.peerSignPub) &&
+          !!contact.bundle?.signedPreKey);
+      if (!established && !initiable) {
+        throw new Error(
+          `${label} ist auf mindestens einem autorisierten Gerät nicht kryptographisch erreichbar.`,
+        );
       }
     }
+  }
+
+  /**
+   * Fail before the atomic group/outbox CAS if even one authorised target
+   * device cannot receive v4. A partial commit would otherwise strand the
+   * owner on a roster revision that some member devices can never parse.
+   */
+  async function preflightGroupMutation(
+    group: Group,
+    removedMasters: Bytes[],
+  ): Promise<void> {
+    const checked = new Set<string>();
+    for (const member of group.members) {
+      const master = memberMasterPub(member);
+      const key = bytesToB64(master);
+      if (checked.has(key)) continue;
+      const contact = await ensureMemberContact(member);
+      if (!contact) {
+        throw new Error(`${member.name || 'Mitglied'} ist nicht erreichbar.`);
+      }
+      assertGroupContactReady(contact, member.name || 'Ein Gruppenmitglied');
+      checked.add(key);
+    }
+    for (const master of removedMasters) {
+      const key = bytesToB64(master);
+      if (checked.has(key)) continue;
+      const contact = contactsRef.current.find((candidate) =>
+        bytesEqual(candidate.peerMasterPub, master),
+      );
+      if (!contact) {
+        throw new Error('Entferntes Mitglied ist für den signierten Entfernungsnachweis nicht erreichbar.');
+      }
+      assertGroupContactReady(contact, contact.peerName || 'Entferntes Mitglied');
+      checked.add(key);
+    }
+
+    const id = identityRef.current;
+    const self = await ensureSelfContact();
+    if (!id || !self || !self.peerDeviceList) {
+      throw new Error('Eigene signierte Geräteliste ist nicht verfügbar.');
+    }
+    for (const device of self.peerDeviceList.devices) {
+      if (bytesEqual(device.signPub, id.sign.publicKey)) continue;
+      if (deviceProtocolVersion(self, device.signPub) < 6) {
+        throw new Error(
+          'Mindestens ein eigenes verknüpftes Gerät unterstützt Gruppenprotokoll v4 noch nicht.',
+        );
+      }
+      const established =
+        !!self.sessions.get(bytesToB64(device.signPub))?.ratchet;
+      if (!established && !device.signedPreKey) {
+        throw new Error(
+          'Mindestens ein eigenes verknüpftes Gerät ist für den Gruppenstand nicht erreichbar.',
+        );
+      }
+    }
+  }
+
+  async function gcUnreferencedHiddenContacts(): Promise<void> {
+    const id = identityRef.current;
+    if (!id) return;
+    const referenced = new Set<string>();
+    for (const group of groupsRef.current) {
+      for (const member of group.members) {
+        referenced.add(bytesToB64(memberMasterPub(member)));
+      }
+    }
+    // A removed member is intentionally absent from the current roster but its
+    // hidden transport contact is still required until every terminal gremove
+    // has a confirmed relay insert. Durable outbox targets therefore pin it.
+    for (const snapshot of await loadPendingGroupMutationSnapshots(dek)) {
+      for (const master of snapshot.mutation.removedMasters) {
+        referenced.add(bytesToB64(master));
+      }
+    }
+    const removable = contactsRef.current.filter(
+      (contact) =>
+        contact.hidden === true &&
+        !contact.localOnly &&
+        !bytesEqual(contact.peerMasterPub, id.master.publicKey) &&
+        !referenced.has(bytesToB64(contact.peerMasterPub)),
+    );
+    if (removable.length === 0) return;
+    const rooms = new Set(removable.map((contact) => contact.roomId));
+    contactsRef.current = contactsRef.current.filter(
+      (contact) => !rooms.has(contact.roomId),
+    );
+    for (const contact of removable) {
+      sendRoomRef.current.delete(contact.roomId);
+      delete messagesRef.current[contact.roomId];
+      delete unreadRef.current[contact.roomId];
+      await gcRoomAttachments(contact.roomId);
+      await removeContact(dek, contact.roomId);
+    }
+    commitMessages();
+  }
+
+  async function dispatchPendingGroupMutation(
+    requested: PendingGroupMutationSnapshot,
+  ): Promise<void> {
+    const id = identityRef.current;
+    let snapshot = requested;
+    let mutation = snapshot.mutation;
+    let group = groupsRef.current.find(
+      (candidate) => candidate.id === mutation.groupId,
+    );
+    if (!group) {
+      await clearPendingGroupMutation(snapshot);
+      return;
+    }
+    // Always operate on the newest durable slot. A late completion for revision
+    // N must neither delete nor overwrite a successor N+1 marker.
+    const durable = (await loadPendingGroupMutationSnapshots(dek)).find(
+      (candidate) => candidate.mutation.groupId === mutation.groupId,
+    );
+    if (!durable) return;
+    snapshot = durable;
+    mutation = snapshot.mutation;
+    group = groupsRef.current.find(
+      (candidate) => candidate.id === mutation.groupId,
+    );
+    if (!group) {
+      await clearPendingGroupMutation(snapshot);
+      return;
+    }
+    if (group.revision > mutation.revision) {
+      // Recover a pre-v3/beta crash shape (newer group record, older outbox)
+      // without losing its removed targets: promote the marker to the current
+      // state atomically, then deliver that exact state.
+      snapshot = await enqueueGroupMutation(async () => {
+        const current = groupsRef.current.find(
+          (candidate) => candidate.id === mutation.groupId,
+        );
+        const latest = (await loadPendingGroupMutationSnapshots(dek)).find(
+          (candidate) => candidate.mutation.groupId === mutation.groupId,
+        );
+        if (!current || !latest) throw new Error('Gruppen-Mutations-Retry fehlt.');
+        if (latest.mutation.revision >= current.revision) return latest;
+        return replacePendingGroupMutation(
+          dek,
+          current,
+          latest.mutation.removedMasters,
+          latest.record,
+          latest.mutation.deleteLocalAfterDispatch,
+        );
+      });
+      mutation = snapshot.mutation;
+      group = groupsRef.current.find(
+        (candidate) => candidate.id === mutation.groupId,
+      );
+    }
+    if (
+      !id ||
+      !group ||
+      group.revision !== mutation.revision ||
+      !group.stateHash ||
+      !bytesEqual(group.stateHash, mutation.stateHash) ||
+      !group.ownerMasterPub ||
+      !isGroupOwner(group, id.master.publicKey)
+    ) {
+      throw new Error('Ausstehender Gruppenstand passt nicht zum lokalen Owner-Stand.');
+    }
+    await sendGroupInvites(group);
+    for (const master of mutation.removedMasters) {
+      const contact = contactsRef.current.find((candidate) =>
+        bytesEqual(candidate.peerMasterPub, master),
+      );
+      if (!contact) {
+        throw new Error('Entfernter Gruppenkontakt für Retry nicht mehr verfügbar.');
+      }
+      await confirmedFanout(contact, {
+        kind: 'gremove',
+        state: await toGroupStateProof(group),
+      }, 6);
+    }
+    if (mutation.deleteLocalAfterDispatch) {
+      const barrier: GroupRemovalTombstone = {
+        groupId: group.id,
+        ownerMasterPub: group.ownerMasterPub,
+        revision: group.revision,
+        stateHash: group.stateHash,
+        blockReadd: true,
+      };
+      // Finalize in recoverable order: replay barrier, live-state erase, then
+      // exact marker clear. Every crash prefix is completed safely at boot.
+      await saveGroupRemovalTombstone(dek, barrier);
+      await deleteGroupAction(group.id, barrier, true);
+      await clearPendingGroupMutation(snapshot);
+      await gcUnreferencedHiddenContacts();
+    } else if (await clearPendingGroupMutation(snapshot)) {
+        await gcUnreferencedHiddenContacts();
+    }
+  }
+
+  async function commitDurableGroupMutation(
+    group: Group,
+    removedMasters: Bytes[] = [],
+    deleteLocalAfterDispatch = false,
+  ): Promise<{ group: Group; snapshot: PendingGroupMutationSnapshot }> {
+    if (!group.ownerMasterPub) {
+      throw new Error('Legacy-Gruppen haben keinen dauerhaften Owner-Mutationspfad.');
+    }
+    return enqueueGroupMutation(async () => {
+      await preflightGroupMutation(group, removedMasters);
+      const previous = (await loadPendingGroupMutationSnapshots(dek)).find(
+        (candidate) => candidate.mutation.groupId === group.id,
+      );
+      if (previous) {
+        throw new Error(
+          'Der vorherige Gruppenstand wartet noch auf bestätigte Zustellung.',
+        );
+      }
+      const current = groupsRef.current.find(
+        (candidate) => candidate.id === group.id,
+      );
+      if (
+        current?.ownerMasterPub &&
+        group.revision !== nextGroupRevision(current)
+      ) {
+        throw new Error('Gruppenstand wurde parallel geändert; bitte erneut versuchen.');
+      }
+      const refreshed = refreshGroupDirectories(group);
+      const snapshot = await commitGroupMutation(
+        dek,
+        refreshed,
+        removedMasters,
+        deleteLocalAfterDispatch,
+      );
+      groupsRef.current = [
+        refreshed,
+        ...groupsRef.current.filter((candidate) => candidate.id !== refreshed.id),
+      ];
+      confirmedGroupStateRef.current.delete(refreshed.id);
+      return { group: refreshed, snapshot };
+    });
+  }
+
+  async function persistAndDispatchGroupMutation(
+    group: Group,
+    removedMasters: Bytes[] = [],
+    deleteLocalAfterDispatch = false,
+  ): Promise<Group> {
+    if (!group.ownerMasterPub) {
+      const refreshed = refreshGroupDirectories(group);
+      await saveGroup(dek, refreshed);
+      groupsRef.current = [
+        refreshed,
+        ...groupsRef.current.filter((candidate) => candidate.id !== refreshed.id),
+      ];
+      confirmedGroupStateRef.current.delete(refreshed.id);
+      return sendGroupInvites(refreshed);
+    }
+    const committed = await commitDurableGroupMutation(
+      group,
+      removedMasters,
+      deleteLocalAfterDispatch,
+    );
+    await dispatchPendingGroupMutation(committed.snapshot);
+    return committed.group;
+  }
+
+  async function resumePendingGroupMutations(): Promise<void> {
+    for (const snapshot of await loadPendingGroupMutationSnapshots(dek)) {
+      try {
+        await dispatchPendingGroupMutation(snapshot);
+      } catch (error) {
+        setError(
+          `Ausstehender Gruppenstand wird später erneut zugestellt: ${(error as Error).message}`,
+        );
+      }
+    }
+  }
+
+  function schedulePendingGroupMutationRetry(): Promise<void> {
+    if (!groupsBootReadyRef.current) return Promise.resolve();
+    if (groupMutationRetryRef.current) return groupMutationRetryRef.current;
+    const retry = resumePendingGroupMutations().finally(() => {
+      if (groupMutationRetryRef.current === retry) {
+        groupMutationRetryRef.current = null;
+      }
+    });
+    groupMutationRetryRef.current = retry;
+    return retry;
   }
 
   async function createGroup() {
     const id = identityRef.current;
-    const pre = prekeysRef.current;
-    if (!id || !pre) return;
-    const members: GroupMember[] = [];
-    for (const c of contactsRef.current) {
-      if (!groupSel.has(c.roomId) || !c.bundle) continue;
-      members.push({ signPub: c.peerSignPub, dhPub: c.peerDhPub, bundle: c.bundle, name: displayName(c) });
-    }
-    if (members.length === 0) {
-      setError(t('Wähle mindestens einen Kontakt.'));
+    if (!id) return;
+    if (!isPrimaryDevice(id)) {
+      setError(t('Nur das primäre Gerät kann eine Gruppe erstellen.'));
       return;
     }
-    const group: Group = { id: randomGroupId(), name: groupNameInput.trim() || 'Gruppe', members, createdAt: Date.now() };
-    groupsRef.current = [group, ...groupsRef.current];
+    const members: GroupMember[] = [];
+    for (const contact of contactsRef.current) {
+      if (!groupSel.has(contact.roomId)) continue;
+      const hasReachableList = contact.peerDeviceList?.devices.some(
+        (device) => !!device.signedPreKey,
+      );
+      if (!contact.bundle && !hasReachableList) continue;
+      members.push(groupMemberFromContact(contact));
+    }
+    if (members.length === 0) {
+      setError(t('Wähle mindestens einen erreichbaren Kontakt.'));
+      return;
+    }
+    let group: Group = {
+      id: randomGroupId(),
+      name: groupNameInput.trim() || 'Gruppe',
+      members,
+      createdAt: Date.now(),
+      revision: 1,
+      ownerMasterPub: id.master.publicKey,
+      roster: [
+        id.master.publicKey,
+        ...members.map(memberMasterPub),
+      ],
+    };
+    try {
+      group = await signGroupState(group, id);
+      await toInvite(group);
+    } catch (error) {
+      setError(`Gruppe ist zu groß oder enthält einen ungültigen Stand: ${(error as Error).message}`);
+      return;
+    }
     messagesRef.current[group.id] = [];
-    await saveGroup(dek, group);
-    await sendGroupInvites(group);
+    try {
+      await persistAndDispatchGroupMutation(group);
+    } catch (error) {
+      if (!groupsRef.current.some((candidate) => candidate.id === group.id)) {
+        delete messagesRef.current[group.id];
+        setError(`Gruppe konnte nicht gespeichert werden: ${(error as Error).message}`);
+        return;
+      }
+      setError(`Gruppe gespeichert, aber der Schlüsselstand ist noch nicht vollständig zugestellt: ${(error as Error).message}`);
+    }
     setGroupSel(new Set());
     setGroupNameInput('');
     openGroup(group.id);
@@ -4359,39 +5300,209 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
 
   async function groupSend(inner: MessageContent, localMsg: ChatMessage) {
     const id = identityRef.current;
-    const g = groupsRef.current.find((x) => x.id === activeGroup);
-    if (!id || !g) return;
-    // Per-member error handling: one unreachable member (stale identity, no
-    // bundle yet, ratchet not ready) must not silently cut off everyone behind
-    // them in the list — and must not swallow the local copy of a message the
-    // earlier members already received.
-    const failed: string[] = [];
-    for (const m of g.members) {
-      try {
-        const contact = await ensureMemberContact(m);
-        if (!contact) continue;
-        await sendEnvelopeTo(
-          contact,
-          await encryptAndPersist(contact, () =>
-            sendGroupMessage(id, contact, g.id, myProfileRef.current.name, inner),
-          ),
-        );
-      } catch (e) {
-        failed.push(`${m.name || 'Unbekannt'}: ${(e as Error).message}`);
+    let group = groupsRef.current.find((candidate) => candidate.id === activeGroup);
+    if (!id || !group) return;
+    const logicalMid = localMsg.mid ?? randomMid();
+    try {
+      // State-before-content is an owner responsibility. A non-owner may resume
+      // from a durably stored owner state after reload, but must never
+      // re-authorise that state under their own pairwise identity.
+      if (
+        (!group.ownerMasterPub ||
+          bytesEqual(group.ownerMasterPub, id.master.publicKey)) &&
+        confirmedGroupStateRef.current.get(group.id) !==
+          (group.stateHash
+            ? bytesToB64(group.stateHash)
+            : `legacy:${group.revision}`)
+      ) {
+        group = await sendGroupInvites(group);
       }
+      const contacts: Contact[] = [];
+      for (const member of group.members) {
+        const contact = await ensureMemberContact(member);
+        if (!contact) {
+          throw new Error(`${member.name || 'Mitglied'} ist nicht erreichbar.`);
+        }
+        contacts.push(contact);
+      }
+      // Directory clocks are independent from the owner roster revision. Use
+      // the newest verified Contact directories both for target selection and
+      // for the multiplicative attachment budget.
+      group = refreshGroupDirectories(group);
+      groupsRef.current = groupsRef.current.map((candidate) =>
+        candidate.id === group!.id ? group! : candidate,
+      );
+      await saveGroup(dek, group);
+      if (inner.kind === 'file') {
+        const policy = boundedGroupAttachmentPolicy(
+          group,
+          inner.data.length,
+          ownListRef.current?.devices.length ?? 1,
+        );
+        if (!policy.allowed) {
+          throw new Error('Anhang überschreitet das sichere Gruppen-Fanout-Budget.');
+        }
+      }
+      const { deliveries, unreachable } = await enqueueInbox(async () => {
+        const result = await groupFanoutToDevices(
+          id,
+          contacts,
+          group!.id,
+          group!.revision,
+          group!.stateHash,
+          myProfileRef.current.name,
+          inner,
+          logicalMid,
+          group!.ownerMasterPub
+            ? { senderDeviceList: ownListRef.current ?? undefined }
+            : {
+                legacyGroup: group!,
+                senderDeviceList: ownListRef.current ?? undefined,
+              },
+        );
+        // All advanced member ratchets cross the durability boundary before the
+        // first ciphertext is allowed onto any relay.
+        await Promise.all(contacts.map((contact) => saveContact(dek, contact)));
+        return result;
+      });
+      const rows: DeviceDelivery[] = [];
+      for (const delivery of deliveries) {
+        const deliveryId = randomMid();
+        const room = await inboxRoom(delivery.deviceSignPub);
+        connectDeviceInbox(room);
+        startAckTimer(deliveryId);
+        relaysRef.current.get(room)?.send(delivery.sealed, deliveryId, false);
+        rows.push({
+          device: bytesToB64(delivery.deviceSignPub),
+          deliveryId,
+          status: 'pending',
+        });
+      }
+      for (const missing of unreachable) {
+        rows.push({
+          device: bytesToB64(missing.deviceSignPub),
+          deliveryId: '',
+          status: 'stale',
+        });
+      }
+      let ownSyncError: Error | null = null;
+      try {
+        await syncGroupMessageToOwnDevices(
+          group,
+          inner,
+          logicalMid,
+          localMsg.ts,
+        );
+      } catch (error) {
+        ownSyncError = error as Error;
+      }
+      await appendMessage(group.id, {
+        ...localMsg,
+        mid: logicalMid,
+        deliveries: rows,
+      });
+      if (unreachable.length > 0 || ownSyncError) {
+        const peerWarning =
+          unreachable.length > 0
+            ? `${unreachable.length} autorisierte(s) Empfängergerät(e) waren nicht erreichbar.`
+            : '';
+        const ownWarning = ownSyncError
+          ? ` Eigene Gerätesynchronisierung unvollständig: ${ownSyncError.message}`
+          : '';
+        setError(`${peerWarning}${ownWarning}`.trim());
+      }
+    } catch (error) {
+      setError(`Gruppennachricht nicht gesendet: ${(error as Error).message}`);
+      return;
     }
-    await appendMessage(g.id, localMsg);
-    if (failed.length) setError(`An ${failed.length} Mitglied(er) nicht zugestellt — ${failed.join(' · ')}`);
     bump();
   }
 
-  async function deleteGroupAction(gid: string) {
+  async function syncGroupMessageToOwnDevices(
+    group: Group,
+    inner: MessageContent,
+    innerMid: string,
+    ts: number,
+  ): Promise<void> {
+    const id = identityRef.current;
+    const self = await ensureSelfContact();
+    if (
+      !id ||
+      !self ||
+      !self.peerDeviceList ||
+      self.peerDeviceList.devices.length < 2
+    ) {
+      return;
+    }
+    const content: MessageContent = {
+      kind: 'groupsync',
+      group: await toInvite(group),
+      innerMid,
+      ts,
+      inner,
+    };
+    const { deliveries, unreachable } = await enqueueInbox(async () => {
+      const result = await fanoutDeliveries(
+        id,
+        self,
+        content,
+        randomMid(),
+        id.sign.publicKey,
+        undefined,
+        6,
+        ownListRef.current ?? undefined,
+      );
+      await saveContact(dek, self);
+      return result;
+    });
+    if (unreachable.length > 0) {
+      throw new Error(
+        `${unreachable.length} eigenes Gerät(e) unterstützen den Gruppenstand nicht oder sind kryptographisch nicht erreichbar.`,
+      );
+    }
+    await Promise.all(
+      deliveries.map(async (delivery) => {
+        const room = await inboxRoom(delivery.deviceSignPub);
+        connectDeviceInbox(room);
+        const relay = relaysRef.current.get(room);
+        if (!relay) throw new Error('Eigenes Geräte-Relay nicht verfügbar.');
+        await relay.sendConfirmed(delivery.sealed, true);
+      }),
+    );
+  }
+
+  async function deleteGroupAction(
+    gid: string,
+    removal?: GroupRemovalTombstone,
+    preserveMutation = false,
+  ) {
     setChatMenu(false);
+    const existing = groupsRef.current.find((group) => group.id === gid);
+    const barrier =
+      removal ??
+      (existing?.ownerMasterPub && existing.stateHash
+        ? {
+            groupId: existing.id,
+            ownerMasterPub: existing.ownerMasterPub,
+            revision: existing.revision,
+            stateHash: existing.stateHash,
+            blockReadd: true,
+          }
+        : undefined);
+    if (barrier) {
+      // Persist replay protection before erasing the live state. Boot recovery
+      // completes a crash between these two writes.
+      await saveGroupRemovalTombstone(dek, barrier);
+    }
     groupsRef.current = groupsRef.current.filter((g) => g.id !== gid);
     delete messagesRef.current[gid];
     delete unreadRef.current[gid];
     await gcRoomAttachments(gid);
     await removeGroup(dek, gid);
+    // Delete state first. If the app crashes before this explicit discard, boot
+    // recovery sees no group and compare-clears only the stale exact marker.
+    if (!preserveMutation) await discardPendingGroupMutation(gid);
+    await gcUnreferencedHiddenContacts();
     if (activeGroup === gid) {
       setActiveGroup(null);
       setView('list');
@@ -4400,95 +5511,362 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     bump();
   }
 
-  // AUTHENTICITY: a group has no group-level signature — it is pairwise fan-out,
-  // so each message is authenticated only as coming from the pairwise `contact`.
-  // The wire `senderName` is attacker-chosen and is therefore DISCARDED for
-  // attribution; the displayed sender is derived from the authenticated sending
-  // key, and a message whose sender is not a CURRENT member is dropped. Otherwise
-  // any co-member (or a removed member still holding a pairwise session) could
-  // post AS another member — a forgeable sender badge (Devil's-Advocate DA-2).
+  function groupTransitionContentBytes(
+    content: MessageContent,
+    depth = 0,
+  ): number {
+    if (depth > 1) return Number.POSITIVE_INFINITY;
+    if (content.kind === 'text') {
+      return new TextEncoder().encode(content.text).length + 96;
+    }
+    if (content.kind === 'file') {
+      return (
+        content.data.length +
+        new TextEncoder().encode(content.name + content.mime).length +
+        192
+      );
+    }
+    if (content.kind === 'reply') {
+      return 256 + groupTransitionContentBytes(content.inner, depth + 1);
+    }
+    return Number.POSITIVE_INFINITY;
+  }
+
+  function queueGroupTransitionFrame(
+    groupId: string,
+    revision: number | undefined,
+    stateHash: Bytes | undefined,
+    sender: Contact,
+    inner: MessageContent,
+    mid: string,
+    ackId: number,
+  ): 'queued' | 'retained' | 'duplicate' | 'reject' {
+    if (
+      !Number.isSafeInteger(revision) ||
+      (revision as number) < 1 ||
+      !stateHash ||
+      stateHash.length !== 32 ||
+      !mid
+    ) {
+      return 'reject';
+    }
+    const now = Date.now();
+    let totalBytes = 0;
+    for (const [id, frames] of pendingGroupFramesRef.current) {
+      const fresh = frames.filter(
+        (frame) => now - frame.queuedAt <= GROUP_TRANSITION_TTL_MS,
+      );
+      if (fresh.length > 0) {
+        pendingGroupFramesRef.current.set(id, fresh);
+        totalBytes += fresh.reduce((sum, frame) => sum + frame.bytes, 0);
+      } else {
+        pendingGroupFramesRef.current.delete(id);
+        expiredGroupTransitionsRef.current.set(id, now);
+        while (
+          expiredGroupTransitionsRef.current.size >
+          GROUP_TRANSITION_MAX_IDS * 2
+        ) {
+          const oldest = expiredGroupTransitionsRef.current.keys().next().value;
+          if (oldest === undefined) break;
+          expiredGroupTransitionsRef.current.delete(oldest);
+        }
+      }
+    }
+    pendingGroupBytesRef.current = totalBytes;
+    // Check the tombstone only AFTER pruning. The redelivery that discovers an
+    // expired frame must be ACKed, not immediately re-enqueued for another TTL.
+    const expiredAt = expiredGroupTransitionsRef.current.get(groupId);
+    if (expiredAt && now - expiredAt <= GROUP_TRANSITION_TTL_MS) {
+      return 'reject';
+    }
+    if (expiredAt) expiredGroupTransitionsRef.current.delete(groupId);
+
+    const bytes = groupTransitionContentBytes(inner);
+    if (!Number.isSafeInteger(bytes) || bytes > GROUP_TRANSITION_MAX_BYTES) {
+      return 'reject';
+    }
+    const senderKey = bytesToB64(sender.peerMasterPub);
+    const existing = pendingGroupFramesRef.current.get(groupId) ?? [];
+    const duplicate = existing.find(
+      (frame) => frame.mid === mid && frame.senderKey === senderKey,
+    );
+    if (duplicate) {
+      // Re-delivery of the one crash-safety row must stay retained. A distinct
+      // relay row with the same authenticated E2E identity is ACKed without
+      // committing its cloned ratchet state (see Duplicate...Error).
+      return duplicate.ackId === ackId ? 'retained' : 'duplicate';
+    }
+    if (
+      existing.length >= GROUP_TRANSITION_MAX_PER_GROUP ||
+      pendingGroupBytesRef.current + bytes > GROUP_TRANSITION_MAX_BYTES ||
+      (!pendingGroupFramesRef.current.has(groupId) &&
+        pendingGroupFramesRef.current.size >= GROUP_TRANSITION_MAX_IDS)
+    ) {
+      return 'reject';
+    }
+    pendingGroupFramesRef.current.set(groupId, [
+      ...existing,
+      {
+        revision: revision as number,
+        stateHash,
+        ackId,
+        sender,
+        senderKey,
+        inner,
+        mid,
+        bytes,
+        queuedAt: now,
+      },
+    ]);
+    pendingGroupBytesRef.current += bytes;
+    return 'queued';
+  }
+
+  async function flushGroupTransitionFrames(group: Group): Promise<void> {
+    const frames = pendingGroupFramesRef.current.get(group.id);
+    if (!frames?.length) return;
+    for (const frame of frames) {
+      if (frame.revision > group.revision) continue;
+      await applyGroupMessage(
+        group.id,
+        frame.revision,
+        frame.stateHash,
+        undefined,
+        frame.inner,
+        frame.sender,
+        frame.mid,
+        frame.ackId,
+      );
+    }
+    const remaining = frames.filter(
+      (frame) => frame.revision > group.revision,
+    );
+    pendingGroupBytesRef.current -= frames
+      .filter((frame) => frame.revision <= group.revision)
+      .reduce((sum, frame) => sum + frame.bytes, 0);
+    if (remaining.length > 0) {
+      pendingGroupFramesRef.current.set(group.id, remaining);
+    } else {
+      pendingGroupFramesRef.current.delete(group.id);
+    }
+  }
+
   async function applyGroupMessage(
     groupId: string,
+    revision: number | undefined,
+    stateHash: Bytes | undefined,
     _senderName: string | undefined, // intentionally unused — never trust it
     inner: MessageContent,
     contact: Contact,
     wireMid: string,
+    ackId: number,
   ) {
-    // Bind deduplication to the authenticated sending device. A co-member who
-    // learned another member's mid must not be able to suppress their message by
-    // reflecting that mid in a new frame.
-    const messageId = `g:${bytesToB64(contact.peerDhPub)}:${wireMid}`;
+    if (!/^grp_[0-9a-f]{32}$/.test(groupId)) return;
+    // Bind deduplication to the authenticated PERSON. Copies from two authorised
+    // devices of that person share a logical MID and collapse; another member
+    // cannot suppress it by reflecting the same MID.
+    const messageId = `g:${bytesToB64(contact.peerMasterPub)}:${wireMid}`;
     const buildMsg = async (
       payload: MessageContent,
       sender: string,
       mid: string,
-    ): Promise<ChatMessage> => {
-      if (payload.kind !== 'file') {
+    ): Promise<ChatMessage | null> => {
+      if (payload.kind === 'text') {
+        return { mine: false, ts: Date.now(), mid, sender, text: payload.text };
+      }
+      if (payload.kind === 'reply') {
         return {
-          mine: false,
-          ts: Date.now(),
-          mid,
+          ...(await replyMessage(payload.quote, payload.inner, mid, false, groupId)),
           sender,
-          text: payload.kind === 'text' ? payload.text : '',
         };
       }
-      const file = await inboundFileRefFor(
-        groupId,
-        payload.name,
-        payload.mime,
-        payload.data,
-        payload.viewOnce,
-      );
-      return file
-        ? { mine: false, ts: Date.now(), mid, sender, file }
-        : {
-            mine: false,
-            ts: Date.now(),
-            mid,
-            sender,
-            text: t('Anhang wegen des automatischen Speicherlimits nicht gespeichert.'),
-          };
+      if (payload.kind === 'file') {
+        const file = await inboundFileRefFor(
+          groupId,
+          payload.name,
+          payload.mime,
+          payload.data,
+          payload.viewOnce,
+        );
+        return file
+          ? { mine: false, ts: Date.now(), mid, sender, file }
+          : {
+              mine: false,
+              ts: Date.now(),
+              mid,
+              sender,
+              text: t('Anhang wegen des automatischen Speicherlimits nicht gespeichert.'),
+            };
+      }
+      return null;
     };
     const g = groupsRef.current.find((x) => x.id === groupId);
     if (!g) {
-      // Message arrived before the group invite — hold it, attributed to the
-      // authenticated contact; membership is re-checked against the roster on
-      // flush (applyGroupInvite), since we have no roster yet.
-      const buf = pendingGroupMsgsRef.current.get(groupId) ?? [];
-      // Bound pre-invite attacker-controlled RAM and do not write attachment
-      // bytes before a signed/authenticated roster establishes membership.
-      if (!buf.some((entry) => entry.mid === messageId)) {
-        if (buf.length >= 32) buf.shift();
-        buf.push({
+      const queued = queueGroupTransitionFrame(
+          groupId,
+          revision,
+          stateHash,
+          contact,
           inner,
-          senderDhPub: contact.peerDhPub,
-          senderLabel: contact.peerName || shortFp(contact.peerFingerprint),
-          mid: messageId,
-        });
+          wireMid,
+          ackId,
+        );
+      if (queued === 'queued' || queued === 'retained') {
+        console.warn('[group] Nachricht wartet begrenzt auf den Owner-Gruppenstand.');
+        throw new DeferredGroupTransitionError();
       }
-      pendingGroupMsgsRef.current.set(groupId, buf);
-      // RAM buffering is only a latency optimisation. The ciphertext remains
-      // durable at the relay and the ratchet remains uncommitted until an invite
-      // establishes authorization and the plaintext reaches IndexedDB.
-      throw new DeferredInboxApplicationError();
-    }
-    const member = g.members.find((m) => eqBytes(m.dhPub, contact.peerDhPub));
-    if (!member) {
-      console.warn('[group] Nachricht von Nicht-/entferntem Mitglied verworfen.');
+      if (queued === 'duplicate') {
+        throw new DuplicateGroupTransitionRowError();
+      } else {
+        console.warn('[group] Nachricht für unbekannte Gruppe verworfen.');
+      }
       return;
     }
-    if (hasMessage(messagesRef.current[g.id] ?? [], messageId, false)) return;
-    await appendFreshInboundMessage(
-      g.id,
-      await buildMsg(
-        inner,
-        member.name || contact.peerName || shortFp(contact.peerFingerprint),
-        messageId,
-      ),
+    const framePolicy = classifyGroupFrame(
+      g,
+      contact.peerMasterPub,
+      revision,
+      stateHash,
     );
+    if (framePolicy === 'defer') {
+      const queued = queueGroupTransitionFrame(
+          groupId,
+          revision,
+          stateHash,
+          contact,
+          inner,
+          wireMid,
+          ackId,
+        );
+      if (queued === 'queued' || queued === 'retained') {
+        console.warn('[group] Nachricht wartet begrenzt auf den nächsten Rosterstand.');
+        throw new DeferredGroupTransitionError();
+      }
+      if (queued === 'duplicate') {
+        throw new DuplicateGroupTransitionRowError();
+      } else {
+        console.warn('[group] Übergangsnachricht konnte nicht sicher gepuffert werden.');
+      }
+      return;
+    }
+    if (framePolicy === 'reject') {
+      console.warn('[group] Nachricht unter unzulässigem Rosterstand verworfen.');
+      return;
+    }
+    const member = g.members.find((candidate) =>
+      bytesEqual(memberMasterPub(candidate), contact.peerMasterPub),
+    )!;
+    if (hasMessage(messagesRef.current[g.id] ?? [], messageId, false)) return;
+    const message = await buildMsg(
+      inner,
+      contact.peerName || member.name || shortFp(contact.peerFingerprint),
+      messageId,
+    );
+    if (!message) return;
+    await appendFreshInboundMessage(g.id, message);
     if (!(viewRef.current === 'chat' && activeGroupRef.current === g.id)) {
       unreadRef.current[g.id] = (unreadRef.current[g.id] ?? 0) + 1;
     }
+  }
+
+  async function applyGroupSync(
+    content: Extract<MessageContent, { kind: 'groupsync' }>,
+    sender: Contact,
+  ) {
+    const id = identityRef.current;
+    if (!id || !bytesEqual(sender.peerMasterPub, id.master.publicKey)) return;
+    let group: Group | null = null;
+    try {
+      const incoming = await fromInvite(content.group);
+      const current = groupsRef.current.find(
+        (candidate) => candidate.id === incoming.id,
+      );
+      const safeOlderOwnHistory =
+        !!current &&
+        !!current.ownerMasterPub &&
+        !!incoming.ownerMasterPub &&
+        incoming.revision < current.revision &&
+        bytesEqual(current.ownerMasterPub, incoming.ownerMasterPub) &&
+        current.dissolved !== true &&
+        incoming.dissolved !== true &&
+        !!current.roster?.some((master) =>
+          bytesEqual(master, id.master.publicKey),
+        ) &&
+        !!incoming.roster?.some((master) =>
+          bytesEqual(master, id.master.publicKey),
+        );
+      // Own-device history may legitimately arrive after this device has
+      // already installed later owner revisions. The signed older checkpoint
+      // authenticates where the message was sent; keep the newer authority
+      // state and append only the deduplicated local history item.
+      group = safeOlderOwnHistory
+        ? current
+        : await applyGroupInvite(content.group, sender, true);
+    } catch (error) {
+      console.warn('[group] Ungültiger eigener Gruppen-Sync verworfen:', error);
+      return;
+    }
+    if (
+      !group ||
+      !content.innerMid ||
+      !Number.isSafeInteger(content.ts) ||
+      content.ts <= 0 ||
+      hasMessage(messagesRef.current[group.id] ?? [], content.innerMid, true)
+    ) {
+      return;
+    }
+    let message: ChatMessage | null = null;
+    if (content.inner.kind === 'text') {
+      message = {
+        mine: true,
+        ts: content.ts,
+        mid: content.innerMid,
+        text: content.inner.text,
+      };
+    } else if (content.inner.kind === 'reply') {
+      message = await replyMessage(
+        content.inner.quote,
+        content.inner.inner,
+        content.innerMid,
+        true,
+        group.id,
+      );
+      message.ts = content.ts;
+    } else if (content.inner.kind === 'file') {
+      const file = await inboundFileRefFor(
+        group.id,
+        content.inner.name,
+        content.inner.mime,
+        content.inner.data,
+        content.inner.viewOnce,
+      );
+      message = file
+        ? {
+            mine: true,
+            ts: content.ts,
+            mid: content.innerMid,
+            file,
+          }
+        : {
+            mine: true,
+            ts: content.ts,
+            mid: content.innerMid,
+            text: t('Anhang wegen des automatischen Speicherlimits nicht gespeichert.'),
+          };
+    }
+    if (message) await appendFreshInboundMessage(group.id, message);
+  }
+
+  function masterReferencedByLiveGroup(master: Bytes): boolean {
+    return groupsRef.current.some(
+      (group) =>
+        (!!group.ownerMasterPub &&
+          bytesEqual(group.ownerMasterPub, master)) ||
+        !!group.roster?.some((candidate) => bytesEqual(candidate, master)) ||
+        group.members.some((member) =>
+          bytesEqual(memberMasterPub(member), master),
+        ),
+    );
   }
 
   // AUTHORIZATION (audit F-02): a group roster is applied ONLY from an authorized
@@ -4498,61 +5876,138 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   // overwrite/rename the roster. A brand-new group is trust-on-first-invite. The
   // decision — and the merge that preserves local-only state — lives in the pure,
   // unit-tested decideInvite().
-  async function applyGroupInvite(invite: GroupInvite, sender: Contact) {
-    const incoming = await fromInvite(invite);
+  async function applyGroupInvite(
+    invite: GroupInvite,
+    sender: Contact,
+    fromOwnDevice = false,
+  ): Promise<Group | null> {
+    let incoming: Group;
+    try {
+      incoming = await fromInvite(invite);
+    } catch (error) {
+      console.warn('[group] Ungültige Einladung verworfen:', error);
+      return null;
+    }
+    if (contactsRef.current.some((contact) => contact.roomId === incoming.id)) {
+      console.warn('[group] Gruppen-ID kollidiert mit einem 1:1-Raum.');
+      return null;
+    }
+    const id = identityRef.current;
+    if (!id) return null;
+    if (
+      incoming.ownerMasterPub &&
+      (!incoming.roster?.some((master) =>
+        bytesEqual(master, id.master.publicKey),
+      ) ||
+        incoming.members.some((member) =>
+          bytesEqual(memberMasterPub(member), id.master.publicKey),
+        ))
+    ) {
+      console.warn('[group] Falsch personalisiertes globales Roster verworfen.');
+      return null;
+    }
+    if (
+      !fromOwnDevice &&
+      incoming.ownerMasterPub &&
+      !incoming.roster?.some((master) =>
+        bytesEqual(master, incoming.ownerMasterPub!),
+      )
+    ) {
+      console.warn('[group] Gruppen-Owner fehlt im personalisierten Roster.');
+      return null;
+    }
+    if (
+      !fromOwnDevice &&
+      !incoming.ownerMasterPub &&
+      !incoming.members.some((member) =>
+        bytesEqual(memberMasterPub(member), sender.peerMasterPub),
+      )
+    ) {
+      console.warn('[group] Legacy-Einladung ohne authentifizierten Absender im Roster verworfen.');
+      return null;
+    }
+    const removalBarrier = await loadGroupRemovalTombstone(dek, incoming.id);
+    if (
+      removalBarrier &&
+      !permitsGroupReadd(
+        removalBarrier.tombstone,
+        incoming,
+        id.master.publicKey,
+      )
+    ) {
+      console.warn('[group] Einladung durch lokalen Removal-Tombstone verworfen.');
+      return null;
+    }
     const existing = groupsRef.current.find((x) => x.id === incoming.id);
-    const decision = decideInvite(existing, incoming, sender.peerDhPub);
+    const decision = decideInvite(
+      existing,
+      incoming,
+      sender.peerMasterPub,
+      fromOwnDevice,
+    );
     if (decision.verdict === 'reject') {
       console.warn('[group] ginvite verworfen —', decision.reason);
-      return;
+      return null;
     }
     const g = decision.group;
-    const had = messagesRef.current[g.id];
-    groupsRef.current = [g, ...groupsRef.current.filter((x) => x.id !== g.id)];
-    messagesRef.current[g.id] = had ?? [];
-    await saveGroup(dek, g);
-    for (const m of g.members) await ensureMemberContact(m);
-
-    // Flush any messages that arrived before this invite — but only from senders
-    // the resolved roster actually lists (a non-member's buffered message is
-    // dropped here, the membership check applyGroupMessage could not run yet).
-    const pending = pendingGroupMsgsRef.current.get(g.id);
-    if (pending?.length) {
-      pendingGroupMsgsRef.current.delete(g.id);
-      let added = 0;
-      for (const { inner, senderDhPub, senderLabel, mid } of pending) {
-        if (!g.members.some((m) => eqBytes(m.dhPub, senderDhPub))) continue;
-        if (hasMessage(messagesRef.current[g.id] ?? [], mid, false)) continue;
-        const payload =
-          inner.kind === 'file'
-            ? await inboundFileRefFor(g.id, inner.name, inner.mime, inner.data, inner.viewOnce)
-            : null;
-        const msg: ChatMessage =
-          inner.kind === 'file'
-            ? payload
-              ? { mine: false, ts: Date.now(), mid, sender: senderLabel, file: payload }
-              : {
-                  mine: false,
-                  ts: Date.now(),
-                  mid,
-                  sender: senderLabel,
-                  text: t('Anhang wegen des automatischen Speicherlimits nicht gespeichert.'),
-                }
-            : {
-                mine: false,
-                ts: Date.now(),
-                mid,
-                sender: senderLabel,
-                text: inner.kind === 'text' ? inner.text : '',
-              };
-        await appendFreshInboundMessage(g.id, msg);
-        added++;
+    if (
+      g.dissolved === true &&
+      g.ownerMasterPub &&
+      g.stateHash
+    ) {
+      const barrier: GroupRemovalTombstone = {
+        groupId: g.id,
+        ownerMasterPub: g.ownerMasterPub,
+        revision: g.revision,
+        stateHash: g.stateHash,
+        blockReadd: true,
+      };
+      await saveGroupRemovalTombstone(dek, barrier);
+      if (existing) await deleteGroupAction(g.id, barrier);
+      return null;
+    }
+    for (const member of g.members) {
+      if (bytesEqual(memberMasterPub(member), sender.peerMasterPub)) {
+        if (member.deviceList) {
+          await applyDeviceListUpdate(
+            sender,
+            member.deviceList,
+            retiredMastersRef.current,
+          );
+        }
+        continue;
       }
-      if (added && !(viewRef.current === 'chat' && activeGroupRef.current === g.id)) {
-        unreadRef.current[g.id] = (unreadRef.current[g.id] ?? 0) + added;
+      if (!(await ensureMemberContact(member))) {
+        console.warn('[group] Einladung enthält ein nicht erreichbares Mitglied.');
+        return null;
       }
     }
+    // Reconcile against already-held, independently newer signed DeviceLists
+    // before persisting/bootstrap-forwarding this owner state. The authenticated
+    // sender is a cloned receive candidate and therefore merged explicitly.
+    let installed = refreshGroupDirectories(g);
+    installed = {
+      ...installed,
+      members: installed.members.map((member) =>
+        bytesEqual(memberMasterPub(member), sender.peerMasterPub)
+          ? reconcileMemberWithContact(member, sender)
+          : member,
+      ),
+    };
+    const had = messagesRef.current[installed.id];
+    groupsRef.current = [
+      installed,
+      ...groupsRef.current.filter((x) => x.id !== installed.id),
+    ];
+    messagesRef.current[installed.id] = had ?? [];
+    await saveGroup(dek, installed);
+    if (removalBarrier) {
+      await clearGroupRemovalTombstone(removalBarrier);
+    }
+    await flushGroupTransitionFrames(installed);
+    await gcUnreferencedHiddenContacts();
     bump();
+    return installed;
   }
 
   // A `gremove` ("you were removed") deletes the whole group locally — so it must
@@ -4560,61 +6015,251 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   // An unknown group, or a sender who is not a member (a stranger who learned the
   // group id, or an already-removed member), is ignored — otherwise anyone could
   // wipe a victim's group, history and attachments (audit F-02).
-  async function applyGroupRemove(groupId: string, sender: Contact) {
-    const g = groupsRef.current.find((x) => x.id === groupId);
-    if (!g || !isGroupMember(g, sender.peerDhPub)) {
-      console.warn('[group] gremove von Nicht-Mitglied/unbekannter Gruppe verworfen.');
+  async function applyGroupRemove(
+    proof: Extract<MessageContent, { kind: 'gremove' }>['state'],
+    sender: Contact,
+  ) {
+    let removedState: Group;
+    try {
+      removedState = await fromGroupStateProof(proof);
+    } catch (error) {
+      console.warn('[group] Ungültiger Entfernungsnachweis verworfen:', error);
       return;
     }
-    await deleteGroupAction(groupId);
+    const id = identityRef.current;
+    if (
+      !id ||
+      !removedState.ownerMasterPub ||
+      !removedState.stateHash ||
+      !removedState.previousStateHash ||
+      !bytesEqual(sender.peerMasterPub, removedState.ownerMasterPub) ||
+      removedState.roster?.some((master) =>
+        bytesEqual(master, id.master.publicKey),
+      )
+    ) {
+      console.warn('[group] Nicht autorisierter Entfernungsnachweis verworfen.');
+      return;
+    }
+    const g = groupsRef.current.find((group) => group.id === removedState.id);
+    const priorTombstone = await loadGroupRemovalTombstone(dek, removedState.id);
+    if (!g && !priorTombstone) {
+      console.warn('[group] Entfernungsnachweis für unbekannte Gruppe verworfen.');
+      return;
+    }
+    if (
+      g &&
+      (!g.ownerMasterPub ||
+        !g.stateHash ||
+        !bytesEqual(g.ownerMasterPub, removedState.ownerMasterPub) ||
+        removedState.revision !== g.revision + 1 ||
+        !bytesEqual(removedState.previousStateHash, g.stateHash))
+    ) {
+      console.warn('[group] Entfernungsnachweis schließt nicht an lokalen Stand an.');
+      return;
+    }
+    if (
+      priorTombstone &&
+      (!bytesEqual(
+        priorTombstone.tombstone.ownerMasterPub,
+        removedState.ownerMasterPub,
+      ) ||
+        removedState.revision <= priorTombstone.tombstone.revision)
+    ) {
+      return;
+    }
+    const barrier: GroupRemovalTombstone = {
+      groupId: removedState.id,
+      ownerMasterPub: removedState.ownerMasterPub,
+      revision: removedState.revision,
+      stateHash: removedState.stateHash,
+      // A signed terminal state has no legitimate successor. Ordinary removal
+      // checkpoints remain re-addable by a later owner-signed state that
+      // contains us, even if we were intentionally offline for intermediate
+      // revisions and therefore cannot verify a contiguous hash chain.
+      blockReadd: removedState.dissolved === true,
+    };
+    await saveGroupRemovalTombstone(dek, barrier);
+    if (g) await deleteGroupAction(removedState.id, barrier);
   }
 
-  async function updateGroup(group: Group, sync: boolean) {
-    groupsRef.current = groupsRef.current.map((x) => (x.id === group.id ? group : x));
-    await saveGroup(dek, group);
-    if (sync) await sendGroupInvites(group);
+  async function updateGroup(
+    candidate: Group,
+    sync: boolean,
+    removedMasters: Bytes[] = [],
+  ) {
+    const id = identityRef.current;
+    const current = groupsRef.current.find((group) => group.id === candidate.id);
+    if (!id || !current) return;
+    if (!candidate.ownerMasterPub || !current.ownerMasterPub) {
+      setError(t('Legacy-Gruppen können nicht sicher verändert werden; erstelle eine neue Gruppe.'));
+      return;
+    }
+    if (
+      !isPrimaryDevice(id) ||
+      !isGroupOwner(current, id.master.publicKey) ||
+      !current.stateHash
+    ) {
+      setError(t('Nur das primäre Owner-Gerät kann die Gruppe verwalten.'));
+      return;
+    }
+    let group: Group;
+    try {
+      group = await signGroupState(
+        {
+          ...candidate,
+          previousStateHash: current.stateHash,
+          stateHash: undefined,
+          stateSignature: undefined,
+        },
+        id,
+      );
+      await toInvite(group);
+    } catch (error) {
+      setError(`Gruppenänderung abgelehnt: ${(error as Error).message}`);
+      return;
+    }
+    if (sync) {
+      try {
+        await persistAndDispatchGroupMutation(group, removedMasters);
+      } catch (error) {
+        setError(
+          `Gruppenstand lokal gespeichert; dauerhafte Zustellung wird wiederholt: ${(error as Error).message}`,
+        );
+      }
+    } else {
+      groupsRef.current = groupsRef.current.map((x) =>
+        x.id === group.id ? group : x,
+      );
+      await saveGroup(dek, group);
+      confirmedGroupStateRef.current.delete(group.id);
+    }
     bump();
   }
 
   async function addMembersToGroup(group: Group, roomIds: string[]) {
+    const id = identityRef.current;
+    if (
+      !id ||
+      !group.ownerMasterPub ||
+      !isPrimaryDevice(id) ||
+      !isGroupOwner(group, id.master.publicKey)
+    ) {
+      setError(t('Nur das primäre Owner-Gerät kann Mitglieder hinzufügen.'));
+      return;
+    }
     const additions: GroupMember[] = [];
     for (const c of contactsRef.current) {
-      if (!roomIds.includes(c.roomId) || !c.bundle) continue;
-      if (group.members.some((m) => eqBytes(m.dhPub, c.peerDhPub))) continue;
-      additions.push({ signPub: c.peerSignPub, dhPub: c.peerDhPub, bundle: c.bundle, name: displayName(c) });
+      if (!roomIds.includes(c.roomId)) continue;
+      if (
+        !c.bundle &&
+        !c.peerDeviceList?.devices.some((device) => !!device.signedPreKey)
+      ) {
+        continue;
+      }
+      if (
+        group.members.some((member) =>
+          bytesEqual(memberMasterPub(member), c.peerMasterPub),
+        )
+      ) {
+        continue;
+      }
+      additions.push(groupMemberFromContact(c));
     }
     if (additions.length === 0) return;
-    await updateGroup({ ...group, members: [...group.members, ...additions] }, true);
+    await updateGroup(
+      {
+        ...group,
+        members: [...group.members, ...additions],
+        roster: [
+          ...(group.roster ?? []),
+          ...additions.map(memberMasterPub),
+        ],
+        revision: nextGroupRevision(group),
+      },
+      true,
+    );
   }
 
   async function removeMemberFromGroup(group: Group, member: GroupMember) {
     const id = identityRef.current;
     if (!id) return;
-    const newGroup = { ...group, members: group.members.filter((m) => !eqBytes(m.dhPub, member.dhPub)) };
-    await updateGroup(newGroup, true);
-    const removed = await ensureMemberContact(member);
-    if (removed) {
-      try {
-        await sendEnvelopeTo(removed, await encryptAndPersist(removed, () => sendGroupRemove(id, removed, group.id)), undefined, true);
-      } catch {
-        /* they'll just stop receiving; roster already dropped them */
-      }
+    if (
+      !group.ownerMasterPub ||
+      !isPrimaryDevice(id) ||
+      !isGroupOwner(group, id.master.publicKey)
+    ) {
+      setError(t('Nur das primäre Owner-Gerät kann Mitglieder entfernen.'));
+      return;
     }
+    if (!(await ensureMemberContact(member))) {
+      setError(t('Das zu entfernende Mitglied ist kryptographisch nicht erreichbar.'));
+      return;
+    }
+    const newGroup = {
+      ...group,
+      members: group.members.filter(
+        (candidate) =>
+          !bytesEqual(memberMasterPub(candidate), memberMasterPub(member)),
+      ),
+      roster: group.roster?.filter(
+        (master) => !bytesEqual(master, memberMasterPub(member)),
+      ),
+      revision: nextGroupRevision(group),
+    };
+    // Keep the removed hidden contact until both the new owner state and the
+    // terminal remove frame are durably inserted. The sealed mutation marker
+    // resumes this exact sequence after reload.
+    await updateGroup(newGroup, true, [memberMasterPub(member)]);
   }
 
   async function leaveGroup(group: Group) {
     const id = identityRef.current;
-    if (id) {
-      for (const m of group.members) {
-        const c = await ensureMemberContact(m);
-        if (c) {
-          try {
-            await sendEnvelopeTo(c, await encryptAndPersist(c, () => sendGroupLeave(id, c, group.id)), undefined, true);
-          } catch {
-            /* best effort */
-          }
-        }
+    if (!id) return;
+    if (group.ownerMasterPub && isGroupOwner(group, id.master.publicKey)) {
+      if (!isPrimaryDevice(id) || !group.stateHash) {
+        setError(t('Nur das primäre Owner-Gerät kann die Gruppe auflösen.'));
+        return;
       }
+      const removed = group.members.map(memberMasterPub);
+      const finalState = await signGroupState(
+        {
+          ...group,
+          members: [],
+          roster: [id.master.publicKey],
+          dissolved: true,
+          revision: nextGroupRevision(group),
+          previousStateHash: group.stateHash,
+          stateHash: undefined,
+          stateSignature: undefined,
+        },
+        id,
+      );
+      try {
+        await persistAndDispatchGroupMutation(finalState, removed, true);
+      } catch (error) {
+        setError(
+          `Auflösung gespeichert; Zustellung wird wiederholt: ${(error as Error).message}`,
+        );
+      }
+      bump();
+      return;
+    } else if (group.ownerMasterPub) {
+      const owner = group.members.find((member) =>
+        bytesEqual(memberMasterPub(member), group.ownerMasterPub!),
+      );
+      const contact = owner ? await ensureMemberContact(owner) : null;
+      if (!contact) {
+        setError(t('Der Gruppen-Owner ist nicht erreichbar; Austritt nicht gesendet.'));
+        return;
+      }
+      await confirmedFanout(contact, {
+        kind: 'gleave',
+        groupId: group.id,
+        revision: group.revision,
+        stateHash: group.stateHash,
+      }, 6);
+    } else {
+      setError(t('Legacy-Gruppe wird lokal archiviert; sichere Mitgliederänderungen benötigen eine neue v4-Gruppe.'));
     }
     await deleteGroupAction(group.id);
   }
@@ -4622,15 +6267,78 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   async function renameGroup(group: Group, name: string) {
     const n = name.trim();
     if (!n || n === group.name) return;
-    await updateGroup({ ...group, name: n }, true);
+    const id = identityRef.current;
+    if (!id || (group.ownerMasterPub && !isGroupOwner(group, id.master.publicKey))) {
+      setError(t('Nur das primäre Owner-Gerät kann die Gruppe umbenennen.'));
+      return;
+    }
+    if (!group.ownerMasterPub || !isPrimaryDevice(id)) {
+      setError(t('Nur das primäre Owner-Gerät kann die Gruppe umbenennen.'));
+      return;
+    }
+    await updateGroup(
+      {
+        ...group,
+        name: n,
+        revision: nextGroupRevision(group),
+      },
+      true,
+    );
   }
 
-  async function applyGroupLeave(groupId: string, contact: Contact) {
+  async function applyGroupLeave(
+    groupId: string,
+    revision: number | undefined,
+    stateHash: Bytes | undefined,
+    contact: Contact,
+  ) {
     const g = groupsRef.current.find((x) => x.id === groupId);
     if (!g) return;
-    const newGroup = { ...g, members: g.members.filter((m) => !eqBytes(m.dhPub, contact.peerDhPub)) };
-    groupsRef.current = groupsRef.current.map((x) => (x.id === groupId ? newGroup : x));
-    await saveGroup(dek, newGroup);
+    if (!g.ownerMasterPub) {
+      console.warn('[group] Legacy-Austritt ohne eindeutigen Owner verworfen.');
+      return;
+    }
+    const id = identityRef.current;
+    if (
+      (!id ||
+        !isPrimaryDevice(id) ||
+        !isGroupOwner(g, id.master.publicKey) ||
+        revision !== g.revision ||
+        !stateHash ||
+        !g.stateHash ||
+        !bytesEqual(stateHash, g.stateHash) ||
+        !isGroupMemberMaster(g, contact.peerMasterPub))
+    ) {
+      console.warn('[group] Ungültige Austrittsanfrage verworfen.');
+      return;
+    }
+    const newGroup = await signGroupState(
+      {
+        ...g,
+        members: g.members.filter(
+          (member) =>
+            !bytesEqual(memberMasterPub(member), contact.peerMasterPub),
+        ),
+        roster: g.roster?.filter(
+          (master) => !bytesEqual(master, contact.peerMasterPub),
+        ),
+        revision: nextGroupRevision(g),
+        previousStateHash: g.stateHash,
+        stateHash: undefined,
+        stateSignature: undefined,
+      },
+      id,
+    );
+    const committed = await commitDurableGroupMutation(
+      newGroup,
+      [contact.peerMasterPub],
+    );
+    // We are inside the serialized inbox task; enqueueing and awaiting a send
+    // here would self-deadlock. Schedule delivery behind this task. The atomic
+    // state+marker commit above makes an intervening crash recoverable.
+    void dispatchPendingGroupMutation(committed.snapshot).catch((error) =>
+      setError(`Austritt gespeichert, Roster-Sync ausstehend: ${(error as Error).message}`),
+    );
     bump();
   }
 
@@ -4715,6 +6423,25 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     if (!activeRoom) return;
     const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
     if (!contact) return;
+    // Provisioned local simulation contact: append a plausible local echo but
+    // never create a relay channel. Do not infer this from missing sessions or
+    // bundles — legitimate linked-device roster contacts can temporarily be
+    // send-blocked in exactly that way.
+    if (contact.localOnly) {
+      const q = replyTo;
+      clearComposer();
+      setReplyTo(null);
+      await appendMessage(activeRoom, {
+        mine: true,
+        text,
+        ts: Date.now(),
+        mid: randomMid(),
+        status: 'sent',
+        reply: q ?? undefined,
+      });
+      bump();
+      return;
+    }
     try {
       // ONE E2E mid: stamped into the AEAD frame, reused for the local echo and
       // shared across every fan-out (+ self-sync) copy so they dedup. fanoutSend
@@ -4850,6 +6577,19 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       const mid = randomMid();
       const localMsg: ChatMessage = { mine: true, ts: Date.now(), file: await fileRefFor(name, mime, data), mid };
       if (activeGroup) {
+        const group = groupsRef.current.find((candidate) => candidate.id === activeGroup);
+        if (!group) return;
+        const policy = boundedGroupAttachmentPolicy(
+          group,
+          data.length,
+          ownListRef.current?.devices.length ?? 1,
+        );
+        if (!policy.allowed) {
+          setError(
+            t('Anhang für diese Gruppen-/Geräteanzahl zu groß — bitte kleiner senden.'),
+          );
+          return;
+        }
         await groupSend({ kind: 'file', name, mime, data }, localMsg);
         return;
       }
@@ -5292,6 +7032,12 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   async function acceptNewIdentity() {
     const c = contactsRef.current.find((x) => x.roomId === activeRoom);
     if (!c || !c.pendingMaster) return;
+    if (masterReferencedByLiveGroup(c.peerMasterPub)) {
+      setError(
+        t('Entferne den Kontakt zuerst aus allen Gruppen; erst danach kann seine neue Identität übernommen werden.'),
+      );
+      return;
+    }
     if (!confirm(t('Neue Identität dieses Kontakts übernehmen? Danach musst du die Sicherheitsnummer erneut vergleichen.')))
       return;
     const r = await acceptMasterChange(c); // sets new roomId + verified=false
@@ -5332,6 +7078,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     const t = window.setInterval(() => {
       if (document.hidden) return;
       void requestBootstrap();
+      void schedulePendingGroupMutationRetry();
       for (const c of contactsRef.current) void ensureListGossiped(c);
     }, 60_000);
     return () => window.clearInterval(t);
@@ -6220,11 +7967,6 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
             </span>
             {t('Verschlüsselt · Ende-zu-Ende')}
           </div>
-          {multiDevice && (
-            <div className="enc-pill" title={t('Gruppen synchronisieren noch nicht auf deine anderen Geräte (kommt mit v3).')}>
-              ⓘ {t('Gruppen synchen noch nicht auf deine anderen Geräte')}
-            </div>
-          )}
           {shown.map((m, i) => (
             <div
               key={m.mid ?? `${m.ts}-${start + i}`}
@@ -7002,7 +8744,11 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
 
   // ── New group ─────────────────────────────────────────────────────
   if (view === 'newgroup') {
-    const selectable = visibleContacts.filter((c) => c.bundle);
+    const selectable = visibleContacts.filter(
+      (contact) =>
+        !!contact.bundle ||
+        !!contact.peerDeviceList?.devices.some((device) => !!device.signedPreKey),
+    );
     return (
       <div className="subview">
         <div className="subhead">
@@ -7072,9 +8818,26 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   // ── Manage group ──────────────────────────────────────────────────
   if (view === 'gmanage' && activeGroupData) {
     const g = activeGroupData;
-    const addable = visibleContacts.filter(
-      (c) => c.bundle && !g.members.some((m) => eqBytes(m.dhPub, c.peerDhPub)),
-    );
+    const localIdentity = identityRef.current;
+    const canManage =
+      !!g.ownerMasterPub &&
+      !!(
+        localIdentity &&
+        isPrimaryDevice(localIdentity) &&
+        isGroupOwner(g, localIdentity.master.publicKey)
+      );
+    const addable = canManage
+      ? visibleContacts.filter(
+          (contact) =>
+            (!!contact.bundle ||
+              !!contact.peerDeviceList?.devices.some(
+                (device) => !!device.signedPreKey,
+              )) &&
+            !g.members.some((member) =>
+              bytesEqual(memberMasterPub(member), contact.peerMasterPub),
+            ),
+        )
+      : [];
     return (
       <div className="subview">
         <div className="subhead">
@@ -7086,11 +8849,23 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         <div className="subbody">
           <div className="field-lbl">{t('Gruppenname')}</div>
           <div className="rename-row" style={{ marginBottom: 18 }}>
-            <input className="name-input" value={groupRenameInput} onChange={(e) => setGroupRenameInput(e.target.value)} />
-            <button className="btn btn-primary" style={{ width: 'auto' }} onClick={() => void renameGroup(g, groupRenameInput)}>
-              ✓
-            </button>
+            <input
+              className="name-input"
+              value={groupRenameInput}
+              disabled={!canManage}
+              onChange={(e) => setGroupRenameInput(e.target.value)}
+            />
+            {canManage && (
+              <button className="btn btn-primary" style={{ width: 'auto' }} onClick={() => void renameGroup(g, groupRenameInput)}>
+                ✓
+              </button>
+            )}
           </div>
+          {!canManage && (
+            <p className="share-hint" style={{ textAlign: 'left' }}>
+              {t('Nur das primäre Owner-Gerät kann Name und Mitglieder ändern.')}
+            </p>
+          )}
 
           <div className="sect-lbl">{t('Mitglieder ({n})', { n: g.members.length + 1 })}</div>
           <div className="card pad16">
@@ -7110,15 +8885,17 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                   <Identicon seed={hexOf(m.dhPub)} />
                 </div>
                 <span className="conv-name">{m.name || '…'}</span>
-                <button
-                  className="icon-mini danger"
-                  aria-label={t('Entfernen')}
-                  onClick={() => {
-                    if (confirm(t('{name} entfernen?', { name: m.name || t('Mitglied') }))) void removeMemberFromGroup(g, m);
-                  }}
-                >
-                  <IconTrash size={15} />
-                </button>
+                {canManage && (
+                  <button
+                    className="icon-mini danger"
+                    aria-label={t('Entfernen')}
+                    onClick={() => {
+                      if (confirm(t('{name} entfernen?', { name: m.name || t('Mitglied') }))) void removeMemberFromGroup(g, m);
+                    }}
+                  >
+                    <IconTrash size={15} />
+                  </button>
+                )}
               </div>
             ))}
           </div>
@@ -7174,10 +8951,20 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
             className="btn btn-outline danger-btn"
             style={{ marginTop: 18 }}
             onClick={() => {
-              if (confirm(t('Gruppe wirklich verlassen?'))) void leaveGroup(g);
+              if (
+                confirm(
+                  canManage && !!g.ownerMasterPub
+                    ? t('Gruppe wirklich für alle auflösen?')
+                    : t('Gruppe wirklich verlassen?'),
+                )
+              ) {
+                void leaveGroup(g);
+              }
             }}
           >
-            {t('Gruppe verlassen')}
+            {canManage && !!g.ownerMasterPub
+              ? t('Gruppe auflösen')
+              : t('Gruppe verlassen')}
           </button>
         </div>
       </div>

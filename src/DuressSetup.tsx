@@ -5,8 +5,6 @@ import {
   biometricEnrolled,
   WrongPassphraseError,
   DuressEqualsRealError,
-  DuressTooShortError,
-  MIN_DURESS_PASSPHRASE_LENGTH,
 } from './lib/vaultService';
 import { IconEye, IconEyeOff } from './icons';
 import { t } from './lib/i18n';
@@ -41,21 +39,13 @@ export function DuressSetup({
   }, [mode]);
 
   const title = mode === 'set' ? t('Duress-Passwort einrichten') : t('Duress-Passwort entfernen');
-  const ready =
-    mode === 'set'
-      ? !!real && duress.length >= MIN_DURESS_PASSPHRASE_LENGTH && !!confirm
-      : !!real;
+  // No length/strength policy on the duress word — it is a coercion trigger, not a secret. It only
+  // has to be non-empty and match its confirmation; setDuressPassword enforces "differs from real".
+  const ready = mode === 'set' ? !!real && !!duress && !!confirm : !!real;
 
   async function save() {
     if (busy || !ready) return;
     if (mode === 'set') {
-      if (duress.length < MIN_DURESS_PASSPHRASE_LENGTH) {
-        return setErr(
-          t('Das Duress-Passwort muss mindestens {count} Zeichen lang sein.', {
-            count: MIN_DURESS_PASSPHRASE_LENGTH,
-          }),
-        );
-      }
       if (duress !== confirm) return setErr(t('Die Duress-Passwörter stimmen nicht überein.'));
     }
     setBusy(true);
@@ -70,13 +60,7 @@ export function DuressSetup({
     } catch (e) {
       if (e instanceof WrongPassphraseError) setErr(t('Falsche Passphrase.'));
       else if (e instanceof DuressEqualsRealError) setErr(t('Das Duress-Passwort darf nicht deine echte Passphrase sein.'));
-      else if (e instanceof DuressTooShortError) {
-        setErr(
-          t('Das Duress-Passwort muss mindestens {count} Zeichen lang sein.', {
-            count: MIN_DURESS_PASSPHRASE_LENGTH,
-          }),
-        );
-      } else setErr(t('Speichern fehlgeschlagen: {msg}', { msg: (e as Error).message }));
+      else setErr(t('Speichern fehlgeschlagen: {msg}', { msg: (e as Error).message }));
       setBusy(false);
     }
   }
@@ -137,11 +121,6 @@ export function DuressSetup({
           <>
             {field(t('Duress-Passwort'), duress, setDuress, 'off', false, false, true)}
             {field(t('Duress-Passwort wiederholen'), confirm, setConfirm, 'off', false, true, true)}
-            <div className="backup-hint">
-              {t('Mindestens {count} Zeichen; nicht im Passwortmanager speichern.', {
-                count: MIN_DURESS_PASSPHRASE_LENGTH,
-              })}
-            </div>
           </>
         )}
         {err && <div className="err-note">{err}</div>}

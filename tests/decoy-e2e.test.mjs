@@ -54,14 +54,19 @@ await S.saveRecord(
   await S.seal(realDek, new TextEncoder().encode('REAL-SECRET'), aad),
 );
 
-let shortDuressRejected = false;
-try {
-  await S.setDuressPassword(REAL, 'notfall');
-} catch (error) {
-  shortDuressRejected = error instanceof S.DuressTooShortError;
-}
-ok('zu kurzes Duress-Passwort wird vor jeder Mutation abgewiesen',
-  shortDuressRejected && !(await S.vaultDbExists('scytale-decoy')));
+// No length/strength policy on the duress word — it is a coercion trigger, not a secret; a short
+// word arms fine. It only has to differ from the real passphrase.
+await S.setDuressPassword(REAL, 'x');
+ok('kurzes Duress-Passwort wird akzeptiert (keine Längen-Richtlinie)',
+  (await S.duressEnabled()) && (await S.vaultDbExists('scytale-decoy')));
+
+// NEGATIVE CONTROL — the one functional rule that stays: duress must differ from the real
+// passphrase (else a normal login would fire the wipe). Rejected BEFORE the existing decoy is
+// touched, so the 'x' decoy above survives this attempt.
+let equalsRealRejected = false;
+try { await S.setDuressPassword(REAL, REAL); } catch (e) { equalsRealRejected = e instanceof S.DuressEqualsRealError; }
+ok('Negativkontrolle: Duress == echtes Passwort wird weiterhin abgewiesen',
+  equalsRealRejected && (await S.vaultDbExists('scytale-decoy')));
 
 await S.setDuressPassword(REAL, DURESS);
 ok('Real-Header ist nach dem Armieren markiert', await S.duressEnabled());

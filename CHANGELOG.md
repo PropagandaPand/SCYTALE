@@ -22,7 +22,8 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
   idempotenter Wiederanlauf beim Boot, Löschung der Quelle **erst nach bestätigter**
   IndexedDB-Deletion, Cross-Tab-Lockdown + Mutation-Lease.
 - **Konstante Argon2-Kosten** bei jedem Fehlversuch (auch während des Lockouts),
-  damit die Zeit nie verrät, ob ein Duress-Passwort gesetzt ist. Mindestlänge 12.
+  damit die Zeit nie verrät, ob ein Duress-Passwort gesetzt ist. Keine Längen-/
+  Stärke-Richtlinie fürs Duress-Wort (Auslöser, kein Geheimnis) — nur ≠ echtes Passwort.
 - Biometrie und Duress **koexistieren**; Face ID startet nicht mehr automatisch,
   wenn Duress scharf ist (ein erzwungenes Gesicht darf nicht das Echte öffnen).
 - Ehrliche Grenze: die Deniability ist **verhaltensbasiert, nicht at-rest** — vor

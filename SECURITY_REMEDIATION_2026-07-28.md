@@ -135,7 +135,7 @@ Promotion überschreiben oder den Marker zurück auf „pending“ setzen.
 realen Wipe, Validierung eines vollständigen Decoy-Headers vor der Zerstörung, idempotente
 Promotion, keine Rückkopie nach `copied`, nur nach Bestätigung abgeschlossene Quellenlöschung,
 ein atomar neutralisierter Removal-Pfad ohne verzögerten Delete-Request und Cross-Tab-Lockdown.
-Die Duress-Passphrase hat eine Mindestlänge von 12 Zeichen und eine Bestätigung;
+Die Duress-Passphrase muss sich vom echten Passwort unterscheiden und wird bestätigt; eine Längen-/Stärke-Richtlinie gibt es bewusst NICHT (Nachtrag 2026-07-29: ursprünglich Mindestlänge 12 — entfernt, da das Duress-Wort ein Auslöser unter Zwang ist, kein Geheimnis, das echte Daten schützt).
 Autofill/Password-Manager-Wiederverwendung wird soweit browserseitig möglich unterbunden.
 
 **Ehrliche Grenze:** Flash-Wear-Leveling verhindert den Nachweis physischer Sektorüberschreibung.

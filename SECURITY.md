@@ -158,8 +158,9 @@ working account — the UI does not signal that a real account existed or that d
 decoy is probed on **every** unlock attempt, including while the brute-force lockout is active (the
 coercion case). Armed and unarmed misses both pay the dominant Argon2 KDF cost; this is
 **cost-matched**, not a claim of strict constant-time execution across browser, IndexedDB and
-device-binding operations. The duress passphrase must differ from the real passphrase and has a
-12-character minimum. You populate the decoy ahead of time from *Security → Fill the decoy account*
+device-binding operations. The duress passphrase must differ from the real passphrase; it has **no length or
+strength policy** by design — it is a coercion trigger that must be easy to type under stress, not a
+secret protecting real data (the decoy it opens is a facade). You populate the decoy ahead of time from *Security → Fill the decoy account*
 (only reachable from the unlocked **real** account); switching back to the real account there needs
 no re-authentication within that already unlocked session, and the decoy account itself shows
 **no** control or indicator that a real account exists. Recognition is unlocking the decoy vault in

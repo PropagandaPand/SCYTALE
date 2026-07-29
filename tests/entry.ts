@@ -103,8 +103,7 @@ export {
   completeDecoyPromotion,
   completeDuressRemoval,
   duressEnabled,
-  MIN_DURESS_PASSPHRASE_LENGTH,
-  DuressTooShortError,
+  DuressEqualsRealError,
 } from '../src/lib/vaultService';
 export {
   PROMOTE_MARKER,

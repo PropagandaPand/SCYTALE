@@ -62,7 +62,6 @@ import {
  */
 const REAL_DB = 'scytale' as const;
 const DECOY_DB = 'scytale-decoy' as const;
-export const MIN_DURESS_PASSPHRASE_LENGTH = 12;
 const DURESS_MUTATION_LOCK = 'scytale-duress-mutation-v1';
 const DURESS_MUTATION_LEASE_MS = 60_000;
 
@@ -86,13 +85,6 @@ export class DuressEqualsRealError extends Error {
   constructor() {
     super('Das Duress-Passwort darf nicht die echte Passphrase sein.');
     this.name = 'DuressEqualsRealError';
-  }
-}
-
-export class DuressTooShortError extends Error {
-  constructor() {
-    super(`Das Duress-Passwort muss mindestens ${MIN_DURESS_PASSPHRASE_LENGTH} Zeichen haben.`);
-    this.name = 'DuressTooShortError';
   }
 }
 
@@ -763,7 +755,9 @@ export async function setDuressPassword(realPassphrase: string, duressPassphrase
   // session has the decoy as its live active database and must never replace it
   // underneath the mounted account UI.
   if (currentDbName() !== REAL_DB) throw new Error('Duress kann nur im echten Konto geändert werden.');
-  if (duressPassphrase.length < MIN_DURESS_PASSPHRASE_LENGTH) throw new DuressTooShortError();
+  // No length/strength policy on the duress word by design: it is a coercion TRIGGER that must be
+  // easy to type under stress, not a secret protecting real data (the decoy it opens is a facade).
+  // It only has to be non-empty (UI button-gated) and differ from the real passphrase (below).
   await withDuressMutationLock(async () => {
     if (promoteMarkerPresent()) {
       throw new Error('Duress kann während einer laufenden Decoy-Promotion nicht geändert werden.');

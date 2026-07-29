@@ -167,6 +167,12 @@ no re-authentication within that already unlocked session, and the decoy account
 its own database — the real header stores only a `decoyArmed` marker so the lock screen knows to
 probe; it is **not** a value that can unlock anything.
 
+The absent strength policy is a deliberate availability trade-off, not a free security property.
+The word still authorizes an irreversible local wipe/promotion: a trivial value is easier to guess
+or enter accidentally and can destroy the local real account without disclosing it. Users who care
+about local availability should choose something stress-typable but not obvious; the client does
+not enforce that choice.
+
 > **⚠ Biometrics void duress protection — a deliberate, documented trade-off.** Since the removal of
 > the biometric/duress mutual exclusion, Face ID / Touch ID may be enabled *alongside* a duress
 > password. The app only suppresses the **auto-launch** when duress is armed — but a manual biometric
@@ -382,6 +388,15 @@ nothing.
 list version bumped, nothing to roll back. The commit is the **last** action, never a step that must be
 undone (a rollback path nobody tests is worse than none).
 
+**Crash/delivery recovery after step 4.** P commits the new master-signed DeviceList and the exact
+sealed retry Grant together, publishes that list to RAM/self-contact before delivery, and removes
+the retry only through an exact-snapshot CAS after a durable relay receipt. A late receipt for
+attempt A therefore cannot erase a newer attempt B. If delivery cannot be completed, P can atomically
+replace the list with a newer version that revokes N while deleting that exact pending intent. N
+seals its human-confirmed transcript under the vault DEK until identity, contacts and bootstrap
+request are durable; an explicit N-side discard retains a rejection-only transcript tombstone so a
+late matching Grant is rejected without keeping unrelated anonymous rows as inbox poison.
+
 **Wire formats are versioned** (version byte at position 0, in both the QR and the offer) and the decoder
 **branches on it before the length check** — otherwise a future v2 format on an old device reports "invalid
 code" instead of "app too old", and the user hunts a scanner bug instead of updating.
@@ -551,8 +566,10 @@ both arrive.
   directives fail closed. CSP and shell parsing use browser-matching ASCII-whitespace rules:
   Unicode separators cannot make the validator and Chromium tokenize a directive/tag differently.
   The accepted HTML grammar fixes the body, title and single `#app` mount, rejects visible foreign
-  text/attributes, and permits only byte-verified build references (including icons and the web-app
-  manifest). This is important defense in depth, not an XSS sandbox: compromised same-origin code
+  text/attributes, and permits only canonical root-relative, byte-verified build references
+  (including icons and the web-app manifest). MIME essences are exact, only an absent charset or
+  explicit UTF-8 is accepted, and `Content-Disposition` cannot turn a validated shell/module into
+  a download. This is important defense in depth, not an XSS sandbox: compromised same-origin code
   can read unlocked plaintext and misuse same-origin endpoints.
 - **Further headers**: host-scoped HSTS (2 y) on both intentionally supported production
   origins (`skytale.chat` and `scytale.illogical.workers.dev`; deliberately no

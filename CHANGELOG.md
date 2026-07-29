@@ -40,7 +40,7 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
   Linking-/Bootstrap-Übergänge, richtungs-/raumgebundene **Recall-Namespaces** +
   Attachment-Crypto-Erase, geschlossene **CSP-** und strukturelle **SW-Shell**-Prüfung.
 - Voller Bericht: `SECURITY_REMEDIATION_2026-07-28.md`. Abschlusslauf grün
-  (Client-/Worker-`tsc`, 805 Test-Assertions, Build, Wrangler-Dry-Run, `npm audit`
+  (Client-/Worker-`tsc`, 834 Test-Assertions, Build, Wrangler-Dry-Run, `npm audit`
   0/0). Deployment + Live-Verifikation beider Origins stehen noch aus.
 
 ### Feature: Sealed Sender (Absender-Metadaten verbergen)

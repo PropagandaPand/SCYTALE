@@ -2242,8 +2242,8 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
 
   // ── Erst-Sync: the snapshot that makes a linked device a real 1:1 ─────────
   // Sizing: an avatar is capped at AVATAR_IMPORT_CAP and the roster at ROSTER_MAX
-  // metadata-only entries (~250 B each), so a snapshot stays well under MAX_ATTACH
-  // — no splitting needed at this stage (history, which does need it, is deferred).
+  // metadata entries (~250 B each), so the profile/roster frame stays well under
+  // MAX_ATTACH. Bounded text history is sent separately in deterministic chunks.
 
   /** Send every delivery of a fan-out to its device inbox. Only ever used for the
    *  link snapshot / bootstrap frames — all silent, so none arms a phantom push. */
@@ -2271,10 +2271,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   }
 
   /**
-   * P side: answer a linked device's PULL with the account snapshot, over the SELF
-   * contact (authenticated as coming from my own master) and fanned to exactly ONE
-   * device — the requester. METADATA ONLY: no ratchet, no bundle, no device list,
-   * so a substituted device gains no send capability to my contact graph.
+   * P side: answer a linked device's PULL with the account bootstrap stream over
+   * the SELF contact, authenticated as my own master and fanned to exactly ONE
+   * device. It carries profile/roster, bounded optional signed DeviceLists and
+   * chunked text history, but no ratchet/session, bundle, room id or attachment.
    */
   /** Fan ONE bootstrap frame to exactly one of my devices. */
   async function sendBootstrapFrame(targetSignPub: Bytes, bid: string, parts: BootstrapPart[]) {

@@ -5,7 +5,7 @@
 | Feld | Wert |
 | --- | --- |
 | Bericht-ID | `SKYTALE-REMEDIATION-2026-07-28` |
-| Datum | 28. Juli 2026 |
+| Datum | 28. Juli 2026; Abschlussaktualisierung 29. Juli 2026 |
 | Ausgangsbericht | `SECURITY_AUDIT_2026-07-27.md` |
 | Ausgangsstand dieser Arbeitsrunde | `23b3641e709a937579d5efccd660ee26800e6d6b` |
 | Zielstand | Der Commit, der diesen Bericht enthält |
@@ -135,7 +135,10 @@ Promotion überschreiben oder den Marker zurück auf „pending“ setzen.
 realen Wipe, Validierung eines vollständigen Decoy-Headers vor der Zerstörung, idempotente
 Promotion, keine Rückkopie nach `copied`, nur nach Bestätigung abgeschlossene Quellenlöschung,
 ein atomar neutralisierter Removal-Pfad ohne verzögerten Delete-Request und Cross-Tab-Lockdown.
-Die Duress-Passphrase muss sich vom echten Passwort unterscheiden und wird bestätigt; eine Längen-/Stärke-Richtlinie gibt es bewusst NICHT (Nachtrag 2026-07-29: ursprünglich Mindestlänge 12 — entfernt, da das Duress-Wort ein Auslöser unter Zwang ist, kein Geheimnis, das echte Daten schützt).
+Die Duress-Passphrase muss sich vom echten Passwort unterscheiden und wird bestätigt; eine
+Längen-/Stärke-Richtlinie gibt es bewusst nicht. Nachtrag vom 29.07.2026: Die zunächst
+eingeführte Mindestlänge von 12 Zeichen wurde entfernt, weil das Duress-Wort unter Zwang
+schnell und zuverlässig als Auslöser eingegeben werden können soll.
 Autofill/Password-Manager-Wiederverwendung wird soweit browserseitig möglich unterbunden.
 
 **Ehrliche Grenze:** Flash-Wear-Leveling verhindert den Nachweis physischer Sektorüberschreibung.
@@ -223,9 +226,9 @@ Commit:
 | --- | --- |
 | Client-TypeScript (`npm run check`) | 0 Fehler (exit 0) |
 | Worker-TypeScript (`npx tsc -p worker/tsconfig.json --noEmit`) | 0 Fehler (exit 0) |
-| Gesamtsuite (`npm test`) | 805 Assertions grün, 0 Suiten rot, 2 XFAIL-Zielvorgaben offen |
-| Produktionsbuild (`npm run build`) | erfolgreich (exit 0) |
-| Wrangler Dry Run | erfolgreich (exit 0) |
+| Gesamtsuite (`npm test`) | 834 Assertions grün, 0 Suiten rot, 2 XFAIL-Zielvorgaben offen |
+| Produktionsbuild (`npm run build`) | erfolgreich; 27 manifestgebundene Precache-Einträge, erzeugte Shell strukturell gegen das injizierte Manifest validiert |
+| Wrangler Dry Run | erfolgreich; 29 Assets und erwartete DO-/R2-/Rate-Limit-/Asset-Bindings |
 | `git diff --check` | sauber (exit 0) |
 | `npm audit --omit=dev` | 0 bekannte Schwachstellen |
 | vollständiges `npm audit` | 0 bekannte Schwachstellen |
@@ -235,7 +238,13 @@ Commit:
 
 Fokussierte Zwischenläufe:
 
-- PWA-/Shell-Härtung: 49/49 Assertions grün;
+- PWA-/Shell-Härtung: 68/68 Assertions grün;
+- Decoy/Duress: 10/10 Basis-, 32/32 Integrations-, 23/23 E2E- und
+  21/21 ergänzende Race-/Marker-Assertions grün;
+- Runtime-Single-Writer/BFCache: 10/10 Assertions grün;
+- Linking-Recovery und Grant-Durability: 56/56 sowie 10/10 Assertions grün;
+- Bootstrap-Durability: 12/12 Assertions grün;
+- Attachment-Serialisierung: 7/7 Assertions grün;
 - Worker-Backend-Härtung: 26/26 Assertions grün;
 - Recall: 17/17 Assertions grün;
 - Storage-Quota: 26/26 Assertions grün;
@@ -293,6 +302,11 @@ Für eine pauschale Aussage „produktionsreif für beliebig hochsensible Kommun
 - Die Duress-Erkennung gleicht den dominanten Argon2-Aufwand bewaffneter und unbewaffneter
   Fehlversuche an. Browser-, IndexedDB- und Device-Binding-Laufzeiten sind keine
   strikte Constant-Time-Garantie.
+- Das Duress-Wort hat bewusst keine erzwungene Mindestlänge. Das verbessert die Bedienbarkeit
+  unter Stress, macht triviale Werte aber leichter erratbar oder versehentlich auslösbar und
+  kann dadurch einen irreversiblen **lokalen Verfügbarkeitsverlust** verursachen. Es schützt
+  keine Klartextdaten, autorisiert aber den destruktiven Übergang; diese Abwägung bleibt beim
+  Nutzer.
 - Relayadressierung leakt Empfänger-Pseudonym, Timing, Größe und Netzwerkbeziehung.
 - Push bindet Inbox und providerseitigen Gerätetoken; Push bleibt opt-in.
 - Recall ist kooperativ und kann Lesen, Screenshot oder modifizierte Clients nicht rückgängig machen.

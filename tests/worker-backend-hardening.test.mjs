@@ -53,8 +53,14 @@ ok('durable room and global actor byte/frame budgets are both charged',
 ok('owner slot protection evicts only unauthenticated sockets',
   /if \(!att\.owner\) guests\.push/.test(relay) &&
   /if \(!oldest\) return false/.test(relay));
-ok('unauthenticated sender cannot suppress push',
-  /const silent = att\.owner && m\.silent === true \? 1 : 0/.test(relay));
+// Send sockets are intentionally unauthenticated (sealed sender), so an `att.owner`
+// gate would turn every user-invisible control frame into a phantom push. A sender
+// may mark only its own frame silent; that path must not clear an already armed wake
+// for another queued, visible frame.
+ok('silent sender frame cannot cancel an armed push for visible traffic',
+  /const silent = m\.silent === true \? 1 : 0/.test(relay) &&
+  /if \(!ownerOnline && !silent\) this\.ctx\.waitUntil\(this\.scheduleWake\(\)\)/.test(relay) &&
+  /if \(this\.pendingVisibleCount\(\) === 0\) \{\s*this\.ctx\.storage\.sql\.exec\('DELETE FROM alarm_state WHERE name = \?', PUSH_DUE_KEY\)/.test(relay));
 ok('new push subscriptions are restricted to browser services',
   /fcm\.googleapis\.com/.test(relay) &&
   /updates\.push\.services\.mozilla\.com/.test(relay) &&

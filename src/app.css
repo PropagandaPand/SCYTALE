@@ -188,12 +188,8 @@ select {
   opacity: 0;
 }
 .boot-splash-anim {
-  width: min(82vw, 460px);
-  height: auto;
-}
-.boot-splash-anim svg {
   display: block;
-  width: 100%;
+  width: min(78vw, 400px);
   height: auto;
 }
 @media (prefers-reduced-motion: reduce) {

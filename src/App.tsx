@@ -152,7 +152,9 @@ export function App() {
   // fallback: if the platform blocks a gesture-less prompt, the passphrase form and
   // a manual retry button are already there).
   useEffect(() => {
-    if (phase !== 'unlock') {
+    // Wait for the cold-start splash to finish before auto-launching Face ID / Touch ID: otherwise the
+    // system biometric sheet pops up UNDER the splash while the user is still looking at the animation.
+    if (phase !== 'unlock' || showSplash) {
       autoBioTriedRef.current = false; // re-arm for the next time the screen appears
       return;
     }
@@ -179,7 +181,7 @@ export function App() {
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase]);
+  }, [phase, showSplash]);
 
   function beginLockoutCountdown(ms: number) {
     setLockState('locked');

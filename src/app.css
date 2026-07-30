@@ -4154,3 +4154,286 @@ canvas.vo-img {
   color: var(--danger);
   border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
 }
+
+/* ==== RESPONSIVE MESSENGER SHELL =====================================
+   Phones keep the established single-pane navigation. Wide screens use a
+   master-detail layout: conversations remain available on the left while the
+   active chat or settings view uses the right pane. */
+.messenger-shell {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+}
+.messenger-sidebar,
+.messenger-pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+}
+.messenger-shell.list-view .messenger-pane,
+.messenger-shell:not(.list-view) .messenger-sidebar {
+  display: none;
+}
+.messenger-sidebar > .list,
+.messenger-pane > .chat,
+.messenger-pane > .subview {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.desktop-empty {
+  display: none;
+}
+
+button:focus-visible,
+[role='button']:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* The former search-shaped placeholder is now an actual conversation filter. */
+.search-bar {
+  cursor: text;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+.search-bar:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.search-bar input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+}
+.search-bar input::placeholder {
+  color: var(--faint);
+  opacity: 1;
+}
+.search-bar input::-webkit-search-cancel-button {
+  cursor: pointer;
+}
+
+@media (min-width: 900px) {
+  body {
+    background: color-mix(in srgb, var(--surface) 36%, var(--bg));
+  }
+
+  #app {
+    width: 100%;
+    max-width: 1400px;
+    border-inline: 1px solid var(--border);
+    box-shadow: 0 0 54px rgba(0, 0, 0, 0.22);
+  }
+
+  /* Unlock and unsupported-environment screens remain deliberately compact. */
+  #app > .lock {
+    width: min(100%, 460px);
+    align-self: center;
+  }
+
+  .messenger-shell {
+    flex-direction: row;
+    background: var(--bg);
+  }
+  .messenger-shell.list-view .messenger-pane,
+  .messenger-shell:not(.list-view) .messenger-sidebar,
+  .messenger-sidebar,
+  .messenger-pane {
+    display: flex;
+  }
+  .messenger-sidebar {
+    flex: 0 0 clamp(330px, 29vw, 390px);
+    border-right: 1px solid var(--border-strong);
+    background: var(--bg);
+  }
+  .messenger-pane {
+    position: relative;
+    flex: 1 1 auto;
+    background:
+      radial-gradient(circle at 50% 38%, color-mix(in srgb, var(--accent) 4%, transparent), transparent 38%),
+      var(--bg);
+  }
+
+  /* Frequent desktop navigation should feel immediate. */
+  .messenger-sidebar .list,
+  .messenger-pane .chat,
+  .messenger-pane .subview {
+    animation: none;
+  }
+
+  .desktop-empty {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 40px;
+    text-align: center;
+    color: var(--muted);
+  }
+  .desktop-empty img {
+    width: 68px;
+    height: 68px;
+    border-radius: 20px;
+    opacity: 0.9;
+    box-shadow: 0 18px 42px -20px color-mix(in srgb, var(--accent) 62%, transparent);
+  }
+  .desktop-empty-brand {
+    margin-top: 20px;
+    padding-left: 0.22em;
+    color: var(--text);
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: 0.22em;
+  }
+  .desktop-empty p {
+    margin: 10px 0 18px;
+    font-size: 14px;
+  }
+  .desktop-empty span {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--verified);
+  }
+
+  .conv-row {
+    position: relative;
+    border-left: 3px solid transparent;
+    padding-left: 13px;
+  }
+  .conv-row.active {
+    border-left-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 11%, var(--surface));
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .conv-row.active:hover {
+      background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+    }
+  }
+
+  /* The visible conversation list is the desktop back-navigation. */
+  .chat-back {
+    display: none;
+  }
+  .chat-top {
+    min-height: 58px;
+    padding-inline: 24px;
+  }
+  .msgs {
+    padding: 22px 28px;
+  }
+  .msgs-inner {
+    width: min(100%, 860px);
+    margin-inline: auto;
+  }
+  .bubble {
+    max-width: min(72%, 620px);
+  }
+  .composer {
+    padding-left: max(24px, calc((100% - 860px) / 2));
+    padding-right: max(24px, calc((100% - 860px) / 2));
+  }
+  .sticker-panel {
+    padding-left: max(24px, calc((100% - 860px) / 2));
+    padding-right: max(24px, calc((100% - 860px) / 2));
+  }
+
+  /* Detail pages gain room, while forms and long text retain readable measures. */
+  .subhead {
+    min-height: 58px;
+    padding-inline: 24px;
+  }
+  .subbody,
+  .verify-body,
+  .profile-body {
+    width: min(100%, 760px);
+    margin-inline: auto;
+    padding: 28px 32px 36px;
+  }
+  .contact-body {
+    width: min(100%, 760px);
+    margin-inline: auto;
+    padding: 32px;
+  }
+  .sn-grid {
+    max-width: 620px;
+    margin-inline: auto;
+  }
+  .verified-banner,
+  .verify-body > .btn,
+  .verify-foot {
+    max-width: 620px;
+    margin-inline: auto;
+  }
+
+  /* Explainer stays inside the detail pane instead of covering navigation. */
+  .messenger-pane > .xpl {
+    position: absolute;
+    inset: 0;
+  }
+  .xpl-card {
+    max-width: 640px;
+    padding-inline: 32px;
+  }
+
+  /* Phone bottom sheets become conventional centered desktop dialogs. */
+  .sheet-scrim,
+  .lang-scrim,
+  .inst-scrim {
+    align-items: center;
+    padding: 24px;
+  }
+  .fwd-sheet,
+  .lang-sheet,
+  .inst-sheet {
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding-bottom: 14px;
+    box-shadow: 0 18px 60px rgba(0, 0, 0, 0.48);
+  }
+  .inst-sheet {
+    padding: 10px 22px 22px;
+  }
+  .inst-grab {
+    display: none;
+  }
+}
+
+@media (min-width: 1200px) {
+  .profile-body {
+    width: min(100%, 980px);
+    display: grid;
+    grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
+    grid-template-areas:
+      'identity settings'
+      'error settings';
+    align-items: start;
+    gap: 32px;
+  }
+  .profile-id {
+    grid-area: identity;
+    position: sticky;
+    top: 86px;
+  }
+  .profile-body > .err-note {
+    grid-area: error;
+  }
+  .profile-body > .settings-list {
+    grid-area: settings;
+    margin-top: 0;
+  }
+}

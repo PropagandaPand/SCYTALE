@@ -1,4 +1,12 @@
-import { useEffect, useLayoutEffect, useReducer, useRef, useState, type ChangeEvent } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useReducer,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type ReactNode,
+} from 'react';
 import { loadOrCreateIdentity, fingerprintOf } from './lib/identity';
 import {
   loadOrCreatePreKeys,
@@ -716,6 +724,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   const [shareLink, setShareLink] = useState('');
   const [qrDataUrl, setQrDataUrl] = useState('');
   const [view, setView] = useState<View>('list');
+  const [conversationQuery, setConversationQuery] = useState('');
   const [activeRoom, setActiveRoom] = useState<string | null>(null);
   const [messages, setMessages] = useState<Record<string, ChatMessage[]>>({});
   const [statuses, setStatuses] = useState<Record<string, RelayStatus>>({});
@@ -8515,142 +8524,216 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     </div>
   );
 
-  // ── Contact list ──────────────────────────────────────────────────
-  if (view === 'list') {
-    // WhatsApp-style: groups and contacts in one list, most recent activity on
-    // top. Chats without messages (ts 0) sink to the bottom until they get one.
-    const convItems = [
-      ...groups.map((g) => {
-        const last = messagesRef.current[g.id]?.at(-1);
-        return { kind: 'group' as const, group: g, last, unread: unreadRef.current[g.id] ?? 0, ts: last?.ts ?? 0 };
-      }),
-      ...visibleContacts.map((c) => {
-        const last = messagesRef.current[c.roomId]?.at(-1);
-        return { kind: 'contact' as const, contact: c, last, unread: unreadRef.current[c.roomId] ?? 0, ts: last?.ts ?? 0 };
-      }),
-    ].sort((a, b) => b.ts - a.ts);
-    return (
-      <>
-        <div className="list">
-          <div className="list-top">
-            <div className="list-head">
-              <button className="list-brand" onClick={() => setView('profile')} title="Profil">
-                {myAvatarB64 ? (
-                  <img className="brand-avatar" src={avatarSrc(myAvatarB64)} alt="Profil" />
-                ) : (
-                  <img src="/scytale-icon.svg" alt="" />
-                )}
-                <div>
-                  <div className="t">
-                    SKYTALE <span className="ver">v{__APP_VERSION__}</span>
-                  </div>
-                  <div className="fp">{shortFp(fingerprint)}</div>
-                </div>
-              </button>
-              <div className="icon-btns">
-                <button
-                  className="icon-btn"
-                  title="Neue Gruppe"
-                  onClick={() => {
-                    setError('');
-                    setGroupSel(new Set());
-                    setGroupNameInput('');
-                    setView('newgroup');
-                  }}
-                >
-                  <IconGroup />
-                </button>
-                <button className="icon-btn" title="Teilen / Kontakt" onClick={() => { setError(''); setView('add'); }}>
-                  <IconPlus />
-                </button>
-                <button className="icon-btn" title="Sperren" onClick={onLock}>
-                  <IconLock size={15} />
-                </button>
-              </div>
-            </div>
-            <div className="search-bar">
-              <span className="g">
-                <IconSearch />
-              </span>
-              Suchen
-            </div>
-          </div>
+  // WhatsApp-style: groups and contacts in one list, most recent activity on
+  // top. Chats without messages (ts 0) sink to the bottom until they get one.
+  // The list is rendered once and becomes the persistent master pane on laptops.
+  const query = conversationQuery.trim().toLocaleLowerCase();
+  const convItems = [
+    ...groups.map((g) => {
+      const last = messagesRef.current[g.id]?.at(-1);
+      return { kind: 'group' as const, group: g, last, unread: unreadRef.current[g.id] ?? 0, ts: last?.ts ?? 0 };
+    }),
+    ...visibleContacts.map((c) => {
+      const last = messagesRef.current[c.roomId]?.at(-1);
+      return { kind: 'contact' as const, contact: c, last, unread: unreadRef.current[c.roomId] ?? 0, ts: last?.ts ?? 0 };
+    }),
+  ]
+    .filter((item) => {
+      if (!query) return true;
+      const name =
+        item.kind === 'group'
+          ? item.group.name
+          : `${displayName(item.contact)} ${item.contact.peerName ?? ''}`;
+      const preview = item.last ? lastPreview(item.last) : '';
+      return `${name} ${preview}`.toLocaleLowerCase().includes(query);
+    })
+    .sort((a, b) => b.ts - a.ts);
+  const conversationContextOpen =
+    view === 'chat' || view === 'contact' || view === 'verify' || view === 'gmanage';
 
-          <div className="enc-line">
-            <IconShield size={13} />
-            {t('Alle Nachrichten Ende-zu-Ende verschlüsselt')}
-          </div>
-
-          <div className="conv-scroll">
-            {groups.length === 0 && visibleContacts.length === 0 ? (
-              <div className="list-empty">
-                {t('Noch keine Chats.')}<br />{tb('Oben: **+** für Kontakte, das Gruppen-Symbol für eine Gruppe.')}
-              </div>
+  const conversationListEl = (
+    <div className="list">
+      <div className="list-top">
+        <div className="list-head">
+          <button
+            className="list-brand"
+            onClick={() => setView('profile')}
+            title={t('Profil')}
+            aria-label={t('Profil öffnen')}
+          >
+            {myAvatarB64 ? (
+              <img className="brand-avatar" src={avatarSrc(myAvatarB64)} alt="" />
             ) : (
-              <>
-                {convItems.map((item) =>
-                  item.kind === 'group' ? (
-                    <button key={item.group.id} className="conv-row" onClick={() => openGroup(item.group.id)}>
-                      <div className="avatar-wrap">
-                        <div className="avatar group">
-                          <IconGroup size={22} />
-                        </div>
-                      </div>
-                      <div className="conv-main">
-                        <div className="conv-line1">
-                          <span className="conv-name">{item.group.name}</span>
-                          <span className="conv-ts">{fmtListTs(item.last?.ts)}</span>
-                        </div>
-                        <div className="conv-line2">
-                          <span className="conv-last">
-                            {item.last
-                              ? (item.last.mine ? '' : item.last.sender ? `${item.last.sender}: ` : '') +
-                                lastPreview(item.last)
-                              : `${item.group.members.length + 1} Mitglieder`}
-                          </span>
-                          {item.unread > 0 && <span className="unread">{item.unread}</span>}
-                        </div>
-                      </div>
-                    </button>
-                  ) : (
-                    <button key={item.contact.roomId} className="conv-row" onClick={() => openChat(item.contact.roomId)}>
-                      <div className="avatar-wrap">
-                        {item.contact.peerAvatarB64 ? (
-                          <img className="avatar-img" src={avatarSrc(item.contact.peerAvatarB64)} alt="" />
-                        ) : (
-                          <div className="avatar">
-                            <Identicon seed={item.contact.roomId} />
-                          </div>
-                        )}
-                        <span className={`sdot ${st(item.contact.roomId)}`} />
-                      </div>
-                      <div className="conv-main">
-                        <div className="conv-line1">
-                          <span className="conv-name">{displayName(item.contact)}</span>
-                          {item.contact.verified && (
-                            <span className="verified-badge">
-                              <IconShield size={14} filled />
-                            </span>
-                          )}
-                          <span className="conv-ts">{fmtListTs(item.last?.ts)}</span>
-                        </div>
-                        <div className="conv-line2">
-                          <span className="conv-last">
-                            {item.last ? lastPreview(item.last) : hasSession(item.contact) ? 'Verbunden' : 'Neu — sag Hallo'}
-                          </span>
-                          {item.unread > 0 && <span className="unread">{item.unread}</span>}
-                        </div>
-                      </div>
-                    </button>
-                  ),
-                )}
-              </>
+              <img src="/scytale-icon.svg" alt="" />
             )}
+            <div>
+              <div className="t">
+                SKYTALE <span className="ver">v{__APP_VERSION__}</span>
+              </div>
+              <div className="fp">{shortFp(fingerprint)}</div>
+            </div>
+          </button>
+          <div className="icon-btns">
+            <button
+              className="icon-btn"
+              title={t('Neue Gruppe')}
+              aria-label={t('Neue Gruppe')}
+              onClick={() => {
+                setError('');
+                setGroupSel(new Set());
+                setGroupNameInput('');
+                setView('newgroup');
+              }}
+            >
+              <IconGroup />
+            </button>
+            <button
+              className="icon-btn"
+              title={t('Teilen / Kontakt')}
+              aria-label={t('Teilen / Kontakt')}
+              onClick={() => {
+                setError('');
+                setView('add');
+              }}
+            >
+              <IconPlus />
+            </button>
+            <button
+              className="icon-btn"
+              title={t('Sperren')}
+              aria-label={t('Sperren')}
+              onClick={onLock}
+            >
+              <IconLock size={15} />
+            </button>
           </div>
         </div>
-      </>
-    );
-  }
+        <label className="search-bar">
+          <span className="g" aria-hidden="true">
+            <IconSearch />
+          </span>
+          <input
+            type="search"
+            value={conversationQuery}
+            onChange={(event) => setConversationQuery(event.target.value)}
+            placeholder={t('Chats durchsuchen')}
+            aria-label={t('Chats durchsuchen')}
+          />
+        </label>
+      </div>
+
+      <div className="enc-line">
+        <IconShield size={13} />
+        {t('Alle Nachrichten Ende-zu-Ende verschlüsselt')}
+      </div>
+
+      <div className="conv-scroll">
+        {groups.length === 0 && visibleContacts.length === 0 ? (
+          <div className="list-empty">
+            {t('Noch keine Chats.')}<br />{tb('Oben: **+** für Kontakte, das Gruppen-Symbol für eine Gruppe.')}
+          </div>
+        ) : convItems.length === 0 ? (
+          <div className="list-empty">{t('Keine passenden Chats gefunden.')}</div>
+        ) : (
+          convItems.map((item) => {
+            if (item.kind === 'group') {
+              const selected = conversationContextOpen && activeGroup === item.group.id;
+              return (
+                <button
+                  key={item.group.id}
+                  className={`conv-row${selected ? ' active' : ''}`}
+                  aria-current={selected ? 'page' : undefined}
+                  onClick={() => openGroup(item.group.id)}
+                >
+                  <div className="avatar-wrap">
+                    <div className="avatar group">
+                      <IconGroup size={22} />
+                    </div>
+                  </div>
+                  <div className="conv-main">
+                    <div className="conv-line1">
+                      <span className="conv-name">{item.group.name}</span>
+                      <span className="conv-ts">{fmtListTs(item.last?.ts)}</span>
+                    </div>
+                    <div className="conv-line2">
+                      <span className="conv-last">
+                        {item.last
+                          ? (item.last.mine ? '' : item.last.sender ? `${item.last.sender}: ` : '') +
+                            lastPreview(item.last)
+                          : `${item.group.members.length + 1} Mitglieder`}
+                      </span>
+                      {item.unread > 0 && <span className="unread">{item.unread}</span>}
+                    </div>
+                  </div>
+                </button>
+              );
+            }
+            const selected = conversationContextOpen && activeRoom === item.contact.roomId;
+            return (
+              <button
+                key={item.contact.roomId}
+                className={`conv-row${selected ? ' active' : ''}`}
+                aria-current={selected ? 'page' : undefined}
+                onClick={() => openChat(item.contact.roomId)}
+              >
+                <div className="avatar-wrap">
+                  {item.contact.peerAvatarB64 ? (
+                    <img className="avatar-img" src={avatarSrc(item.contact.peerAvatarB64)} alt="" />
+                  ) : (
+                    <div className="avatar">
+                      <Identicon seed={item.contact.roomId} />
+                    </div>
+                  )}
+                  <span className={`sdot ${st(item.contact.roomId)}`} />
+                </div>
+                <div className="conv-main">
+                  <div className="conv-line1">
+                    <span className="conv-name">{displayName(item.contact)}</span>
+                    {item.contact.verified && (
+                      <span className="verified-badge">
+                        <IconShield size={14} filled />
+                      </span>
+                    )}
+                    <span className="conv-ts">{fmtListTs(item.last?.ts)}</span>
+                  </div>
+                  <div className="conv-line2">
+                    <span className="conv-last">
+                      {item.last ? lastPreview(item.last) : hasSession(item.contact) ? t('Verbunden') : t('Neu — sag Hallo')}
+                    </span>
+                    {item.unread > 0 && <span className="unread">{item.unread}</span>}
+                  </div>
+                </div>
+              </button>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+
+  const renderMessengerShell = (detail: ReactNode | null) => (
+    <div className={`messenger-shell${detail === null ? ' list-view' : ''}`}>
+      <aside className="messenger-sidebar" aria-label={t('Chats')}>
+        {conversationListEl}
+      </aside>
+      <main className="messenger-pane">
+        {detail ?? (
+          <div className="desktop-empty">
+            <img src="/scytale-icon.svg" alt="" />
+            <div className="desktop-empty-brand">SKYTALE</div>
+            <p>{t('Wähle links einen Chat aus.')}</p>
+            <span>
+              <IconShield size={13} />
+              {t('Alle Nachrichten Ende-zu-Ende verschlüsselt')}
+            </span>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+
+  // ── Contact list ──────────────────────────────────────────────────
+  if (view === 'list') return renderMessengerShell(null);
 
   // ── Chat ──────────────────────────────────────────────────────────
   if (view === 'chat' && activeContact) {
@@ -8658,7 +8741,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     const start = Math.max(0, msgs.length - windowN);
     const shown = start > 0 ? msgs.slice(start) : msgs;
     const verified = !!activeContact.verified;
-    return (
+    return renderMessengerShell(
       <div
         className="chat"
         onPointerDown={onSwipeDown}
@@ -8671,7 +8754,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         }}
       >
         <div className="chat-top">
-          <button className="chat-back" onClick={() => setView('list')}>
+          <button className="chat-back" onClick={() => setView('list')} aria-label={t('Zurück')}>
             <IconBack />
           </button>
           <button className="chat-avatar-btn" onClick={openContact} aria-label="Kontaktinfo">
@@ -8893,7 +8976,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     const msgs = messages[activeGroupData.id] ?? [];
     const start = Math.max(0, msgs.length - windowN);
     const shown = start > 0 ? msgs.slice(start) : msgs;
-    return (
+    return renderMessengerShell(
       <div
         className="chat"
         onPointerDown={onSwipeDown}
@@ -8906,7 +8989,14 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         }}
       >
         <div className="chat-top">
-          <button className="chat-back" onClick={() => { setActiveGroup(null); setView('list'); }}>
+          <button
+            className="chat-back"
+            onClick={() => {
+              setActiveGroup(null);
+              setView('list');
+            }}
+            aria-label={t('Zurück')}
+          >
             <IconBack />
           </button>
           <div className="avatar sm group">
@@ -9017,10 +9107,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
 
   // ── Share / Add ───────────────────────────────────────────────────
   if (view === 'add') {
-    return (
+    return renderMessengerShell(
       <div className="subview">
         <div className="subhead">
-          <button className="back" onClick={() => setView('list')}>
+          <button className="back" onClick={() => setView('list')} aria-label={t('Zurück')}>
             <IconBack />
           </button>
           <div className="h">{t('Verbinden')}</div>
@@ -9123,10 +9213,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   if (view === 'verify' && activeContact) {
     const verified = !!activeContact.verified;
     const groups = safetyNumber ? safetyNumber.split(' ') : [];
-    return (
+    return renderMessengerShell(
       <div className="subview">
         <div className="subhead">
-          <button className="back" onClick={() => setView('chat')}>
+          <button className="back" onClick={() => setView('chat')} aria-label={t('Zurück')}>
             <IconBack />
           </button>
           <div className="h">{t('Safety Number')}</div>
@@ -9170,10 +9260,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     const c = activeContact;
     const verified = !!c.verified;
     const hasAvatar = !!c.peerAvatarB64;
-    return (
+    return renderMessengerShell(
       <div className="subview">
         <div className="subhead">
-          <button className="back" onClick={() => setView('chat')}>
+          <button className="back" onClick={() => setView('chat')} aria-label={t('Zurück')}>
             <IconBack />
           </button>
           <div className="h">{t('Kontakt')}</div>
@@ -9385,10 +9475,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     const meSign = idv?.sign.publicKey;
     const devices = ownListRef.current?.devices ?? [];
     const removingSelf = !!removeDev && (!primary || !!(meSign && bytesEqual(removeDev, meSign)));
-    return (
+    return renderMessengerShell(
       <div className="subview">
         <div className="subhead">
-          <button className="back" onClick={() => setView('profile')}>
+          <button className="back" onClick={() => setView('profile')} aria-label={t('Zurück')}>
             <IconBack />
           </button>
           <div className="h">{t('Geräte')}</div>
@@ -9479,14 +9569,14 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   }
 
   if (view === 'learn') {
-    return <Explainer onClose={() => setView('profile')} />;
+    return renderMessengerShell(<Explainer onClose={() => setView('profile')} />);
   }
 
   if (view === 'profile') {
-    return (
+    return renderMessengerShell(
       <div className="subview">
         <div className="subhead">
-          <button className="back" onClick={() => setView('list')}>
+          <button className="back" onClick={() => setView('list')} aria-label={t('Zurück')}>
             <IconBack />
           </button>
           <div className="h">{t('Profil')}</div>
@@ -9852,10 +9942,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         !!contact.bundle ||
         !!contact.peerDeviceList?.devices.some((device) => !!device.signedPreKey),
     );
-    return (
+    return renderMessengerShell(
       <div className="subview">
         <div className="subhead">
-          <button className="back" onClick={() => setView('list')}>
+          <button className="back" onClick={() => setView('list')} aria-label={t('Zurück')}>
             <IconBack />
           </button>
           <div className="h">{t('Neue Gruppe')}</div>
@@ -9941,10 +10031,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
             ),
         )
       : [];
-    return (
+    return renderMessengerShell(
       <div className="subview">
         <div className="subhead">
-          <button className="back" onClick={() => setView('chat')}>
+          <button className="back" onClick={() => setView('chat')} aria-label={t('Zurück')}>
             <IconBack />
           </button>
           <div className="h">{t('Gruppe verwalten')}</div>

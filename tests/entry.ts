@@ -70,6 +70,7 @@ export {
   applyRecallRegistry,
   prepareRecalledMessageForAppend,
 } from '../src/lib/messages';
+export { loadContacts } from '../src/lib/store';
 export { RelayClient } from '../src/lib/relay';
 export {
   withVaultDb,

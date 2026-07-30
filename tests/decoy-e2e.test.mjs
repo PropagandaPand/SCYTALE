@@ -120,6 +120,20 @@ await aok('promovierter Decoy-Datensatz ist mit dem zurückgegebenen DEK lesbar'
   const record = await S.loadRecord('proof-decoy');
   return new TextDecoder().decode(await S.open(promotedDek, record, aad)) === 'DECOY-CONTENT';
 });
+// The user-visible payoff: after entering the duress word the promoted canonical account must show a
+// FILLED mailbox, not an empty one. This closes the last runtime link the seed/populate suites leave
+// open — that the auto-seed survives the migration into the canonical DB and is readable by the exact
+// call the app makes on boot (loadContacts(dek), Messenger.tsx). The render then shows every contact
+// with `!hidden` (visibleContacts filter), so assert the seed contacts are visible-shaped, not empty.
+await aok('Duress-Unlock öffnet ein BEFÜLLTES Decoy-Postfach (Seed überlebt die Promotion)', async () => {
+  const decoyContacts = await S.loadContacts(promotedDek);
+  return (
+    decoyContacts.length === 5 &&
+    decoyContacts.every(
+      (c) => c.localOnly === true && c.hidden !== true && typeof c.peerName === 'string' && c.peerName.length > 0,
+    )
+  );
+});
 
 heldPromotionDb.close();
 await S.completeDecoyPromotion();

@@ -49,6 +49,13 @@ ok('Boot-Splash blockiert den Boot nie (ended/error/Timeout dismiss + prefers-re
   /onError=\{finish\}/.test(bootSplashSource) &&
   /setTimeout\(finish/.test(bootSplashSource) &&
   bootSplashSource.includes('prefers-reduced-motion'));
+// Autoplay must be driven imperatively (the JSX `muted` attribute alone is unreliable and blocks iOS
+// inline autoplay → a native play button). Set the muted PROPERTY + call play(); if still blocked,
+// skip to the app rather than leaving a play button.
+ok('Boot-Splash erzwingt Autoplay imperativ (muted-Property + play(), sonst skip statt Play-Button)',
+  /\.muted = true/.test(bootSplashSource) &&
+  /\.play\(\)/.test(bootSplashSource) &&
+  /\.catch\(finish\)/.test(bootSplashSource));
 ok('App setzt den Curtain synchron im Lifecycle-Handler',
   appSource.includes("classList.add('privacy-curtain-on')"));
 ok('Hide/Freeze invalidiert auch laufende Argon2-/WebAuthn-Ergebnisse',

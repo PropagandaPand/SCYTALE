@@ -1,21 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 /**
- * Cold-start splash: plays the branded scytale-rod clip once over the dark app background, then fades
- * to reveal whatever booted underneath (normally the lock screen). It is a tiny (~40 KB) muted, inline
- * H.264 clip with the dark background baked in — no animation library, no alpha video, no white matte.
+ * Cold-start splash: shows the branded scytale-rod clip once over the dark app background, then fades
+ * to reveal whatever booted underneath (normally the lock screen).
  *
- * The splash only OVERLAYS; it never gates the security boot. It self-dismisses on `ended`, on a tap,
- * on a hard timeout, and on any playback/decode error; prefers-reduced-motion shows the static poster
- * and skips straight through.
+ * It is an ANIMATED WEBP rendered as an <img> (~110 KB, dark background baked in, cropped to the logo).
+ * An animated image plays on its own like a GIF — there is NO media autoplay policy to satisfy, so it
+ * animates reliably on every browser and even in iOS Low Power Mode (a muted <video> does NOT: iOS
+ * refuses gesture-less playback there, which left a native play button / an instant skip).
  *
- * Autoplay is driven imperatively: React's `muted` attribute does NOT reliably set the muted PROPERTY,
- * and iOS only autoplays a genuinely muted, playsinline video — so we set `video.muted = true` on a
- * ref and call play() ourselves. If autoplay is still blocked (e.g. iOS Low Power Mode), we DON'T
- * leave a native play button sitting there: we just skip straight to the app. `onDone` MUST be stable.
+ * The splash only OVERLAYS; it never gates the security boot: it self-dismisses after the clip has
+ * played through once, on a tap, and on any image load error; prefers-reduced-motion shows the static
+ * poster and skips sooner. `onDone` MUST be stable (memoise it in the parent).
  */
 export function BootSplash({ onDone }: { onDone: () => void }) {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
   const doneRef = useRef(false);
   const [leaving, setLeaving] = useState(false);
   const [reduce] = useState(
@@ -30,19 +28,9 @@ export function BootSplash({ onDone }: { onDone: () => void }) {
   }, [onDone]);
 
   useEffect(() => {
-    if (reduce) {
-      const t = window.setTimeout(finish, 700); // hold the static poster a beat, then reveal
-      return () => window.clearTimeout(t);
-    }
-    const cap = window.setTimeout(finish, 4500); // never hang on the splash
-    const v = videoRef.current;
-    if (v) {
-      v.muted = true; // the PROPERTY — the JSX attribute alone is unreliable and blocks iOS autoplay
-      v.defaultMuted = true;
-      const p = v.play();
-      if (p && typeof p.catch === 'function') p.catch(finish); // autoplay blocked → skip, never show a play button
-    }
-    return () => window.clearTimeout(cap);
+    // Dismiss once the ~2.4 s clip has played through (reduced motion: hold the static poster briefly).
+    const t = window.setTimeout(finish, reduce ? 700 : 2600);
+    return () => window.clearTimeout(t);
   }, [finish, reduce]);
 
   return (
@@ -52,23 +40,12 @@ export function BootSplash({ onDone }: { onDone: () => void }) {
       role="img"
       aria-label="SKYTALE"
     >
-      {reduce ? (
-        <img className="boot-splash-anim" src="/bootSplash-poster.png" alt="" />
-      ) : (
-        <video
-          ref={videoRef}
-          className="boot-splash-anim"
-          src="/bootSplash.mp4"
-          poster="/bootSplash-poster.png"
-          muted
-          playsInline
-          preload="auto"
-          controls={false}
-          disablePictureInPicture
-          onEnded={finish}
-          onError={finish}
-        />
-      )}
+      <img
+        className="boot-splash-anim"
+        src={reduce ? '/bootSplash-poster.png' : '/bootSplash.webp'}
+        alt=""
+        onError={finish}
+      />
     </div>
   );
 }

@@ -7,6 +7,16 @@
       content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content"
     />
     <meta name="theme-color" content="#0b0c0e" />
+    <!-- Paint the app's dark background from the very first parse, BEFORE the external app.css loads
+         and before React mounts, so the browser never flashes its default white canvas ahead of the
+         (dark) boot splash. The splash and both themes render over this. -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        background-color: #0b0c0e;
+      }
+    </style>
     <link rel="icon" type="image/svg+xml" href="/scytale-icon.svg" />
     <link rel="icon" type="image/png" href="/pwa-192.png" />
     <link rel="apple-touch-icon" href="/pwa-512.png" />

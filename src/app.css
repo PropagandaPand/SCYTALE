@@ -170,6 +170,37 @@ select {
   text-align: center;
   animation: scyfade 0.35s ease;
 }
+
+/* Cold-start splash overlay (BootSplash.tsx). Sits above the app but BELOW the privacy curtain
+   (z 10000), on the same dark background so there is no visible seam. Fades out, then unmounts. */
+.boot-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 9990;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0b0c0e;
+  opacity: 1;
+  transition: opacity 0.34s ease;
+}
+.boot-splash-leaving {
+  opacity: 0;
+}
+.boot-splash-anim {
+  width: min(82vw, 460px);
+  height: auto;
+}
+.boot-splash-anim svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+@media (prefers-reduced-motion: reduce) {
+  .boot-splash {
+    transition: none;
+  }
+}
 .lock-logo {
   width: 76px;
   height: 76px;

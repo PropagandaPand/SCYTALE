@@ -34,6 +34,20 @@ ok('ohne vorheriges hidden-Ereignis gibt es keinen falschen Lock',
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const appSource = readFileSync(join(root, 'src', 'App.tsx'), 'utf8');
 const cssSource = readFileSync(join(root, 'src', 'app.css'), 'utf8');
+const bootSplashSource = readFileSync(join(root, 'src', 'BootSplash.tsx'), 'utf8');
+// The boot splash MUST use Lottie's LIGHT player: the full build evaluates animation expressions via
+// eval/Function, which our strict CSP (script-src 'self' 'wasm-unsafe-eval', no 'unsafe-eval') blocks.
+// The light player has no expression engine, so it runs unchanged; a switch to the full build (as the
+// value/player import) would silently break the splash under CSP.
+ok('Boot-Splash lädt den LIGHT Lottie-Build (kein eval → strikte CSP ohne unsafe-eval bleibt gültig)',
+  bootSplashSource.includes("import('lottie-web/build/player/lottie_light')") &&
+  !/import\s+\w+\s+from\s+['"]lottie-web['"]/.test(bootSplashSource));
+// The splash overlay must never gate the security boot: it is lazy-loaded, self-dismisses on a hard
+// timeout, and fails closed (dismisses) on any load/render error.
+ok('Boot-Splash blockiert den Boot nie (Lazy-Import + Timeout-Cap + Fehler-Fallback dismiss)',
+  /import\(['"]\.\/assets\/bootSplash\.json['"]\)/.test(bootSplashSource) &&
+  /setTimeout\(finish/.test(bootSplashSource) &&
+  /catch \{[\s\S]*?finish\(\)/.test(bootSplashSource));
 ok('App setzt den Curtain synchron im Lifecycle-Handler',
   appSource.includes("classList.add('privacy-curtain-on')"));
 ok('Hide/Freeze invalidiert auch laufende Argon2-/WebAuthn-Ergebnisse',

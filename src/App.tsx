@@ -33,6 +33,7 @@ import {
 } from './lib/runtimeLock';
 import { t, useLang } from './lib/i18n';
 import { Messenger } from './Messenger';
+import { BootSplash } from './BootSplash';
 import { ReloadPrompt } from './ReloadPrompt';
 import { InstallPrompt } from './InstallPrompt';
 import { IconLock, IconEye, IconEyeOff } from './icons';
@@ -97,6 +98,10 @@ export function App() {
   // over state would go stale). Used to gate the resume-time lockdown: only an OPEN vault has
   // in-memory keys worth protecting. See the lockdown effect.
   const dekRef = useRef<CryptoKey | null>(null);
+  // Cold-start splash overlay (lazy Lottie). Shown once per page load, over whatever boots underneath;
+  // it never gates the security boot. Stable callback so BootSplash's play effect runs once.
+  const [showSplash, setShowSplash] = useState(true);
+  const dismissSplash = useCallback(() => setShowSplash(false), []);
 
   function say(msg: string, kind: StatusKind = '') {
     setStatus(msg);
@@ -691,6 +696,7 @@ export function App() {
 
   return (
     <>
+      {showSplash && <BootSplash onDone={dismissSplash} />}
       <div className="lock">
         <img className="lock-logo" src="/scytale-icon.svg" alt="SKYTALE" />
         <div className="lock-brand">SKYTALE</div>

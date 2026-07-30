@@ -665,7 +665,7 @@ export function assertShellReferencesOnlyVerified(html: string, verified: Readon
           (tag.attributes.size === 2 &&
             name === 'viewport' &&
             content ===
-              'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content') ||
+              'width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content') ||
           (tag.attributes.size === 2 && name === 'theme-color' && content === '#0b0c0e');
         if (!valid) throw new Error('Shell enthält unerwartete Meta-Daten.');
         break;

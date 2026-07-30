@@ -12,12 +12,17 @@ export * from '../src/crypto/index';
 export * from '../src/crypto/sodium';
 export * from '../src/lib/session';
 export {
+  createFreshPreKeyState,
+  loadOrCreatePreKeys,
+  serializePreKeys,
   findSignedPreKey,
   findOneTimePreKey,
   consumeOneTimePreKey,
   currentBundle,
   ownSpkPublic,
 } from '../src/lib/prekeys';
+export { loadOrCreateIdentity } from '../src/lib/identity';
+export { loadDeviceNames } from '../src/lib/devicenames';
 export {
   startLinkOnN,
   offerReceivedOnN,
@@ -65,6 +70,11 @@ export {
   hasMessage,
   recallRegistryKey,
   recallRegistryHas,
+  isValidRecallMid,
+  normalizeRecallRegistry,
+  addRecallRegistryEntry,
+  MAX_RECALLS_PER_SCOPE,
+  MAX_RECALLED_MIDS,
   migrateLegacyRecalledMids,
   moveRecallRegistryRoom,
   applyRecallRegistry,
@@ -169,10 +179,22 @@ export {
   permitsGroupReadd,
 } from '../src/lib/groupTombstones';
 export { encSection, decSection, backupMetaAad, backupAttAad } from '../src/lib/backupSections';
-export { exportBackup, importBackup, validateBackupManifest } from '../src/lib/backup';
+export {
+  exportBackup,
+  importBackup,
+  validateBackupManifest,
+  regenerateBackupCryptoForRestore,
+  sanitizeContactForRestore,
+  remapDeviceNamesForRestore,
+  LinkedDeviceBackupUnsupportedError,
+} from '../src/lib/backup';
 export { encryptBlob, decryptBlob, BLOB_CHUNK } from '../src/crypto/blob';
 export { backgroundLockExpired } from '../src/lib/backgroundLock';
 export { createVaultRuntimeLockManager } from '../src/lib/runtimeLock';
+export {
+  beginVaultRuntimeQuiesce,
+  registerVaultRuntimeQuiescer,
+} from '../src/lib/runtimeQuiesce';
 export { requireExactBootstrapDelivery } from '../src/lib/bootstrap';
 export { consumeExactByteStream, ExactStreamLengthError } from '../src/lib/exactStream';
 export {
@@ -192,8 +214,10 @@ export {
 } from '../src/lib/r2Descriptor';
 export {
   PRECACHE_PREFIX,
-  findInAnyScytalePrecache,
   isScytalePrecache,
+  matchVerifiedManifestAsset,
+  matchVerifiedShell,
+  navigationFallbackResponse,
   populateBuildPrecache,
   versionedPrecacheName,
 } from '../src/lib/swPrecache';
@@ -201,9 +225,18 @@ export {
   AUTO_RECEIVE_CONTACT_CAP_BYTES,
   MIN_ORIGIN_HEADROOM_BYTES,
   MIN_ORIGIN_HEADROOM_FRACTION,
+  RECV_CHUNK_RECORD_OVERHEAD_BYTES,
+  RECV_TRANSFER_FIXED_OVERHEAD_BYTES,
+  attachmentRecvReservationBytes,
   automaticRecvReservationBytes,
   hasOriginStorageHeadroom,
   mayAutoReceiveAttachment,
   remainingRecvReservationBytes,
   storedReceivedAttachmentBytes,
 } from '../src/lib/storageQuota';
+export { createKeyedSerialQueue } from '../src/lib/keyedQueue';
+export {
+  BUG_REPORT_CATEGORIES,
+  isBugReportCategory,
+  bugReportWebhookPayload,
+} from '../worker/bug-report';

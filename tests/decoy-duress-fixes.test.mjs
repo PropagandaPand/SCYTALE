@@ -86,14 +86,37 @@ ok('HIGH-1: Promotion räumt einen moot Removal-Marker (kein Deadlock)',
 
 // HIGH-3: the populate ENTER/EXIT drain the inbox to a fixed point before the switch; every inbox
 // task is pinned to its origin account so any switch under it makes DB ops fail closed.
-ok('HIGH-3: doPopulate drainiert die Inbox vor onEnterDecoy',
-  msg.indexOf('await quiesceInbox();') < msg.indexOf('onEnterDecoy?.(decoyDek)') &&
+const populateSource = msg.slice(
+  msg.indexOf('async function doPopulate()'),
+  msg.indexOf('/** Quiesce every relay', msg.indexOf('async function doPopulate()')),
+);
+ok('HIGH-3: doPopulate ist vor Argon2 registriert und prüft einen Lock vor dem Wechsel',
+  populateSource.indexOf('runTrackedRuntimeOperation(async (signal, trackedOperation)') <
+    populateSource.indexOf('openDecoyForPopulate(populatePass)') &&
+  (populateSource.match(/if \(signal\.aborted\) throw new MessengerInactiveError\(\);/g) || []).length === 2);
+ok('HIGH-3: doPopulate drainiert ohne Self-Join und prüft Abort direkt vor onEnterDecoy',
+  populateSource.indexOf('await quiesceForUnmount(trackedOperation);') <
+    populateSource.lastIndexOf('if (signal.aborted)') &&
+  populateSource.lastIndexOf('if (signal.aborted)') <
+    populateSource.indexOf('onEnterDecoy?.(decoyDek)') &&
   msg.includes('async function quiesceInbox'));
+const quiesceSource = msg.slice(
+  msg.indexOf('async function quiesceForUnmount('),
+  msg.indexOf('/** Leave the decoy', msg.indexOf('async function quiesceForUnmount(')),
+);
+ok('HIGH-3: nur der absichtliche Switch ist ausgenommen; externer Lock abortet und joint ihn',
+  quiesceSource.includes('if (operation === exemptOperation) continue;') &&
+  quiesceSource.includes('(operation) => operation !== exemptOperation') &&
+  quiesceSource.includes('operation.controller.abort()') &&
+  quiesceSource.includes('operation.settled.catch(() => undefined)'));
 ok('HIGH-3: handleExitDecoy drainiert vor onExitDecoy',
   msg.includes('async function handleExitDecoy') &&
-  msg.indexOf('await quiesceInbox();\n    onExitDecoy?.();') > 0);
+  msg.indexOf('await quiesceForUnmount(exemptOperation);\n    onExitDecoy?.();') > 0);
 ok('HIGH-3: quiesceInbox drainiert bis zum Fixpunkt (Tail-Tasks)',
-  msg.includes('} while (inboxQueueRef.current !== pending);'));
+  msg.includes('for (;;) {\n      const inboxTail = inboxQueueRef.current;') &&
+  msg.includes('messageMutationQueueRef.current.drain()') &&
+  msg.includes('groupMutationRetryRef.current === groupRetry') &&
+  msg.includes('messageMutationQueueRef.current.pending() === 0'));
 ok('HIGH-3: Inbox-Tasks sind an ihr Herkunfts-Konto gepinnt (fail-closed bei Switch)',
   msg.includes('pinTaskAccount(origin)') &&
   msg.includes('clearTaskAccount()') &&

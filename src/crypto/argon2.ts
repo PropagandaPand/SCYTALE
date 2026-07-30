@@ -28,11 +28,11 @@ export const DEFAULT_ARGON2: Argon2Params = {
 
 /**
  * Hard floor enforced in code. The vault header (which carries the params) is
- * NOT authenticated before the DEK is unwrapped, so an attacker who can *write*
- * the vault could otherwise set m=8 MiB, t=1 to make offline cracking cheap.
- * We never derive with weaker parameters than this, whatever the header says —
- * it matches the lowest value the calibrator will ever pick, so legitimate
- * vaults are unaffected.
+ * not authenticated until the DEK unwrap succeeds. Mutating the parameters of
+ * an existing header cannot make that header easier to crack (the unwrap would
+ * simply fail), but accepting policy-bypassing values from imported/crafted
+ * envelopes would make the KDF contract ambiguous. The floor matches the
+ * lightest value the calibrator writes, so legitimate vaults are unaffected.
  */
 const MIN_ARGON2: Argon2Params = { memorySize: 65536, iterations: 3, parallelism: 1 };
 
@@ -40,23 +40,30 @@ const MIN_ARGON2: Argon2Params = { memorySize: 65536, iterations: 3, parallelism
  * Ceilings, not just floors.
  *
  * The header is not authenticated before it is used to derive the KEK, so the
- * same attacker the floor defends against can also push the parameters UP:
- * memorySize: 2_000_000 (≈2 GiB) makes the derivation OOM on every attempt and
- * the vault permanently unopenable — a floor-only clamp turns a weakening
- * attack into a destruction attack. The caps sit well above anything we ever
- * write ourselves, so a legitimate header is never touched.
+ * same attacker the floor defends against can also push the parameters UP. The
+ * app currently writes only t=3, p=1 and at most 256 MiB (the calibrator may
+ * choose less), so accepting anything higher adds no compatibility and only
+ * creates a pre-authentication CPU/RAM denial of service.
  */
-const MAX_ARGON2: Argon2Params = { memorySize: 1048576, iterations: 16, parallelism: 4 };
+const MAX_ARGON2: Argon2Params = {
+  memorySize: DEFAULT_ARGON2.memorySize,
+  iterations: DEFAULT_ARGON2.iterations,
+  parallelism: DEFAULT_ARGON2.parallelism,
+};
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.min(Math.max(Number.isSafeInteger(v) ? v : lo, lo), hi);
 }
 
-function withFloor(p: Argon2Params): Argon2Params {
+/** Normalize untrusted, pre-authentication KDF parameters without 32-bit
+ * coercions. Bitwise coercion is deliberately forbidden here: values above
+ * 2^31 wrap and could turn an intended ceiling into an attacker-chosen low
+ * value. Exported so the boundary can be tested without allocating Argon2 RAM. */
+export function boundedArgon2Params(p: Argon2Params): Argon2Params {
   return {
-    memorySize: clamp(p.memorySize | 0, MIN_ARGON2.memorySize, MAX_ARGON2.memorySize),
-    iterations: clamp(p.iterations | 0, MIN_ARGON2.iterations, MAX_ARGON2.iterations),
-    parallelism: clamp(p.parallelism | 0, MIN_ARGON2.parallelism, MAX_ARGON2.parallelism),
+    memorySize: clamp(p.memorySize, MIN_ARGON2.memorySize, MAX_ARGON2.memorySize),
+    iterations: clamp(p.iterations, MIN_ARGON2.iterations, MAX_ARGON2.iterations),
+    parallelism: clamp(p.parallelism, MIN_ARGON2.parallelism, MAX_ARGON2.parallelism),
   };
 }
 
@@ -77,7 +84,7 @@ export async function deriveKekBytes(
   };
   const argon2id = wasm.argon2id ?? wasm.default?.argon2id;
   if (!argon2id) throw new Error('hash-wasm konnte nicht geladen werden.');
-  const p = withFloor(params); // ignore any weakened header params
+  const p = boundedArgon2Params(params);
   const out = await argon2id({
     password: passphrase,
     salt,

@@ -34,15 +34,15 @@ passphrase --Argon2id--> KEK (non-extractable, RAM only)
 KEK --AES-256-GCM wrap/unwrap--> DEK (non-extractable, random)
 DEK --AES-256-GCM--> every record on disk
 ```
-- **Argon2id** (memory-hard, GPU/side-channel resistant): 256 MiB, 3 passes, 32-byte
-  output; a random 16-byte salt per vault (in the clear, not a secret). On-device
-  calibration falls back to 128/64 MiB; the parameters live in the vault header. A
+- **Argon2id** (memory-hard, GPU/side-channel resistant): currently 256 MiB, 3 passes,
+  32-byte output; a random 16-byte salt per vault (in the clear, not a secret). A
+  128/64 MiB calibration helper exists but the current creation flow deliberately does
+  not invoke it or silently lower the cost; the parameters live in the vault header. A
   **code-side floor** (`MIN_ARGON2` = 64 MiB / t=3): the header is not authenticated
   before the DEK unwrap, so weakened parameters (m=8 MiB, t=1) are **ignored** — never
-  derived below the floor. **And a ceiling** (`MAX_ARGON2` = 1 GiB / t=16): the same
-  unauthenticated header would otherwise permit `memorySize: 2000000`, which aborts every
-  derivation via OOM and makes the vault **permanently unopenable**. A floor alone turns a
-  weakening attack into a destruction attack.
+  derived below the floor. The ceiling is the strongest set this app actually writes
+  (`MAX_ARGON2` = 256 MiB / t=3 / p=1); larger unauthenticated values add no compatibility
+  but could abort every derivation via OOM and make the vault **permanently unopenable**.
 - **KEK** imported with `wrapKey`/`unwrapKey` only; raw bytes overwritten with `fill(0)`
   afterwards.
 - **DEK**: a random AES-256-GCM key, non-extractable. Changing the passphrase only re-wraps
@@ -63,9 +63,11 @@ is **worthless without this device**, even with the correct passphrase.
 > **Caveat — device binding assumes OS full-disk encryption (audit N-5).** "Non-extractable"
 > is a **JavaScript-runtime visibility** property, not at-rest encryption of the key bytes. On
 > Chromium/Firefox the raw bytes of an IndexedDB `CryptoKey` live in the browser profile on
-> disk, protected only by OS file permissions / OS full-disk encryption. Device binding is a
-> strong barrier against the **XSS / logical exfiltration** vector it was designed for (no
-> `CryptoKey` can be read out from JavaScript). But on a **seized device without OS-FDE**, a
+> disk, protected only by OS file permissions / OS full-disk encryption. Device binding protects
+> a **record-only/logical copy** that omits the browser's device-key object; it is not an XSS
+> boundary. Same-origin code can ask the non-extractable key to decrypt the binding secret and
+> exfiltrate that plaintext even though it cannot export the key bytes. On a **seized device
+> without OS-FDE**, a
 > forensic examiner can read the device-key bytes straight from the profile (LevelDB), decrypt
 > `deviceWrap.ciphertext` → `bindingSecret`, and the binding contributes nothing — residual
 > protection then collapses to **passphrase + Argon2id** alone. Enable full-disk encryption
@@ -622,6 +624,14 @@ find dist/assets -type f -name '*.js' -exec sha256sum {} \; | sort
 ```
 If the hashes match, the running code equals the audited source. (Precondition: a deterministic build — same
 Node/npm version.)
+
+The normal `npm run deploy` is fail-closed: it accepts only a clean, attached
+branch whose `HEAD` exactly matches both its local upstream and the current
+read-only `git ls-remote` result. R2 lifecycle changes are deliberately excluded
+from that command and require the separate, explicit `npm run cf:lifecycle:apply`
+operation; a failed Worker deployment therefore cannot
+silently pre-apply a new ciphertext-deletion policy. The supported
+`scytale.illogical.workers.dev` origin remains enabled.
 
 ---
 

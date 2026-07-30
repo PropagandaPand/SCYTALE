@@ -101,7 +101,7 @@ export async function loadContacts(dek: CryptoKey): Promise<Contact[]> {
       // the dual-regime migration window (Stage 3c) that is a LIKELY, not
       // theoretical, failure, and a contact that vanishes with no trace is
       // exactly the diagnosability gap HandshakeMismatchError was named to close.
-      console.error(`[store] Kontakt ${id.slice(0, 12)}… nicht ladbar (AAD/Format):`, (e as Error).message);
+      console.error('[store] Kontakt nicht ladbar (AAD/Format):', (e as Error).name);
     }
   }
   return out;

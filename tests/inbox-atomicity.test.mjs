@@ -55,7 +55,7 @@ ok('Bootstrap-Profil wird erst nach erfolgreicher Persistenz im RAM veröffentli
 ok('Bootstrap-History mutiert keine Live-Liste vor erfolgreicher Persistenz',
   bootstrap.includes('const next = [...base]') &&
   bootstrap.indexOf('await saveMessages(dek, room, next)') <
-    bootstrap.indexOf('messagesRef.current[room] = added ? next : base') &&
+    bootstrap.indexOf('messagesRef.current[room] = next') &&
   !bootstrap.includes('arr.push('));
 ok('Bootstrap-applied-Marker bleibt nach allen Profil-/History-Schreibvorgängen',
   bootstrap.lastIndexOf('await saveMessages') <

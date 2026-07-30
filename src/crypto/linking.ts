@@ -42,6 +42,7 @@ import {
   verifyDeviceList,
   encodeDeviceList,
   decodeDeviceList,
+  MAX_DEVICE_LIST_DEVICES,
   type DeviceList,
   type DeviceEntry,
   type SignedPreKeyPublic,
@@ -255,6 +256,11 @@ export async function createLinkGrant(
       },
       newList: currentList,
     };
+  }
+  if (currentList.devices.length >= MAX_DEVICE_LIST_DEVICES) {
+    throw new Error(
+      `Maximal ${MAX_DEVICE_LIST_DEVICES} Geräte können mit einer Identität verknüpft werden.`,
+    );
   }
   const deviceCert = await signDeviceCert(masterPriv, epoch, req.deviceSignPub, req.deviceDhPub);
   const entry: DeviceEntry = {

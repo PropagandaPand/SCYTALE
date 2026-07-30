@@ -245,6 +245,9 @@ async function decodeInitialHeaderChecked(x: unknown): Promise<InitialMessageHea
 //     | hasOpk(1) | [opkId(4) | opkPub(32)]
 
 const BUNDLE_VERSION = 2;
+const BUNDLE_BASE_LENGTH = 1 + 32 + 4 + 64 + 32 + 32 + 4 + 32 + 64 + 1;
+const BUNDLE_OPK_LENGTH = BUNDLE_BASE_LENGTH + 4 + 32;
+const BUNDLE_OPK_FLAG_OFFSET = BUNDLE_BASE_LENGTH - 1;
 
 export async function encodeBundle(bundle: PreKeyBundle): Promise<string> {
   const s = await getSodium();
@@ -283,9 +286,19 @@ export async function encodeBundle(bundle: PreKeyBundle): Promise<string> {
 export async function decodeBundle(token: string): Promise<PreKeyBundle> {
   const s = await getSodium();
   const buf = new Uint8Array(s.from_base64(token.trim(), s.base64_variants.URLSAFE_NO_PADDING));
+  if (buf.length === 0) throw new Error('Ungültiges Bundle-Format.');
+  if (buf[0] !== BUNDLE_VERSION) throw new Error('Unbekanntes Bundle-Format (neue Version nötig).');
+  if (buf.length !== BUNDLE_BASE_LENGTH && buf.length !== BUNDLE_OPK_LENGTH) {
+    throw new Error('Ungültiges Bundle-Format.');
+  }
+  const opkFlag = buf[BUNDLE_OPK_FLAG_OFFSET];
+  if (opkFlag !== 0 && opkFlag !== 1) throw new Error('Ungültiges Bundle-Format.');
+  const expectedLength = opkFlag === 1 ? BUNDLE_OPK_LENGTH : BUNDLE_BASE_LENGTH;
+  if (buf.length !== expectedLength) throw new Error('Ungültiges Bundle-Format.');
+
   const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   let o = 0;
-  if (buf[o++] !== BUNDLE_VERSION) throw new Error('Unbekanntes Bundle-Format (neue Version nötig).');
+  o += 1;
   const take = (n: number): Bytes => {
     const r = buf.slice(o, o + n);
     o += n;
@@ -301,13 +314,14 @@ export async function decodeBundle(token: string): Promise<PreKeyBundle> {
   o += 4;
   const spkPub = take(32);
   const spkSig = take(64);
-  const hasOpk = buf[o++];
+  o += 1;
   let oneTimePreKey: { id: number; pub: Bytes } | undefined;
-  if (hasOpk) {
+  if (opkFlag === 1) {
     const opkId = view.getUint32(o, false);
     o += 4;
     oneTimePreKey = { id: opkId, pub: take(32) };
   }
+  if (o !== buf.length) throw new Error('Ungültiges Bundle-Format.');
   return {
     masterPub,
     epoch,

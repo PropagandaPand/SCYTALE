@@ -7,13 +7,21 @@
  *   state, message history, contacts)
  *
  * Why the envelope: changing the passphrase only re-wraps the DEK — we never
- * have to re-encrypt the whole database. And because the DEK is imported as a
- * NON-EXTRACTABLE CryptoKey, its raw bytes never live in JS-reachable memory,
- * so an XSS foothold cannot exfiltrate the key.
+ * have to re-encrypt the whole database. The working DEK is imported as a
+ * NON-EXTRACTABLE CryptoKey, so ordinary JavaScript cannot export its raw bytes.
+ * This is not an XSS boundary: hostile same-origin code in an unlocked runtime
+ * can still use the CryptoKey as an encrypt/decrypt oracle and read plaintext.
  */
-import { deriveKekBytes, DEFAULT_ARGON2, type Argon2Params } from './argon2';
+import {
+  boundedArgon2Params,
+  deriveKekBytes,
+  DEFAULT_ARGON2,
+  type Argon2Params,
+} from './argon2';
 
 const IV_LEN = 12; // 96-bit nonce, the GCM sweet spot
+const SALT_LEN = 16;
+const WRAPPED_DEK_LEN = 32 + 16; // raw AES-256 key + GCM tag
 
 /** Persisted, non-secret vault header. Salt + IV + wrapped DEK are safe on disk. */
 export interface VaultHeader {
@@ -80,6 +88,30 @@ export class VaultCorruptError extends Error {
   }
 }
 
+function validateCoreHeader(header: VaultHeader): void {
+  if (!header || header.version !== 1) throw new VaultCorruptError('Version');
+  if (!(header.salt instanceof Uint8Array) || header.salt.length !== SALT_LEN) {
+    throw new VaultCorruptError('Salt');
+  }
+  if (!(header.wrapIv instanceof Uint8Array) || header.wrapIv.length !== IV_LEN) {
+    throw new VaultCorruptError('IV');
+  }
+  if (
+    !(header.wrappedDek instanceof Uint8Array) ||
+    header.wrappedDek.length !== WRAPPED_DEK_LEN
+  ) {
+    throw new VaultCorruptError('Wrapped-DEK');
+  }
+  if (
+    !header.argon2 ||
+    !Number.isSafeInteger(header.argon2.memorySize) ||
+    !Number.isSafeInteger(header.argon2.iterations) ||
+    !Number.isSafeInteger(header.argon2.parallelism)
+  ) {
+    throw new VaultCorruptError('Argon2-Parameter');
+  }
+}
+
 async function importKek(kekBytes: Uint8Array<ArrayBuffer>): Promise<CryptoKey> {
   const kek = await crypto.subtle.importKey(
     'raw',
@@ -101,8 +133,9 @@ export async function createVault(
   passphrase: string,
   argon2: Argon2Params = DEFAULT_ARGON2,
 ): Promise<{ header: VaultHeader; dek: CryptoKey }> {
+  const boundedArgon2 = boundedArgon2Params(argon2);
   const salt = crypto.getRandomValues(new Uint8Array(16));
-  const kekBytes = await deriveKekBytes(passphrase, salt, argon2);
+  const kekBytes = await deriveKekBytes(passphrase, salt, boundedArgon2);
   const kek = await importKek(kekBytes);
 
   // Generate the DEK extractable ONLY so we can wrap it once; the working copy
@@ -116,7 +149,13 @@ export async function createVault(
     await crypto.subtle.wrapKey('raw', seedDek, kek, { name: 'AES-GCM', iv: wrapIv }),
   );
 
-  const header: VaultHeader = { version: 1, argon2, salt, wrapIv, wrappedDek };
+  const header: VaultHeader = {
+    version: 1,
+    argon2: boundedArgon2,
+    salt,
+    wrapIv,
+    wrappedDek,
+  };
   const dek = await unwrapDek(kek, header); // non-extractable working key
   return { header, dek };
 }
@@ -141,6 +180,7 @@ async function unwrapDek(kek: CryptoKey, header: VaultHeader): Promise<CryptoKey
 
 /** Re-derive the passphrase KEK for an existing header (for re-wrap operations). */
 export async function deriveHeaderKek(passphrase: string, header: VaultHeader): Promise<CryptoKey> {
+  validateCoreHeader(header);
   const kekBytes = await deriveKekBytes(passphrase, header.salt, header.argon2);
   return importKek(kekBytes);
 }
@@ -210,10 +250,7 @@ export async function unwrapDekWithPrf(
 export async function unlockVault(passphrase: string, header: VaultHeader): Promise<CryptoKey> {
   // Separate "this record is broken" from "this passphrase is wrong" BEFORE the
   // expensive derivation — the two need different actions from the user.
-  if (!header || !header.salt || header.salt.length < 16) throw new VaultCorruptError('Salt');
-  if (!header.wrapIv || header.wrapIv.length !== IV_LEN) throw new VaultCorruptError('IV');
-  if (!header.wrappedDek || header.wrappedDek.length < 16) throw new VaultCorruptError('Wrapped-DEK');
-  if (!header.argon2 || typeof header.argon2.memorySize !== 'number') throw new VaultCorruptError('Argon2-Parameter');
+  validateCoreHeader(header);
 
   const kekBytes = await deriveKekBytes(passphrase, header.salt, header.argon2);
   const kek = await importKek(kekBytes);

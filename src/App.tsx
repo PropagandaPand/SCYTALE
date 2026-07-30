@@ -29,8 +29,10 @@ import { backgroundLockExpired } from './lib/backgroundLock';
 import {
   acquireVaultRuntimeLock,
   releaseVaultRuntimeLock,
+  releaseVaultRuntimeLockAfter,
   vaultRuntimeLockHeld,
 } from './lib/runtimeLock';
+import { beginVaultRuntimeQuiesce } from './lib/runtimeQuiesce';
 import { t, useLang } from './lib/i18n';
 import { Messenger } from './Messenger';
 import { BootSplash } from './BootSplash';
@@ -94,6 +96,7 @@ export function App() {
   // Invalidates an in-flight Argon2/WebAuthn result across hide/freeze/resume.
   const lifecycleEpochRef = useRef(0);
   const duressReloadingRef = useRef(false);
+  const lockQuiescenceRef = useRef<Promise<void>>(Promise.resolve());
   // Live mirror of `dek` for the duress-lockdown listeners (a ref reads the current value; a closure
   // over state would go stale). Used to gate the resume-time lockdown: only an OPEN vault has
   // in-memory keys worth protecting. See the lockdown effect.
@@ -159,22 +162,48 @@ export function App() {
       return;
     }
     let alive = true;
+    const expectedLifecycleEpoch = lifecycleEpochRef.current;
     void (async () => {
-      const [avail, enrolled, duressArmed] = await Promise.all([
-        biometricAvailable(),
-        biometricEnrolled(),
-        duressEnabled(),
-      ]);
-      if (!alive) return;
-      const can = avail && enrolled;
-      setCanBiometric(can);
-      // When a duress password is armed, do NOT auto-launch Face ID / Touch ID: a coerced
-      // biometric would open the REAL vault before the user could type the duress word. The
-      // passphrase field must be the first thing reachable. The manual biometric button stays
-      // available for a voluntary unlock.
-      if (can && !duressArmed && !autoBioTriedRef.current) {
-        autoBioTriedRef.current = true;
-        void unlockBiometric();
+      for (;;) {
+        // A decoy runtime may still be draining and repointing the global DB
+        // after the lock screen is already visible. Read both header-derived
+        // policy bits only after that exact quiescence generation completes.
+        const quiescence = lockQuiescenceRef.current;
+        try {
+          await quiescence;
+        } catch {
+          return;
+        }
+        if (
+          !alive ||
+          lifecycleEpochRef.current !== expectedLifecycleEpoch
+        ) return;
+
+        const [avail, enrolled, duressArmed] = await Promise.all([
+          biometricAvailable(),
+          biometricEnrolled(),
+          duressEnabled(),
+        ]);
+        if (
+          !alive ||
+          lifecycleEpochRef.current !== expectedLifecycleEpoch
+        ) return;
+        // A second lock/reset may have replaced the promise while the header was
+        // being read. Retry against its database generation instead of publishing
+        // stale biometric/duress policy and never rely on a one-shot snapshot.
+        if (lockQuiescenceRef.current !== quiescence) continue;
+
+        const can = avail && enrolled;
+        setCanBiometric(can);
+        // When a duress password is armed, do NOT auto-launch Face ID / Touch ID: a coerced
+        // biometric would open the REAL vault before the user could type the duress word. The
+        // passphrase field must be the first thing reachable. The manual biometric button stays
+        // available for a voluntary unlock.
+        if (can && !duressArmed && !autoBioTriedRef.current) {
+          autoBioTriedRef.current = true;
+          void unlockBiometric();
+        }
+        return;
       }
     })();
     return () => {
@@ -302,6 +331,10 @@ export function App() {
     say(t('Warte auf Face ID / Touch ID…'));
     const lifecycleEpoch = lifecycleEpochRef.current;
     try {
+      // A prior real↔decoy runtime may still be draining and resetting the
+      // active database behind the already-visible lock screen. Never ask
+      // WebAuthn to unwrap against that outgoing database generation.
+      await lockQuiescenceRef.current;
       const newDek = await unlockWithBiometric();
       // Biometric unlocks cannot be the duress trigger, so ownership is acquired
       // only after successful local authentication and before Messenger mounts.
@@ -340,6 +373,10 @@ export function App() {
     const lifecycleEpoch = lifecycleEpochRef.current;
     let runtimeLockAcquired = false;
     try {
+      // The privacy screen appears immediately, but an outgoing decoy runtime
+      // may still be aborting a backup/storage operation. Authentication must
+      // wait until its quiescence promise has safely rebound the real database.
+      await lockQuiescenceRef.current;
       // On a duress passphrase, unlockBoundVault has already crypto-erased the real account and
       // switched onto the decoy DB; the returned DEK opens the decoy. Externally this is a normal
       // unlock into a plausible account — nothing signals that duress was used.
@@ -392,6 +429,12 @@ export function App() {
   }
 
   const lock = useCallback(() => {
+    // Capture and invalidate the mounted Messenger before changing the React
+    // tree. The privacy UI locks immediately; only Web-Lock release waits.
+    const messengerQuiescence = beginVaultRuntimeQuiesce().catch(
+      () => undefined,
+    );
+    lockQuiescenceRef.current = messengerQuiescence;
     switchEpochRef.current++;
     if (populatingDecoy || realDekRef.current) {
       // A populate session that got auto-locked returns to the REAL account: reset the active DB to
@@ -402,7 +445,14 @@ export function App() {
       // passphrase.)
       realDekRef.current = null;
       setPopulatingDecoy(false);
-      void switchVaultDb('scytale');
+      // Do not repoint the global DB while an aborted import/export is still
+      // unwinding: its cleanup would otherwise cancel a restore or write a
+      // staged record in the REAL database. Keep the lock UI immediate, but
+      // make database reset part of the promise that gates both Web-Lock release
+      // and every subsequent unlock attempt.
+      lockQuiescenceRef.current = messengerQuiescence.then(() =>
+        switchVaultDb('scytale'),
+      );
     }
     setPendingSwitch(null);
     setDek(null);
@@ -419,7 +469,9 @@ export function App() {
   // retain ownership across real ↔ decoy transitions.
   useEffect(() => {
     if (phase === 'open' && dek) return;
-    if (vaultRuntimeLockHeld()) releaseVaultRuntimeLock();
+    if (vaultRuntimeLockHeld()) {
+      releaseVaultRuntimeLockAfter(lockQuiescenceRef.current);
+    }
   }, [phase, dek]);
 
   // Keep dekRef in step with the open key for the lockdown listeners below.
@@ -439,10 +491,12 @@ export function App() {
       lifecycleEpochRef.current++;
       lock();
       window.setTimeout(() => {
-        releaseVaultRuntimeLock();
-        void switchVaultDb('scytale')
-          .catch(() => undefined)
-          .finally(() => location.reload());
+        void lockQuiescenceRef.current.finally(() => {
+          releaseVaultRuntimeLock();
+          void switchVaultDb('scytale')
+            .catch(() => undefined)
+            .finally(() => location.reload());
+        });
       }, 0);
     };
     const isForeignLockdown = (data: unknown) => {
@@ -490,17 +544,24 @@ export function App() {
     };
   }, [lock]);
 
-  // A real component teardown / navigation releases ownership. Do not release
-  // directly on `pagehide`: the open-page lifecycle handler first calls lock()
-  // and the phase/dek effect releases after Messenger unmount; during a slow
-  // create/unlock, ownership must survive BFCache pagehide until the async path
-  // finishes and its lifecycle-epoch guard rejects the stale result.
+  // Navigation must NOT resolve our Web-Lock hold from `beforeunload`: that event
+  // runs before the document and its outstanding IndexedDB/WebCrypto work are
+  // gone, and navigation can still be cancelled. The browser releases Web Locks
+  // automatically when the document is destroyed. For a React-only teardown,
+  // explicitly join both any existing reset and the still-mounted Messenger.
   useEffect(() => {
-    const release = () => releaseVaultRuntimeLock();
-    window.addEventListener('beforeunload', release);
     return () => {
-      window.removeEventListener('beforeunload', release);
-      release();
+      const messengerQuiescence = beginVaultRuntimeQuiesce().catch(
+        () => undefined,
+      );
+      releaseVaultRuntimeLockAfter(
+        Promise.all([
+          // Promise.all must not short-circuit past the Messenger drain merely
+          // because an earlier DB reset failed.
+          lockQuiescenceRef.current.catch(() => undefined),
+          messengerQuiescence,
+        ]),
+      );
     };
   }, []);
 

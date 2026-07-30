@@ -42,7 +42,9 @@ ok('Receipt während IndexedDB-await erzwingt eine zweite persistierte Generatio
   append.includes('if (afterWrite !== toAppend)') &&
   append.includes('continue;'));
 ok('Status-Update ersetzt das Message-Array unveränderlich, damit Append-Races sichtbar bleiben',
-  status.includes('const next = [...arr]') &&
+  status.includes('const next = [...live]') &&
+  status.includes('next[liveIndex] = {') &&
+  !status.includes('live[liveIndex] =') &&
   !status.includes('arr[fi] =') &&
   !status.includes('arr[idx] ='));
 

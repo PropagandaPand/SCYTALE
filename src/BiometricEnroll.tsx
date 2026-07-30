@@ -10,7 +10,17 @@ import { tb } from './lib/tnodes';
  * biometric door and the passphrase both open the SAME vault. Prompts the
  * authenticator twice (register the credential, then evaluate PRF).
  */
-export function BiometricEnroll({ onDone, onClose }: { onDone: () => void; onClose: () => void }) {
+export function BiometricEnroll({
+  onDone,
+  onClose,
+  runRuntimeOperation,
+}: {
+  onDone: () => void;
+  onClose: () => void;
+  runRuntimeOperation: <T>(
+    operation: (signal: AbortSignal) => Promise<T>,
+  ) => Promise<T>;
+}) {
   const [pass, setPass] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
@@ -21,11 +31,24 @@ export function BiometricEnroll({ onDone, onClose }: { onDone: () => void; onClo
     setBusy(true);
     setErr('');
     try {
-      await enableBiometricUnlock(pass);
+      await runRuntimeOperation(async (signal) => {
+        if (signal.aborted) {
+          const error = new Error('Biometrie-Aktivierung abgebrochen.');
+          error.name = 'AbortError';
+          throw error;
+        }
+        await enableBiometricUnlock(pass);
+        if (signal.aborted) {
+          const error = new Error('Biometrie-Aktivierung abgebrochen.');
+          error.name = 'AbortError';
+          throw error;
+        }
+      });
       setPass('');
       onDone();
     } catch (e) {
       const x = e as { name?: string; message?: string };
+      if (x.name === 'AbortError') return;
       if (e instanceof WrongPassphraseError) setErr(t('Falsche Passphrase.'));
       else if (x.name === 'NotAllowedError') setErr(t('Abgebrochen — Face ID / Touch ID nicht bestätigt.'));
       else setErr(t('Aktivieren fehlgeschlagen: {msg}', { msg: x.message ?? String(e) }));

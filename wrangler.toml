@@ -90,3 +90,9 @@ simple = { limit = 5, period = 60 }
 [observability]
 enabled = true
 head_sampling_rate = 0.1
+
+# Invocation logs persist the complete request URL. Relay inbox ids and blob
+# capabilities live in URLs, so retain privacy-safe custom logs/metrics but do
+# not store automatic request metadata in Workers Logs.
+[observability.logs]
+invocation_logs = false

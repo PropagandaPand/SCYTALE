@@ -35,27 +35,25 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const appSource = readFileSync(join(root, 'src', 'App.tsx'), 'utf8');
 const cssSource = readFileSync(join(root, 'src', 'app.css'), 'utf8');
 const bootSplashSource = readFileSync(join(root, 'src', 'BootSplash.tsx'), 'utf8');
-// The boot splash is a tiny muted inline H.264 clip (dark background baked in) — no animation library,
-// no alpha video, no eval — so it plays natively on iOS and needs no CSP relaxation. Guard against a
-// regression to a heavy/CSP-breaking player (e.g. lottie's full expression build).
-ok('Boot-Splash ist ein stummes Inline-Video (iOS-nativ, keine Player-Lib, kein eval)',
-  /<video[\s\S]*?muted[\s\S]*?playsInline/.test(bootSplashSource) &&
-  bootSplashSource.includes('/bootSplash.mp4') &&
+const viteSource = readFileSync(join(root, 'vite.config.ts'), 'utf8');
+const bootSplashMarkup = bootSplashSource.slice(bootSplashSource.indexOf('return ('));
+// The boot splash is an ANIMATED WEBP rendered as an <img> (dark background baked in) — no animation
+// library, no eval, and crucially no media autoplay policy: an animated image plays on its own like a
+// GIF, so it animates even in iOS Low Power Mode, where a muted <video> is refused (play button /
+// instant skip). Guard against regressing to a <video> or to a CSP-breaking player (lottie full build).
+ok('Boot-Splash ist ein animiertes WebP als <img> (spielt wie ein GIF, kein Autoplay-Zwang, keine Lib)',
+  /<img[\s\S]*?bootSplash\.webp/.test(bootSplashMarkup) &&
+  !/<video/.test(bootSplashMarkup) &&
   !/lottie/i.test(bootSplashSource));
-// The splash overlay must never gate the security boot: it self-dismisses on ended, on error, on a
-// hard timeout, and honours prefers-reduced-motion (static poster, no autoplay).
-ok('Boot-Splash blockiert den Boot nie (ended/error/Timeout dismiss + prefers-reduced-motion)',
-  /onEnded=\{finish\}/.test(bootSplashSource) &&
-  /onError=\{finish\}/.test(bootSplashSource) &&
+// The splash overlay must never gate the security boot: it self-dismisses on a timeout, on an image
+// load error, and honours prefers-reduced-motion (static poster).
+ok('Boot-Splash blockiert den Boot nie (Timeout-dismiss + onError-Fallback + prefers-reduced-motion)',
   /setTimeout\(finish/.test(bootSplashSource) &&
+  /onError=\{finish\}/.test(bootSplashSource) &&
   bootSplashSource.includes('prefers-reduced-motion'));
-// Autoplay must be driven imperatively (the JSX `muted` attribute alone is unreliable and blocks iOS
-// inline autoplay → a native play button). Set the muted PROPERTY + call play(); if still blocked,
-// skip to the app rather than leaving a play button.
-ok('Boot-Splash erzwingt Autoplay imperativ (muted-Property + play(), sonst skip statt Play-Button)',
-  /\.muted = true/.test(bootSplashSource) &&
-  /\.play\(\)/.test(bootSplashSource) &&
-  /\.catch\(finish\)/.test(bootSplashSource));
+ok('Boot-Splash-WebP ist Teil des SHA-256-verifizierten Offline-Precaches',
+  /globPatterns:\s*\[[^\]]*\bwebp\b/.test(viteSource) &&
+  /globPatterns:\s*\[[^\]]*\bmp4\b/.test(viteSource));
 ok('App setzt den Curtain synchron im Lifecycle-Handler',
   appSource.includes("classList.add('privacy-curtain-on')"));
 ok('Hide/Freeze invalidiert auch laufende Argon2-/WebAuthn-Ergebnisse',
@@ -74,7 +72,7 @@ ok('Negativkontrolle: ungated promoteMarkerPresent()->lockdown im Resume-Handler
 ok('Curtain ist blickdicht und liegt über allen App-Overlays',
   /\.privacy-curtain\s*\{[\s\S]*?z-index:\s*10000[\s\S]*?background:\s*#0b0c0e/.test(cssSource));
 
-console.log('\n[PWA: wartender Worker besitzt einen privaten Build-Cache]');
+console.log('\n[PWA: wartender Worker besitzt einen versionierten Build-Cache]');
 const manifestA = [
   { url: '/assets/app-a.js', revision: null },
   { url: '/index.html', revision: 'html-a' },
@@ -112,8 +110,9 @@ const cleanShell =
   '<link rel="stylesheet" crossorigin href="/assets/app.css"></head>' +
   '<body><div id="app"></div></body></html>';
 const strictCsp =
-  "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; " +
-  "form-action 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; " +
+  "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; frame-src 'none'; " +
+  "form-action 'none'; script-src 'self' 'wasm-unsafe-eval'; script-src-attr 'none'; " +
+  "style-src 'self'; style-src-elem 'self'; style-src-attr 'unsafe-inline'; " +
   "img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src 'self'; " +
   "worker-src 'self'; manifest-src 'self'";
 const shellResponse = (body, csp = strictCsp) => {
@@ -295,13 +294,17 @@ ok('schwaches script-src-elem kann die geprüfte script-src-Regel nicht übersch
   !(await cspAllowsInstall(
     `${strictCsp}; script-src-elem https://evil.example`,
   )));
-ok('frame-src darf default-src nicht nachträglich für Phishing-Frames überschreiben',
+ok('frame-src bleibt explizit none und kann keine Phishing-Frames erlauben',
   !(await cspAllowsInstall(
-    `${strictCsp}; frame-src https://evil.example`,
+    strictCsp.replace("frame-src 'none'", 'frame-src https://evil.example'),
   )));
-ok('style-src-elem darf die geprüfte Style-Policy nicht nachträglich überschreiben',
+ok('style-src-elem bleibt self und kann keine fremden Style-Blöcke erlauben',
   !(await cspAllowsInstall(
-    `${strictCsp}; style-src-elem *`,
+    strictCsp.replace("style-src-elem 'self'", 'style-src-elem *'),
+  )));
+ok('Eventhandler bleiben über script-src-attr none gesperrt',
+  !(await cspAllowsInstall(
+    strictCsp.replace("script-src-attr 'none'", "script-src-attr 'unsafe-inline'"),
   )));
 ok('striktes script-src allein reicht bei schwacher Form/Object/Base-Policy nicht',
   !(await cspAllowsInstall(
@@ -310,7 +313,7 @@ ok('striktes script-src allein reicht bei schwacher Form/Object/Base-Policy nich
     "img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src 'self'; " +
     "worker-src 'self'; manifest-src 'self'",
   )));
-ok('fehlende form-action/base-uri/frame-ancestors Direktiven werden fail-closed abgelehnt',
+ok('fehlende form-action/base-uri/frame-ancestors/frame-src Direktiven werden fail-closed abgelehnt',
   !(await cspAllowsInstall(
     "default-src 'self'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval'; " +
     "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; " +
@@ -689,8 +692,16 @@ const attachmentSource = readFileSync(join(root, 'src', 'Attachment.tsx'), 'utf8
 const attachmentStoreSource = readFileSync(join(root, 'src', 'lib', 'attachments.ts'), 'utf8');
 ok('Service Worker nutzt den versionierten Namen tatsächlich',
   swSource.includes('versionedPrecacheName(__BUILD_HASH__, manifest)'));
-ok('fehlgeschlagener Install löscht den privaten Kandidaten und wirft weiter',
+ok('fehlgeschlagener Install löscht den versionierten Kandidaten und wirft weiter',
   /caches\.delete\(cacheName\)[\s\S]*?throw error/.test(swSource));
+const activateHandler = swSource.slice(
+  swSource.indexOf("sw.addEventListener('activate'"),
+  swSource.indexOf('// Serve the active worker'),
+);
+ok('wartender Cache wird unmittelbar vor Aktivierung vollständig erneut authentifiziert',
+  /matchVerifiedShell\(cache, manifest\)/.test(activateHandler) &&
+  /matchVerifiedManifestAsset\(cache, request, entry\)/.test(activateHandler) &&
+  activateHandler.indexOf('matchVerifiedManifestAsset') < activateHandler.indexOf('clients.claim'));
 // The runtime fetch handler is the fleet's trust boundary: it must serve only cached, verified bytes
 // and NEVER fall through to the live network (a compromised deploy could otherwise inject script).
 // The old assertion was a lax `script ... cacheUnavailable` regex that stayed green even if a fetch()
@@ -701,12 +712,16 @@ const fetchHandler = swSource.slice(
 );
 ok('SW-fetch-Handler ruft zur Laufzeit NIE fetch() — kein Live-Netz für Shell/Assets',
   fetchHandler.length > 0 && !/\bfetch\s*\(/.test(fetchHandler));
-ok('Executable-Miss: Geschwister-Precache, sonst fail-closed (kein Netz-Fallthrough)',
-  /findInAnyScytalePrecache\(req\)\) \?\? cacheUnavailable\(\)/.test(fetchHandler) &&
+ok('Executable-Miss fällt direkt fail-closed (kein Netz-/Geschwister-Cache-Fallthrough)',
+  /respondWith\(Promise\.resolve\(cacheUnavailable\(\)\)\)/.test(fetchHandler) &&
   /req\.destination === 'script' \|\| req\.destination === 'style' \|\| req\.destination === 'worker'/.test(fetchHandler));
-ok('Asset-Reihenfolge: aktiver Precache zuerst, dann Cross-Precache, dann fail-closed',
-  /cache\.match\(req\)\) \?\? \(await findInAnyScytalePrecache\(req\)\) \?\? cacheUnavailable\(\)/.test(fetchHandler));
-ok('Navigation → cachedShell() (nie Netz)', /req\.mode === 'navigate'[\s\S]*?cachedShell\(\)/.test(fetchHandler));
+ok('Manifest-Asset wird ausschließlich aus dem aktiven Cache gelesen und vor Ausgabe re-verifiziert',
+  /caches\.open\(await PRECACHE\)[\s\S]*?matchVerifiedManifestAsset\(cache, req, entry\)/.test(fetchHandler) &&
+  !swSource.includes('findInAnyScytalePrecache') &&
+  !/\bcaches\.keys\(\)/.test(fetchHandler));
+ok('Navigation → CSP-/strukturverifizierte aktive Shell (nie Netz)',
+  /req\.mode === 'navigate'[\s\S]*?cachedShell\(\)/.test(fetchHandler) &&
+  /matchVerifiedShell\(cache, manifest\)/.test(swSource));
 // NEGATIVE CONTROL: a network fallthrough in the miss path would flip the no-fetch invariant to FAIL.
 const handlerWithNetworkFallthrough = fetchHandler.replace('cacheUnavailable()', 'fetch(req)');
 ok('Negativkontrolle: ein fetch(req)-Fallthrough im Handler bräche die kein-Netz-Invariante',
@@ -716,65 +731,105 @@ ok('Update-Prompt wird nicht fälschlich als Origin-Trust-Boundary dokumentiert'
   swSource.includes('this prompt is release UX, not a trust boundary') &&
   !swSource.includes('must change ONLY when they explicitly accept'));
 
-// ── Behavioral: cross-precache lookup serves verified bytes, never the network ──
-// Drives the REAL findInAnyScytalePrecache against a stubbed Cache Storage. This is the extracted
-// core of the fetch handler's build-skew fix; a source regex can't prove it stays read-only.
-console.log('\n[SW: Cross-Precache-Lookup — Verhalten + kein Netz]');
+// ── Behavioral: page-writable CacheStorage is authenticated on every read ──
+console.log('\n[SW: aktiver Precache — Read-time-Integrität + kein Geschwister-Vertrauen]');
 {
-  const ACTIVE = 'scytale-precache-buildA-aaaa';
-  const SIBLING = 'scytale-precache-buildB-bbbb';
-  const CONTROL = 'scytale-control-v1'; // push-control cache — NOT a scytale precache
   const assetUrl = 'https://skytale.test/assets/app-abc123.js';
-  const mkResp = (label) => new Response(label, { status: 200 });
-  // A CacheStorage stub: caches.open is create-if-absent (matches the platform + our litter note).
-  const makeCaches = (store) => ({
-    keys: async () => [...store.keys()],
-    open: async (name) => {
-      if (!store.has(name)) store.set(name, new Map());
-      const entries = store.get(name);
-      return { match: async (r) => entries.get(typeof r === 'string' ? r : r.url) };
+  const assetBody = 'export{}';
+  const assetEntry = { url: '/assets/app-abc123.js', revision: await revision(assetBody) };
+  const reader = (response, expected = assetUrl) => ({
+    match: async (request) => {
+      const key = typeof request === 'string' ? request : request.url;
+      return key === expected ? response : undefined;
     },
   });
 
-  const savedCaches = globalThis.caches;
-  const savedFetch = globalThis.fetch;
-  let fetchCalls = 0;
-  globalThis.fetch = () => {
-    fetchCalls++;
-    throw new Error('findInAnyScytalePrecache darf NIE ins Live-Netz greifen');
-  };
+  const verified = await S.matchVerifiedManifestAsset(
+    reader(new Response(assetBody, { headers: { 'content-type': 'text/javascript' } })),
+    new Request(assetUrl),
+    assetEntry,
+  );
+  ok('unverändertes Asset aus dem aktiven Cache wird nach SHA-256-Prüfung ausgeliefert',
+    verified !== undefined && (await verified.text()) === assetBody);
 
-  // CONTROL is inserted FIRST and holds a poisoned copy at the same URL. If the lookup wrongly
-  // trusted non-precache caches we would get 'CONTROL-poison'; getting 'SIBLING-asset' proves the
-  // isScytalePrecache filter holds AND that a sibling build's precache satisfies an active-cache miss.
-  const store1 = new Map();
-  store1.set(CONTROL, new Map([[assetUrl, mkResp('CONTROL-poison')]]));
-  store1.set(SIBLING, new Map([[assetUrl, mkResp('SIBLING-asset')]]));
-  store1.set(ACTIVE, new Map()); // active precache present but lacks the concurrent build's hashed asset
-  globalThis.caches = makeCaches(store1);
-  const hit = await S.findInAnyScytalePrecache(new Request(assetUrl));
-  ok('Miss im aktiven Precache wird aus Geschwister-scytale-Precache bedient',
-    hit !== undefined && (await hit.text()) === 'SIBLING-asset');
+  const poisoned = await S.matchVerifiedManifestAsset(
+    reader(new Response('export{const stolen=true}', { headers: { 'content-type': 'text/javascript' } })),
+    new Request(assetUrl),
+    assetEntry,
+  );
+  ok('seitenbeschreibbarer aktiver Cache kann JavaScript nicht persistent vergiften',
+    poisoned === undefined);
 
-  // Asset present in NO scytale precache → undefined, and the network is never touched.
-  const store2 = new Map();
-  store2.set(ACTIVE, new Map());
-  store2.set(SIBLING, new Map());
-  globalThis.caches = makeCaches(store2);
-  const miss = await S.findInAnyScytalePrecache(new Request(assetUrl));
-  ok('Asset in keiner scytale-Precache → undefined (Caller fällt fail-closed)', miss === undefined);
-  ok('Negativkontrolle: Cross-Precache-Lookup ruft NIE fetch() (kein Live-Netz)', fetchCalls === 0);
+  const wrongMime = await S.matchVerifiedManifestAsset(
+    reader(new Response(assetBody, { headers: { 'content-type': 'text/html' } })),
+    new Request(assetUrl),
+    assetEntry,
+  );
+  ok('korrekter Hash mit falschem Script-MIME fällt ebenfalls fail-closed', wrongMime === undefined);
 
-  // NEGATIVE CONTROL: the very same asset present ONLY in the non-precache control cache stays a miss.
-  const store3 = new Map();
-  store3.set(CONTROL, new Map([[assetUrl, mkResp('CONTROL-poison')]]));
-  globalThis.caches = makeCaches(store3);
-  const controlOnly = await S.findInAnyScytalePrecache(new Request(assetUrl));
-  ok('Negativkontrolle: Asset nur im control-Cache → Miss (nur scytale-Precaches werden vertraut)',
-    controlOnly === undefined);
+  const webpBody = 'RIFF-test-WEBP';
+  const webpUrl = 'https://skytale.test/bootSplash.webp';
+  const webpEntry = { url: '/bootSplash.webp', revision: await revision(webpBody) };
+  const verifiedWebp = await S.matchVerifiedManifestAsset(
+    reader(new Response(webpBody, { headers: { 'content-type': 'image/webp' } }), webpUrl),
+    new Request(webpUrl),
+    webpEntry,
+  );
+  ok('animierter Boot-Splash wird mit exaktem image/webp-MIME akzeptiert',
+    verifiedWebp !== undefined);
+  const mp4Body = 'ftyp-test';
+  const mp4Url = 'https://skytale.test/bootSplash.mp4';
+  const mp4Entry = { url: '/bootSplash.mp4', revision: await revision(mp4Body) };
+  const verifiedMp4 = await S.matchVerifiedManifestAsset(
+    reader(new Response(mp4Body, { headers: { 'content-type': 'video/mp4' } }), mp4Url),
+    new Request(mp4Url),
+    mp4Entry,
+  );
+  ok('MP4-Buildassets bleiben mit exaktem video/mp4-MIME unterstützt',
+    verifiedMp4 !== undefined);
 
-  globalThis.caches = savedCaches;
-  globalThis.fetch = savedFetch;
+  const shellReader = (response) => ({
+    match: async (request) => request === '/index.html' ? response : undefined,
+  });
+  const verifiedShell = await S.matchVerifiedShell(
+    shellReader(shellResponse(cleanShell)),
+    goodManifest,
+  );
+  ok('aktive Shell wird bei jedem Read erneut gegen CSP + Manifest-Referenzen geprüft',
+    verifiedShell !== undefined);
+  const poisonedShell = await S.matchVerifiedShell(
+    shellReader(shellResponse(cleanShell, null)),
+    goodManifest,
+  );
+  ok('nachträglich ohne CSP gecachte Shell wird nicht ausgeliefert', poisonedShell === undefined);
+  const foreignShell = cleanShell.replace('/assets/app.js', '/assets/evil.js');
+  const unverifiedShell = await S.matchVerifiedShell(
+    shellReader(shellResponse(foreignShell)),
+    goodManifest,
+  );
+  ok('nachträglich auf fremdes Script umgebogene Shell wird nicht ausgeliefert',
+    unverifiedShell === undefined);
+}
+
+console.log('\n[SW: nonce-geschützter Recovery-Fallback]');
+{
+  const fallback = S.navigationFallbackResponse();
+  const html = await fallback.text();
+  const csp = fallback.headers.get('content-security-policy') ?? '';
+  const styleNonce = /<style nonce="([a-f0-9]{32})">/.exec(html)?.[1];
+  const scriptNonce = /<script nonce="([a-f0-9]{32})">/.exec(html)?.[1];
+  ok('Fallback trägt eine fail-closed CSP mit frischem gemeinsamem Script-/Style-Nonce',
+    !!styleNonce &&
+    styleNonce === scriptNonce &&
+    csp.includes(`style-src 'nonce-${styleNonce}'`) &&
+    csp.includes(`script-src 'nonce-${styleNonce}'`) &&
+    csp.includes("default-src 'none'"));
+  ok('Fallback besitzt weder Inline-Eventhandler noch Inline-Styleattribute',
+    !/\son[a-z]+\s*=/.test(html) && !/\sstyle\s*=/.test(html));
+  ok('Fallback ist no-store/nosniff und nicht einbettbar',
+    fallback.headers.get('cache-control') === 'no-store' &&
+    fallback.headers.get('x-content-type-options') === 'nosniff' &&
+    fallback.headers.get('x-frame-options') === 'DENY');
 }
 
 console.log('\n[Medien: automatische Voll-Decodes sind begrenzt]');

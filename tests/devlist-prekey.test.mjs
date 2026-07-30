@@ -67,6 +67,25 @@ const tampered = {
 ok('gefälschter SPK bricht die Master-Signatur (Negativkontrolle)',
   (await S.verifyDeviceList(tampered, bob.master.publicKey, 1)) === false);
 
+console.log('\n[DeviceList shape is bounded before signature work]');
+const fractionalEpoch = { ...bobList, epoch: 1.5 };
+ok('gebrochener Epoch-Wert kann trotz gleichem 8-Byte-Transcript keinen Freeze erzeugen',
+  (await S.verifyDeviceList(fractionalEpoch, bob.master.publicKey, 1)) === false);
+const duplicateDevices = {
+  ...bobList,
+  devices: Array.from({ length: S.MAX_DEVICE_LIST_DEVICES + 1 }, () => bobEntry),
+};
+ok('überlange/duplizierte Liste wird billig vor Ed25519-Fanout verworfen',
+  !S.hasValidDeviceListShape(duplicateDevices) &&
+  (await S.verifyDeviceList(duplicateDevices, bob.master.publicKey, 1)) === false);
+let oversizedWireRejected = false;
+try {
+  await S.decodeDeviceList(new Uint8Array(S.MAX_DEVICE_LIST_WIRE_BYTES + 1));
+} catch {
+  oversizedWireRejected = true;
+}
+ok('Wire-Decoder begrenzt die Liste vor JSON/Base64-Arbeit', oversizedWireRejected);
+
 // D) A legacy device (no signed prekey) cannot be initiated to → null (receive still works).
 const legacy = { signPub: bob.sign.publicKey, dhPub: bob.dh.publicKey, deviceCert: bob.deviceCert };
 ok('DeviceEntry ohne SPK ⇒ bundleFromDeviceEntry === null', S.bundleFromDeviceEntry(bob.master.publicKey, 1, legacy) === null);

@@ -4,7 +4,8 @@ import { t, getLang } from './lib/i18n';
 /**
  * Bug report / feedback. The form POSTs a short JSON report to the app's OWN origin
  * (/api/bug — allowed by `connect-src 'self'`); the Worker forwards it server-side to
- * an optional webhook and/or the logs. NOTHING end-to-end leaves the device: only the
+ * a configured delivery sink and reports success only after that sink accepts it.
+ * NOTHING end-to-end leaves the device: only the
  * description and, opt-in, non-sensitive diagnostics (version, browser) — never
  * messages, contacts or keys. If the send fails, a copy-to-clipboard fallback lets the
  * user paste it elsewhere.

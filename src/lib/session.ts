@@ -1395,7 +1395,13 @@ export async function unframeContent(bytes: Bytes): Promise<MessageContent> {
 
   if (bytes[0] === 15) {
     const j = JSON.parse(utf8.decode(bytes.slice(1)));
-    return { kind: 'recall', targetMid: String(j.m) };
+    // A real MID is exactly the sender-generated 128-bit lowercase hex value.
+    // Reject before the UI/storage layer: otherwise an authenticated peer could
+    // persist arbitrarily long or endlessly varied tombstone identifiers.
+    if (typeof j.m !== 'string' || !/^[a-f0-9]{32}$/.test(j.m)) {
+      throw new Error('Ungültige Recall-Nachrichten-ID.');
+    }
+    return { kind: 'recall', targetMid: j.m };
   }
   if (bytes[0] === 16) {
     const j = JSON.parse(utf8.decode(bytes.slice(1)));
@@ -1610,6 +1616,7 @@ export async function fanoutChunks(
   data: Bytes,
   chunkBytes: number,
   minPv = 2,
+  senderDeviceList?: DeviceList,
 ): Promise<{ perDevice: FanoutChunkDelivery[]; incapable: Bytes[]; unreachable: Bytes[] }> {
   if (contact.staleIdentity) throw new StaleIdentityError();
   const perDevice: FanoutChunkDelivery[] = [];
@@ -1634,7 +1641,14 @@ export async function fanoutChunks(
           data: data.slice(idx * chunkBytes, (idx + 1) * chunkBytes),
           viewOnce: desc.viewOnce,
         };
-        sealed.push(await encryptForDevice(me, contact, t, chunk, randomMid()));
+        sealed.push(await encryptForDevice(
+          me,
+          contact,
+          t,
+          chunk,
+          randomMid(),
+          senderDeviceList,
+        ));
       }
       perDevice.push({ deviceSignPub: t.signPub, sealed });
     } catch {

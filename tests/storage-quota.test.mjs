@@ -43,6 +43,15 @@ ok('laufende automatische Transfers werden ihrem Kontakt voll angerechnet',
   !S.mayAutoReceiveAttachment(received, 1 * MiB + 1, 32 * MiB, 1 * MiB));
 ok('Legacy-Marker ohne Quota-Eigentümer blockiert neue Auto-Transfers',
   S.automaticRecvReservationBytes([{ size: 1, receivedBytes: 0 }], 'room-a') === Number.MAX_SAFE_INTEGER);
+const tinyRecordFloodCharge = S.attachmentRecvReservationBytes(1, 800);
+ok('tausende Tiny-Chunk-Records werden nicht als praktisch null Byte verbucht',
+  tinyRecordFloodCharge ===
+    1 + S.RECV_TRANSFER_FIXED_OVERHEAD_BYTES +
+      800 * S.RECV_CHUNK_RECORD_OVERHEAD_BYTES);
+ok('persistierte Chunk-Record-Kosten bleiben nach Abschluss im Kontaktcap',
+  S.storedReceivedAttachmentBytes([
+    { mine: false, file: { attId: 'tiny-flood', size: 1, storageBytes: tinyRecordFloodCharge } },
+  ]) === tinyRecordFloodCharge);
 ok('fehlende Größenmetadaten failen geschlossen',
   !S.mayAutoReceiveAttachment([{ mine: false, file: { attId: 'legacy' } }], 1));
 ok('inline empfangene Bytes im Message-Record zählen ebenfalls',
@@ -106,6 +115,12 @@ ok('neuer Chunk-Marker prüft Kontaktcap und Storage vor dem Persistieren',
   receiveSource.indexOf('putRecvMarker(dek, c.tid, candidate)') > receiveSource.indexOf('originCanReserve'));
 ok('abgelehnte Transfers kehren normal zurück und werden dadurch geackt',
   receiveSource.includes('markRecvDropped(c.tid); // return normally → onInbox acks'));
+ok('leere/tiny Chunk-Floods und globale Attachment-ID-Aliase werden vor Storage abgewiesen',
+  receiveSource.includes('c.total > c.size || c.data.length === 0') &&
+  receiveSource.includes('const aliasesExistingAttachment = Object.entries(messagesRef.current).some'));
+ok('Finalize verlangt exakte Bytezahl und persistiert die Record-Overhead-Quote',
+  receiveSource.includes('if (marker.receivedBytes !== marker.size)') &&
+  receiveSource.includes('storageBytes, attId: c.tid'));
 ok('Auto-Pull ist ausdrücklich nicht als Nutzer-Pull markiert',
   /void pullAttachment\([\s\S]*?false,\s*\);/.test(messenger));
 ok('R2-Downloads laufen durch dieselbe globale Reservierungsprüfung',

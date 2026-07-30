@@ -123,9 +123,13 @@ ok('Restore-Fence nutzt eine erneuerte Lease statt eines nach Crash permanenten 
   dbSrc.includes("tx.objectStore('restore').clear()"));
 ok('Live-Relay wird vor Restore pausiert und erst nach authentifiziertem Boot geöffnet',
   messengerSrc.includes('async function quiesceInbox') &&
-  messengerSrc.includes('onBeforeImport={quiesceInbox}') &&
+  messengerSrc.includes('async function suspendForRestore(): Promise<void>') &&
+  messengerSrc.includes('onBeforeImport={suspendForRestore}') &&
+  messengerSrc.includes('runtimeSuspendedRef.current = true;') &&
   bootSrc.indexOf('await bootLoad; // contacts are on their final master roomIds') <
-    bootSrc.indexOf('connectInbox(await inboxRoom(id.sign.publicKey))'));
+    bootSrc.indexOf('connectInbox(ownInbox)') &&
+  bootSrc.indexOf('assertMessengerActive();', bootSrc.indexOf('const ownInbox')) <
+    bootSrc.indexOf('connectInbox(ownInbox)'));
 ok('unsichere Legacy-Restores ohne DeviceList werden abgelehnt',
   backupSrc.includes('Legacy-Backup ohne authentifizierte Geräteliste'));
 ok('Gerätenamen und auch cardless Message-Räume reisen im Backup mit',

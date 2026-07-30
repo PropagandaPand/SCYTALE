@@ -27,6 +27,7 @@ import {
   type IdentityKeys,
   type SasResult,
   isNewerDeviceList,
+  compareDeviceList,
   encodeDeviceList,
   deviceInList,
   type DeviceList,
@@ -199,6 +200,7 @@ import {
   migrateLegacyRecalledMids,
   moveRecallRegistryRoom,
   applyRecallRegistry,
+  addRecallRegistryEntry,
   prepareRecalledMessageForAppend,
   loadRecalledMids,
   saveRecalledMids,
@@ -226,6 +228,7 @@ import { biometricAvailable, biometricEnrolled, disableBiometricUnlock, duressEn
 import { DuressSetup } from './DuressSetup';
 import {
   AUTO_RECEIVE_CONTACT_CAP_BYTES,
+  attachmentRecvReservationBytes,
   automaticRecvReservationBytes,
   hasOriginStorageHeadroom,
   mayAutoReceiveAttachment,
@@ -242,6 +245,8 @@ import {
   readSliceRetry,
 } from './lib/blobtransfer';
 import { transcodeVideoTo720p } from './lib/transcode';
+import { createKeyedSerialQueue } from './lib/keyedQueue';
+import { registerVaultRuntimeQuiescer } from './lib/runtimeQuiesce';
 import {
   IconLock, IconShield, IconSearch, IconBack, IconPlus, IconSend, IconDoubleCheck, IconInfo, IconCamera, IconAttach, IconMic, IconTrash, IconDots, IconGroup, IconReply, IconForward, IconCopy,
   IconBell, IconDevices, IconArchive, IconChevron,
@@ -347,6 +352,20 @@ class DuplicateGroupTransitionRowError extends Error {
     super('Zusätzliche Relay-Zeile eines bereits gehaltenen Gruppenframes.');
     this.name = 'DuplicateGroupTransitionRowError';
   }
+}
+
+/** Async work from an unmounted/locked Messenger generation must never reopen
+ * relays or continue mutating the vault behind the lock screen. */
+class MessengerInactiveError extends Error {
+  constructor() {
+    super('Messenger generation is no longer active.');
+    this.name = 'MessengerInactiveError';
+  }
+}
+
+interface TrackedRuntimeOperation {
+  controller: AbortController;
+  settled: Promise<void>;
 }
 
 async function settleWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<T | undefined> {
@@ -521,6 +540,10 @@ const fmtClock = (ts: number) => {
 
 export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, onExitDecoy }: Props) {
   useLang(); // re-render on language change
+  // A lock/account switch unmounts this component while its large async boot can
+  // still be suspended in IndexedDB/WebCrypto. Every continuation and relay
+  // constructor is fenced by this bit; a new Messenger mount gets its own ref.
+  const lifecycleActiveRef = useRef(true);
   const identityRef = useRef<IdentityKeys | null>(null);
   const prekeysRef = useRef<PreKeyState | null>(null);
   const lookupRef = useRef<PreKeyLookup | null>(null);
@@ -545,6 +568,21 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   const seenIdsRef = useRef<Set<number>>(new Set());
   // Serializes ALL inbox processing through one promise chain (see enqueueInbox).
   const inboxQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const bootTaskRef = useRef<Promise<void> | null>(null);
+  // Reversible fence used while an encrypted restore is being prepared. Unlike
+  // lifecycleActive=false it can be lifted after a failed import, but while set
+  // no relay, queue or UI writer may start against the soon-to-be-replaced DB.
+  const runtimeSuspendedRef = useRef(false);
+  // Long-running backup KDF/file/storage work must be cancelled and joined just
+  // like relay/ratchet work. Otherwise a locked, unmounted generation could
+  // still trigger a download or commit a restore behind the lock screen.
+  const runtimeOperationsRef = useRef<Set<TrackedRuntimeOperation>>(new Set());
+  // Message logs are encrypted whole-room blobs. Serialize the complete
+  // read/modify/write/publish operation per room, not merely the final IDB put:
+  // otherwise an older ACK/status write can finish after a newer append/recall
+  // and silently replace it (last-writer-wins data loss).
+  const messageMutationQueueRef = useRef(createKeyedSerialQueue());
+  const recallMutationQueueRef = useRef<Promise<unknown>>(Promise.resolve());
   // Serializes only the short, local roster read-modify-write phase. Network
   // delivery deliberately runs after this lock is released, so an inbound leave
   // frame can persist its state without deadlocking against the inbox queue.
@@ -604,6 +642,74 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   const activeRoomRef = useRef<string | null>(null);
   const activeGroupRef = useRef<string | null>(null);
   const initedRef = useRef(false);
+
+  function assertMessengerActive(): void {
+    if (!lifecycleActiveRef.current) throw new MessengerInactiveError();
+  }
+
+  function assertRuntimeAvailable(): void {
+    assertMessengerActive();
+    if (runtimeSuspendedRef.current) throw new MessengerInactiveError();
+  }
+
+  async function runTrackedRuntimeOperation<T>(
+    operation: (
+      signal: AbortSignal,
+      trackedOperation: TrackedRuntimeOperation,
+    ) => Promise<T>,
+  ): Promise<T> {
+    assertMessengerActive();
+    const controller = new AbortController();
+    let markSettled!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      markSettled = resolve;
+    });
+    const tracked: TrackedRuntimeOperation = { controller, settled };
+    runtimeOperationsRef.current.add(tracked);
+    // The registration happens synchronously before the first await, so a lock
+    // can neither miss this operation nor race a later operation into the set.
+    try {
+      assertMessengerActive();
+      return await operation(controller.signal, tracked);
+    } finally {
+      runtimeOperationsRef.current.delete(tracked);
+      markSettled();
+    }
+  }
+
+  async function runRuntimeOperation<T>(
+    operation: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    return runTrackedRuntimeOperation((signal) => operation(signal));
+  }
+
+  /** Fire an event-driven writer under the same lifetime fence as backup work.
+   * Quiescence aborts and joins it before the active vault DB or Web Lock can be
+   * handed to another account/generation. Individual handlers keep their own
+   * user-facing errors; lifecycle cancellation is deliberately silent. */
+  function launchRuntimeOperation(
+    operation: (signal: AbortSignal) => Promise<unknown>,
+  ): void {
+    if (runtimeSuspendedRef.current) return;
+    void runRuntimeOperation(async (signal) => {
+      if (signal.aborted) throw new MessengerInactiveError();
+      const result = await operation(signal);
+      if (signal.aborted) throw new MessengerInactiveError();
+      return result;
+    }).catch((error) => {
+      if (
+        error instanceof MessengerInactiveError ||
+        !lifecycleActiveRef.current
+      ) {
+        return;
+      }
+      setError(
+        t('Vorgang fehlgeschlagen: {msg}', {
+          msg: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    });
+  }
 
   const [, bump] = useReducer((x: number) => x + 1, 0);
   const [fingerprint, setFingerprint] = useState('');
@@ -698,15 +804,26 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     setPopulateBusy(true);
     setPopulateErr('');
     try {
-      const decoyDek = await openDecoyForPopulate(populatePass);
-      setPopulatePrompt(false);
-      setPopulatePass('');
-      // Drain the REAL account's inbox before App repoints the active DB, so no in-flight receive
-      // persists real-DEK ciphertext into the decoy database (which would corrupt/brick the decoy).
-      await quiesceInbox();
-      setPopulateBusy(false);
-      onEnterDecoy?.(decoyDek);
+      await runTrackedRuntimeOperation(async (signal, trackedOperation) => {
+        const decoyDek = await openDecoyForPopulate(populatePass);
+        // Argon2/WebCrypto cannot be interrupted mid-call. A lock may nevertheless
+        // have aborted this operation while it was suspended, so reject its late
+        // result before it can hide the prompt or start an account transition.
+        if (signal.aborted) throw new MessengerInactiveError();
+        assertMessengerActive();
+        setPopulatePrompt(false);
+        setPopulatePass('');
+        // Drain the REAL account's inbox before App repoints the active DB, so no
+        // in-flight receive persists real-DEK ciphertext into the decoy database.
+        // Excluding this operation prevents a self-join deadlock; an EXTERNAL lock
+        // calls quiesce without the exemption and therefore still aborts + joins it.
+        await quiesceForUnmount(trackedOperation);
+        if (signal.aborted) throw new MessengerInactiveError();
+        setPopulateBusy(false);
+        onEnterDecoy?.(decoyDek);
+      });
     } catch (e) {
+      if (e instanceof MessengerInactiveError || !lifecycleActiveRef.current) return;
       setPopulateErr(e instanceof WrongPassphraseError ? t('Falsches Duress-Passwort.') : t('Wechsel fehlgeschlagen.'));
       setPopulateBusy(false);
     }
@@ -722,31 +839,129 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     relaysRef.current.clear();
     sendRoomRef.current.clear();
     inboxClientRef.current = null;
-    // Drain to a FIXED POINT: a finishing task can chain a follow-up (gossip / self-sync / list-ack)
-    // onto the queue as it completes, so await until the queue promise stops changing — otherwise an
-    // enqueued tail task could still be in flight when the caller repoints the active DB. (The task
-    // pin in enqueueInbox is the backstop; this keeps the deliberate enter/exit switch fully clean.)
-    let pending: Promise<unknown>;
-    do {
-      pending = inboxQueueRef.current;
-      await pending.catch(() => undefined);
-    } while (inboxQueueRef.current !== pending);
+    // Drain ALL writer queues to one joint fixed point. Draining them one after
+    // another is insufficient: a finishing recall/group/storage task can append
+    // a message or inbox task after that earlier queue was already observed idle.
+    // Account switches and restore may repoint/replace the DB only once the whole
+    // graph is stable in the same observation.
+    for (;;) {
+      const inboxTail = inboxQueueRef.current;
+      const recallTail = recallMutationQueueRef.current;
+      const groupTail = groupMutationQueueRef.current;
+      const storageTail = storageGateRef.current;
+      const groupRetry = groupMutationRetryRef.current;
+      await Promise.all([
+        inboxTail.catch(() => undefined),
+        messageMutationQueueRef.current.drain(),
+        recallTail.catch(() => undefined),
+        groupTail.catch(() => undefined),
+        storageTail.catch(() => undefined),
+        groupRetry?.catch(() => undefined) ?? Promise.resolve(),
+      ]);
+      if (
+        inboxQueueRef.current === inboxTail &&
+        recallMutationQueueRef.current === recallTail &&
+        groupMutationQueueRef.current === groupTail &&
+        storageGateRef.current === storageTail &&
+        groupMutationRetryRef.current === groupRetry &&
+        messageMutationQueueRef.current.pending() === 0
+      ) {
+        break;
+      }
+    }
+  }
+
+  /** Reversible, fail-closed fence for a restore. This runs before the import
+   * operation registers itself, so it can abort and join every older UI/KDF/
+   * storage writer without self-joining. A failed import explicitly lifts it. */
+  async function suspendForRestore(): Promise<void> {
+    assertMessengerActive();
+    if (runtimeSuspendedRef.current) return;
+    runtimeSuspendedRef.current = true;
+    for (const operation of runtimeOperationsRef.current) {
+      operation.controller.abort();
+    }
+    await quiesceInbox();
+    for (;;) {
+      const pendingOperations = [...runtimeOperationsRef.current];
+      if (pendingOperations.length === 0) break;
+      await Promise.all(
+        pendingOperations.map((operation) =>
+          operation.settled.catch(() => undefined),
+        ),
+      );
+    }
+    // Boot performs identity/prekey reads and possible initialization before it
+    // enters inboxQueueRef. Join that prefix as well; its later relay connects
+    // are suppressed by runtimeSuspendedRef.
+    await bootTaskRef.current?.catch(() => undefined);
+    assertMessengerActive();
+  }
+
+  /** Permanently invalidate this Messenger generation and wait for every known
+   * writer before App releases the origin-wide Web Lock. */
+  async function quiesceForUnmount(
+    exemptOperation?: TrackedRuntimeOperation,
+  ): Promise<void> {
+    lifecycleActiveRef.current = false;
+    // A locked/unmounted messenger must never leave a live microphone behind.
+    // Detach recorder callbacks before stop so `onstop` cannot launch a late
+    // finishRecording writer after this generation has been invalidated.
+    sendOnStopRef.current = false;
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== 'inactive') {
+      recorder.ondataavailable = null;
+      recorder.onstop = null;
+      try {
+        recorder.stop();
+      } catch {
+        // It may have transitioned to inactive between the state read and stop.
+      }
+    }
+    recChunksRef.current = [];
+    cleanupRecording();
+    for (const operation of runtimeOperationsRef.current) {
+      if (operation === exemptOperation) continue;
+      operation.controller.abort();
+    }
+    await quiesceInbox();
+    // The active bit prevents new registrations. Drain to a fixed point anyway
+    // so a finishing operation cannot escape via a continuation registered just
+    // before invalidation.
+    for (;;) {
+      const pendingOperations = [...runtimeOperationsRef.current].filter(
+        (operation) => operation !== exemptOperation,
+      );
+      if (pendingOperations.length === 0) break;
+      await Promise.all(
+        pendingOperations.map((operation) =>
+          operation.settled.catch(() => undefined),
+        ),
+      );
+    }
+    await bootTaskRef.current?.catch(() => undefined);
   }
 
   /** Leave the decoy populate session back to the real account: drain the decoy inbox FIRST (so no
    *  in-flight decoy receive persists into the real 'scytale' DB), then hand control back to App. */
-  async function handleExitDecoy(): Promise<void> {
-    await quiesceInbox();
+  async function handleExitDecoy(
+    exemptOperation?: TrackedRuntimeOperation,
+  ): Promise<void> {
+    await quiesceForUnmount(exemptOperation);
     onExitDecoy?.();
   }
 
   /** A failed import leaves the old generation intact and removes the fence.
    * Rebuild the closed relay clients so queued server rows can drain normally. */
   async function resumeAfterFailedRestore(): Promise<void> {
+    if (!lifecycleActiveRef.current) return;
+    runtimeSuspendedRef.current = false;
     const id = identityRef.current;
     if (!id) return;
     for (const contact of contactsRef.current) await connectSend(contact);
     connectInbox(await inboxRoom(id.sign.publicKey));
+    void requestBootstrap().catch(() => undefined);
+    void schedulePendingGroupMutationRetry().catch(() => undefined);
   }
 
   const [langSheet, setLangSheet] = useState(false); // language picker open
@@ -755,6 +970,41 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   const [wiping, setWiping] = useState(false); // account wipe in progress
   const [deviceNames, setDeviceNames] = useState<DeviceNames>({}); // b64(signPub) → local name
   const [removeDev, setRemoveDev] = useState<Uint8Array<ArrayBuffer> | null>(null); // device pending remove-confirm
+
+  /** Publish only a monotonically newer durable own-device authority. Multiple
+   * CAS writers may finish their network continuations out of order; a stale
+   * continuation must never roll RAM back and gossip a still-valid older list. */
+  function publishOwnDeviceList(candidate: DeviceList): DeviceList {
+    const current = ownListRef.current;
+    if (!current || compareDeviceList(candidate, current) > 0) {
+      ownListRef.current = candidate;
+      setMultiDevice(candidate.devices.length > 1);
+      return candidate;
+    }
+    return current;
+  }
+
+  /** Re-read the CAS-protected record after a commit and publish the maximum of
+   * that durable snapshot and any newer durable result already seen in RAM. */
+  async function reconcileOwnDeviceList(
+    committed?: DeviceList,
+  ): Promise<DeviceList> {
+    if (committed) publishOwnDeviceList(committed);
+    const id = identityRef.current;
+    const pre = prekeysRef.current;
+    if (!id || !pre) {
+      throw new MessengerInactiveError();
+    }
+    const durable = await loadOrCreateOwnDeviceList(
+      dek,
+      id,
+      ownSpkPublic(pre),
+    );
+    if (!durable) {
+      throw new Error(t('Aktuelle Geräteliste nicht verfügbar.'));
+    }
+    return publishOwnDeviceList(durable);
+  }
 
   // Rename one of my devices (local-only name store; never gossiped).
   async function renameDevice(signPub: Uint8Array<ArrayBuffer>, current: string) {
@@ -774,6 +1024,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     const self = await ensureSelfContact();
     const next = await revokeDevice(dek, id, cur, signPub);
     if (!next) return;
+    const authoritative = await reconcileOwnDeviceList(next);
     // Deliver the new, revoking list DIRECTLY to the removed device BEFORE it's pruned from
     // the fan-out set — otherwise it never learns it's gone and its self-wipe never fires
     // (audit H4). `only: signPub` targets exactly that device; it verifies my master + newer
@@ -781,8 +1032,9 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     if (self) {
       try {
         const { deliveries } = await enqueueInbox(async () => {
-          const r = await fanoutDeliveries(id, self, { kind: 'devlist', list: next }, randomMid(), undefined, signPub);
-          await saveContact(dek, self);
+          const current = requireCurrentContact(self);
+          const r = await fanoutFromThisDevice(id, current, { kind: 'devlist', list: authoritative }, randomMid(), undefined, signPub);
+          await saveContact(dek, current);
           return r;
         });
         for (const d of deliveries) {
@@ -794,9 +1046,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         /* best effort — the device also learns it via normal gossip if it reconnects */
       }
     }
-    ownListRef.current = next;
-    setMultiDevice(next.devices.length > 1);
-    await gossipDeviceList(next);
+    await gossipDeviceList(authoritative);
     bump();
   }
   // This (linked) device unlinks itself → same as an account wipe (which already tells the
@@ -811,17 +1061,27 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   // fanning out to this now-dead device and it drops out of the device list). Best-effort,
   // sent BEFORE the wipe so the mailbox holds it even if the primary is offline; we wipe
   // regardless of whether the notice got through. The primary has no one to notify.
-  async function doWipeAccount() {
+  async function doWipeAccount(): Promise<void> {
+    return runTrackedRuntimeOperation((signal, trackedOperation) =>
+      doWipeAccountWithinRuntime(signal, trackedOperation),
+    );
+  }
+
+  async function doWipeAccountWithinRuntime(
+    signal: AbortSignal,
+    trackedOperation: TrackedRuntimeOperation,
+  ): Promise<void> {
     if (populatingDecoy) {
       // wipeAccount is deliberately device-global and would delete BOTH vault
       // databases. A reset/revocation encountered while merely populating the
       // decoy must therefore never destroy the mounted-but-hidden real account.
       setError(t('Decoy-Reset während der Befüllung blockiert — zurück im echten Konto kannst du den Decoy neu einrichten.'));
-      await handleExitDecoy();
+      await handleExitDecoy(trackedOperation);
       return;
     }
     setWiping(true);
     try {
+      if (signal.aborted) throw new MessengerInactiveError();
       const id = identityRef.current;
       if (id && !isPrimaryDevice(id)) {
         const self = await ensureSelfContact().catch(() => null);
@@ -854,6 +1114,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       location.reload();
     }
   }
+
   // ── Device linking ────────────────────────────────────────────────
   // 'menu'  : choose join-as-new vs add-a-device
   // 'qr'    : N shows its QR, waits for the offer
@@ -954,6 +1215,9 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   const commitMessages = () => setMessages({ ...messagesRef.current });
 
   function withStorageGate<T>(task: () => Promise<T>): Promise<T> {
+    if (!lifecycleActiveRef.current || runtimeSuspendedRef.current) {
+      return Promise.reject(new MessengerInactiveError());
+    }
     const run = storageGateRef.current.catch(() => undefined).then(task);
     storageGateRef.current = run.catch(() => undefined);
     return run;
@@ -1121,13 +1385,22 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       await recallMessage(roomId, m);
       return;
     }
-    if (messagesRef.current[roomId] === undefined) messagesRef.current[roomId] = await loadMessages(dek, roomId);
-    const arr = messagesRef.current[roomId] ?? [];
-    const next = arr.filter((x) => x !== m);
-    await saveMessages(dek, roomId, next);
-    messagesRef.current[roomId] = next;
-    commitMessages();
-    if (m.file?.attId) void secureWipeAttachment(m.file.attId);
+    await enqueueMessageMutation(roomId, async () => {
+      if (messagesRef.current[roomId] === undefined) {
+        messagesRef.current[roomId] = await loadMessages(dek, roomId);
+      }
+      const arr = messagesRef.current[roomId] ?? [];
+      const next = arr.filter((x) =>
+        m.mid ? !(x.mid === m.mid && x.mine === m.mine) : x !== m,
+      );
+      await saveMessages(dek, roomId, next);
+      messagesRef.current[roomId] = next;
+      commitMessages();
+    });
+    // Keep the cryptographic erase inside the caller's tracked operation so a
+    // vault/account transition cannot release its write fence while this local
+    // deletion is still touching the outgoing account's attachment store.
+    if (m.file?.attId) await secureWipeAttachment(m.file.attId);
   }
   function onBubblePointerDown(e: React.PointerEvent<HTMLDivElement>, m: ChatMessage) {
     if (!m.mid) return; // nothing to link a reply to
@@ -1231,48 +1504,40 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   }
 
   async function appendMessage(roomId: string, msg: ChatMessage) {
-    // Hydrate a COLD room from storage before appending. Boot preloads every
-    // contact/group room (init effect), so post-boot `undefined` means a room with
-    // no card — e.g. a self-sync display room for a peer this device hasn't added
-    // yet. Without this, the first append would start from [] and saveMessages would
-    // overwrite the persisted self-synced history (Review fund, LOW, cross-session).
-    // Re-check AFTER the await: never clobber a value a concurrent path just set.
-    if (messagesRef.current[roomId] === undefined) {
-      const persisted = await loadMessages(dek, roomId);
-      if (messagesRef.current[roomId] === undefined) messagesRef.current[roomId] = persisted;
-    }
-    // Recall that arrived BEFORE its original: tombstone only the exact local
-    // (room, direction, mid) stream. If an attachment was already materialized,
-    // crypto-wipe it BEFORE the message log can drop its only reference.
-    let toAppend = await prepareRecalledMessageForAppend(
-      recalledMidsRef.current,
-      roomId,
-      msg,
-      secureWipeAttachment,
-    );
-    // Persist before publishing the append in memory. If quota/corruption rejects
-    // the write, a relay retry must not see a phantom in-memory duplicate and ACK
-    // ciphertext whose plaintext never reached durable storage. The retry loop
-    // also merges a concurrent UI append instead of overwriting it.
-    for (;;) {
+    return enqueueMessageMutation(roomId, async () => {
+      // Hydrate a COLD room from storage before appending. Boot preloads every
+      // contact/group room (init effect), so post-boot `undefined` means a room with
+      // no card — e.g. a self-sync display room for a peer this device hasn't added
+      // yet.
+      if (messagesRef.current[roomId] === undefined) {
+        messagesRef.current[roomId] = await loadMessages(dek, roomId);
+      }
+      // Recall that arrived BEFORE its original: tombstone only the exact local
+      // (room, direction, mid) stream. If an attachment was already materialized,
+      // crypto-wipe it BEFORE the message log can drop its only reference.
+      let toAppend = await prepareRecalledMessageForAppend(
+        recalledMidsRef.current,
+        roomId,
+        msg,
+        secureWipeAttachment,
+      );
+      // A receipt can arrive before its bubble enters this queue. Fold it into
+      // the only durable generation rather than launching a competing write.
       toAppend = consumeEarlyDeliveryReceipts(toAppend);
       const base = messagesRef.current[roomId] ?? [];
-      const next = [...base, toAppend];
-      await saveMessages(dek, roomId, next);
-      // A receipt may have landed while IndexedDB was awaiting the write. Persist its terminal
-      // state in another generation before publishing the bubble; no "delivered but pending"
-      // phantom survives a reload.
-      const afterWrite = consumeEarlyDeliveryReceipts(toAppend);
-      if (afterWrite !== toAppend) {
-        toAppend = afterWrite;
-        continue;
-      }
-      if (messagesRef.current[roomId] === base) {
+      for (;;) {
+        const next = [...base, toAppend];
+        await saveMessages(dek, roomId, next);
+        const afterWrite = consumeEarlyDeliveryReceipts(toAppend);
+        if (afterWrite !== toAppend) {
+          toAppend = afterWrite;
+          continue;
+        }
         messagesRef.current[roomId] = next;
         commitMessages();
         return;
       }
-    }
+    });
   }
 
   /** Append a just-materialized inbound inline attachment. If the message-log
@@ -1291,33 +1556,36 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
    * and message tombstoning. Runs before inbox connections and also migrates old
    * flat entries, so no stale plaintext/file reference is published on boot. */
   async function reconcileLoadedRecallRegistry(): Promise<void> {
-    for (const [roomId, messages] of Object.entries(messagesRef.current)) {
-      const next: ChatMessage[] = [];
-      let changed = false;
-      for (const message of messages) {
-        const prepared = await prepareRecalledMessageForAppend(
-          recalledMidsRef.current,
-          roomId,
-          message,
-          secureWipeAttachment,
-        );
-        next.push(prepared);
-        if (prepared !== message) {
-          changed = true;
-          // Crash-recovery of the same in-flight-pull crypto-erase as retractMessage: a recall that
-          // landed while this transfer was mid-pull (interrupted before completion) still has a
-          // recvMarker + partial chunks + per-item key locally. Erase them now, gated on OUR marker
-          // for exactly THIS room (targetMid is peer-controlled — no cross-room erase).
-          const inflight = message.mid ? await getRecvMarker(dek, message.mid).catch(() => null) : null;
-          if (message.mid && inflight && inflight.roomId === roomId) {
-            await clearRecvMarker(message.mid).catch(() => undefined);
-            await secureWipeAttachment(message.mid).catch(() => undefined);
+    for (const roomId of Object.keys(messagesRef.current)) {
+      await enqueueMessageMutation(roomId, async () => {
+        const messages = messagesRef.current[roomId] ?? [];
+        const next: ChatMessage[] = [];
+        let changed = false;
+        for (const message of messages) {
+          const prepared = await prepareRecalledMessageForAppend(
+            recalledMidsRef.current,
+            roomId,
+            message,
+            secureWipeAttachment,
+          );
+          next.push(prepared);
+          if (prepared !== message) {
+            changed = true;
+            // Crash-recovery of the same in-flight-pull crypto-erase as retractMessage: a recall that
+            // landed while this transfer was mid-pull (interrupted before completion) still has a
+            // recvMarker + partial chunks + per-item key locally. Erase them now, gated on OUR marker
+            // for exactly THIS room (targetMid is peer-controlled — no cross-room erase).
+            const inflight = message.mid ? await getRecvMarker(dek, message.mid).catch(() => null) : null;
+            if (message.mid && inflight && inflight.roomId === roomId) {
+              await clearRecvMarker(message.mid).catch(() => undefined);
+              await secureWipeAttachment(message.mid).catch(() => undefined);
+            }
           }
         }
-      }
-      if (!changed) continue;
-      await saveMessages(dek, roomId, next);
-      messagesRef.current[roomId] = next;
+        if (!changed) return;
+        await saveMessages(dek, roomId, next);
+        messagesRef.current[roomId] = next;
+      });
     }
   }
 
@@ -1326,38 +1594,51 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   // the scoped key so appendMessage tombstones it on arrival. The registry is the
   // durable intent; boot reconciliation completes a crash interrupted operation.
   async function retractMessage(roomId: string, targetMid: string, mine: boolean): Promise<void> {
-    if (messagesRef.current[roomId] === undefined) {
-      messagesRef.current[roomId] = await loadMessages(dek, roomId);
-    }
-    const arr = messagesRef.current[roomId] ?? [];
-    const key = recallRegistryKey(roomId, mine, targetMid);
-    const recalled = recalledMidsRef.current.has(key)
-      ? recalledMidsRef.current
-      : new Set([...recalledMidsRef.current, key]);
-    if (recalled !== recalledMidsRef.current) await saveRecalledMids(dek, [...recalled]);
-    // Publish the persisted intent before any further await. A failed wipe/save
-    // remains retryable in this process and is completed at the next boot.
-    recalledMidsRef.current = recalled;
-    const applied = arr.map((message) => applyRecallRegistry(recalled, roomId, message));
-    for (const item of applied) {
-      if (item.attachmentIdToWipe) await secureWipeAttachment(item.attachmentIdToWipe);
-    }
-    // An in-flight PULL that gets recalled has materialized partial chunks + a per-item crypto-erase
-    // key locally (a recvMarker for targetMid), but applyRecallRegistry deliberately leaves pull/r2
-    // ids alone (an unmaterialized attacker-supplied id could collide). A recvMarker under OUR dek
-    // proves WE started receiving THIS exact transfer, so its bytes are ours to erase now — otherwise
-    // they linger until the 24h TTL sweep and keep holding a MAX_CONCURRENT_RECV slot. Bind to the
-    // marker's OWN admitting room (targetMid is peer-controlled) so a recall in a different room can
-    // never erase an unrelated contact's in-flight transfer that happens to share the id. No-op else.
-    const inflight = await getRecvMarker(dek, targetMid).catch(() => null);
-    if (inflight && inflight.roomId === roomId) {
-      await clearRecvMarker(targetMid).catch(() => undefined);
-      await secureWipeAttachment(targetMid).catch(() => undefined);
-    }
-    const next = applied.map((item) => item.message);
-    await saveMessages(dek, roomId, next);
-    messagesRef.current[roomId] = next;
-    commitMessages();
+    const recalled = await enqueueRecallMutation(async () => {
+      const key = recallRegistryKey(roomId, mine, targetMid);
+      const next = recalledMidsRef.current.has(key)
+        ? recalledMidsRef.current
+        : new Set(
+            addRecallRegistryEntry(
+              recalledMidsRef.current,
+              roomId,
+              mine,
+              targetMid,
+            ),
+          );
+      if (next !== recalledMidsRef.current) {
+        await saveRecalledMids(dek, [...next]);
+        recalledMidsRef.current = next;
+      }
+      return next;
+    });
+    await enqueueMessageMutation(roomId, async () => {
+      if (messagesRef.current[roomId] === undefined) {
+        messagesRef.current[roomId] = await loadMessages(dek, roomId);
+      }
+      const arr = messagesRef.current[roomId] ?? [];
+      const applied = arr.map((message) =>
+        applyRecallRegistry(recalled, roomId, message),
+      );
+      for (const item of applied) {
+        if (item.attachmentIdToWipe) {
+          await secureWipeAttachment(item.attachmentIdToWipe);
+        }
+      }
+      // An in-flight PULL that gets recalled has materialized partial chunks + a per-item crypto-erase
+      // key locally (a recvMarker for targetMid), but applyRecallRegistry deliberately leaves pull/r2
+      // ids alone (an unmaterialized attacker-supplied id could collide). A recvMarker under OUR dek
+      // proves WE started receiving THIS exact transfer, so its bytes are ours to erase now.
+      const inflight = await getRecvMarker(dek, targetMid).catch(() => null);
+      if (inflight && inflight.roomId === roomId) {
+        await clearRecvMarker(targetMid).catch(() => undefined);
+        await secureWipeAttachment(targetMid).catch(() => undefined);
+      }
+      const next = applied.map((item) => item.message);
+      await saveMessages(dek, roomId, next);
+      messagesRef.current[roomId] = next;
+      commitMessages();
+    });
   }
 
   // Open a view-once photo. The decrypt happens first (we need the bytes in memory),
@@ -1382,20 +1663,41 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       setError(t('Foto ist nicht mehr verfügbar.'));
       return;
     }
-    // Consume + wipe BEFORE display — one viewing, no take-backs.
-    if (messagesRef.current[roomId] === undefined) {
-      messagesRef.current[roomId] = await loadMessages(dek, roomId);
-    }
-    const arr = messagesRef.current[roomId] ?? [];
-    const next = arr.map((x) =>
-      x.mid === m.mid && x.file?.viewOnce && !x.voSeen
-        ? { ...x, voSeen: true, file: { ...x.file, attId: undefined, dataB64: undefined } }
-        : x,
-    );
-    await saveMessages(dek, roomId, next);
-    messagesRef.current[roomId] = next;
-    commitMessages();
-    void secureWipeAttachment(attId);
+    // Consume + wipe BEFORE display — one viewing, no take-backs. The wipe is
+    // awaited inside the same room mutation as the tombstone. A crash can leave
+    // an unavailable bubble, but can never leave replayable bytes behind a
+    // durable "seen" marker or show them before crypto-erasure completed.
+    const consumed = await enqueueMessageMutation(roomId, async () => {
+      if (messagesRef.current[roomId] === undefined) {
+        messagesRef.current[roomId] = await loadMessages(dek, roomId);
+      }
+      const arr = messagesRef.current[roomId] ?? [];
+      if (
+        !arr.some(
+          (x) =>
+            x.mid === m.mid &&
+            x.file?.viewOnce &&
+            x.file.attId === attId &&
+            !x.voSeen,
+        )
+      ) {
+        return false;
+      }
+      await secureWipeAttachment(attId);
+      const next = arr.map((x) =>
+        x.mid === m.mid &&
+        x.file?.viewOnce &&
+        x.file.attId === attId &&
+        !x.voSeen
+          ? { ...x, voSeen: true, file: { ...x.file, attId: undefined, dataB64: undefined } }
+          : x,
+      );
+      await saveMessages(dek, roomId, next);
+      messagesRef.current[roomId] = next;
+      commitMessages();
+      return true;
+    });
+    if (!consumed) return;
     setViewOnce({ blob, mime });
   }
 
@@ -1434,7 +1736,6 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       } else {
         return;
       }
-      await saveContact(dek, contact);
       bump();
     } catch (e) {
       setError(t('Weiterleiten fehlgeschlagen: {msg}', { msg: (e as Error).message }));
@@ -1470,6 +1771,15 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     if (!Number.isSafeInteger(c.idx) || c.idx < 0 || c.idx >= c.total) return;
     if (!Number.isSafeInteger(c.size) || c.size < 0 || c.size > RECV_MAX_BYTES) return;
     if (c.data.length > RECV_MAX_CHUNK_BYTES) return;
+    // A non-empty transfer cannot contain empty records or claim more records
+    // than bytes. The one canonical empty file is exactly one empty chunk.
+    if (
+      c.size === 0
+        ? c.total !== 1 || c.data.length !== 0
+        : c.total > c.size || c.data.length === 0
+    ) {
+      return;
+    }
     // Load this room's messages up front so the anti-aliasing guard runs BEFORE any destructive
     // storage step — including the recall-wipe below. Reject a c.tid that aliases one of MY OWN
     // outbound attachments (a mine=true message with the same attId): an authenticated peer learns
@@ -1482,7 +1792,15 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       roomMessages = await loadMessages(dek, contact.roomId);
       messagesRef.current[contact.roomId] = roomMessages;
     }
-    if (roomMessages.some((x) => x.mine && x.file?.attId === c.tid)) return;
+    const aliasesExistingAttachment = Object.entries(messagesRef.current).some(
+      ([roomId, messages]) =>
+        messages.some(
+          (message) =>
+            message.file?.attId === c.tid &&
+            (roomId !== contact.roomId || message.mine),
+        ),
+    );
+    if (aliasesExistingAttachment) return;
     // A recall may precede the first or any later chunk. Do not keep filling a
     // protected receive marker for a message that can only become a tombstone;
     // also erase chunks that arrived before the recall.
@@ -1504,6 +1822,11 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     // trust the FIRST descriptor, so a peer can't change total/name mid-transfer.
     let marker = await getRecvMarker(dek, c.tid);
     if (!marker) {
+      // A completed/orphan attachment under this global storage id belongs to a
+      // different local object. Never reuse its per-file key or overwrite it.
+      if (await getAttachmentMeta(dek, c.tid)) return;
+      const reservedBytes = attachmentRecvReservationBytes(c.size, c.total);
+      if (reservedBytes === Number.MAX_SAFE_INTEGER) return;
       const candidate = {
         total: c.total,
         name: c.name,
@@ -1512,6 +1835,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         ts: Date.now(),
         receivedIdx: [],
         receivedBytes: 0,
+        reservedBytes,
         roomId: contact.roomId,
         automatic: !explicitlyPulled,
         viewOnce: c.viewOnce,
@@ -1526,14 +1850,14 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           !explicitlyPulled &&
           !mayAutoReceiveAttachment(
             roomMessages,
-            c.size,
+            reservedBytes,
             AUTO_RECEIVE_CONTACT_CAP_BYTES,
             automaticRecvReservationBytes(activeMarkers, contact.roomId),
           )
         ) {
           return 'contact';
         }
-        if (!(await originCanReserve(c.size))) return 'storage';
+        if (!(await originCanReserve(reservedBytes))) return 'storage';
         try {
           await putRecvMarker(dek, c.tid, candidate);
         } catch (error) {
@@ -1553,7 +1877,11 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     } else if (
       marker.roomId !== contact.roomId ||
       typeof marker.automatic !== 'boolean' ||
-      c.total !== marker.total
+      c.total !== marker.total ||
+      c.size !== marker.size ||
+      c.name !== marker.name ||
+      c.mime !== marker.mime ||
+      !!c.viewOnce !== !!marker.viewOnce
     ) {
       return; // inconsistent with the first chunk — drop
     }
@@ -1588,6 +1916,17 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     }
 
     if (marker.receivedIdx.length >= marker.total) {
+      // Count equality alone is insufficient: a peer could fill every index
+      // with undersized chunks and publish corrupt/truncated bytes.
+      if (marker.receivedBytes !== marker.size) {
+        await clearRecvMarker(c.tid).catch(() => undefined);
+        await secureWipeAttachment(c.tid).catch(() => undefined);
+        markRecvDropped(c.tid);
+        return;
+      }
+      const storageBytes =
+        marker.reservedBytes ??
+        attachmentRecvReservationBytes(marker.size, marker.total);
       await finalizeAttachment(dek, c.tid, {
         name: marker.name,
         mime: marker.mime,
@@ -1597,30 +1936,45 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       // Persist the MESSAGE before clearing the marker (B1): a crash in this window then
       // leaves either the marker (GC protects the chunks) or the persisted, referenced
       // message — never a complete-but-unprotected attachment the orphan sweep deletes.
-      const arr = messagesRef.current[contact.roomId] ?? [];
-      const placeholder = arr.find((x) => x.mid === c.tid && !x.mine);
-      if (placeholder) {
-        // A pulled offer: the placeholder is now downloaded. Reconcile its descriptor
-        // to the RECEIVED bytes' meta (the offer's name/mime/size were only a claim),
-        // and drop the pull marker so it renders as a normal attachment.
-        const next = arr.map((x) =>
-          x === placeholder
-            ? { ...x, file: { name: marker.name, mime: marker.mime, size: marker.size, attId: c.tid, viewOnce: marker.viewOnce || placeholder.file?.viewOnce || undefined } }
-            : x,
-        );
+      let appended = false;
+      await enqueueMessageMutation(contact.roomId, async () => {
+        const arr = messagesRef.current[contact.roomId] ?? [];
+        const placeholder = arr.find((x) => x.mid === c.tid && !x.mine);
+        let next: ChatMessage[];
+        if (placeholder) {
+          // A pulled offer: the placeholder is now downloaded. Reconcile its descriptor
+          // to the RECEIVED bytes' meta (the offer's name/mime/size were only a claim),
+          // and drop the pull marker so it renders as a normal attachment.
+          next = arr.map((x) =>
+            x === placeholder
+              ? { ...x, file: { name: marker.name, mime: marker.mime, size: marker.size, storageBytes, attId: c.tid, viewOnce: marker.viewOnce || placeholder.file?.viewOnce || undefined } }
+              : x,
+          );
+        } else {
+          const message = await prepareRecalledMessageForAppend(
+            recalledMidsRef.current,
+            contact.roomId,
+            {
+              mine: false,
+              ts: Date.now(),
+              mid: c.tid,
+              file: { name: marker.name, mime: marker.mime, attId: c.tid, size: marker.size, storageBytes, viewOnce: marker.viewOnce || undefined },
+            },
+            secureWipeAttachment,
+          );
+          next = [...arr, message];
+          appended = true;
+        }
         await saveMessages(dek, contact.roomId, next);
         messagesRef.current[contact.roomId] = next;
         commitMessages();
-      } else {
-        await appendMessage(contact.roomId, {
-          mine: false,
-          ts: Date.now(),
-          mid: c.tid,
-          file: { name: marker.name, mime: marker.mime, attId: c.tid, size: marker.size, viewOnce: marker.viewOnce || undefined },
-        });
-        if (!(viewRef.current === 'chat' && activeRoomRef.current === contact.roomId)) {
-          unreadRef.current[contact.roomId] = (unreadRef.current[contact.roomId] ?? 0) + 1;
-        }
+      });
+      if (
+        appended &&
+        !(viewRef.current === 'chat' && activeRoomRef.current === contact.roomId)
+      ) {
+        unreadRef.current[contact.roomId] =
+          (unreadRef.current[contact.roomId] ?? 0) + 1;
       }
       downloadingRef.current.delete(c.tid);
       pullProgressRef.current.delete(c.tid);
@@ -1639,6 +1993,9 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   // every message after the boot migration, closing the onInbox-vs-migration race.
   // A task's rejection is isolated so it can't break the chain for the next task.
   function enqueueInbox<T>(task: () => Promise<T>): Promise<T> {
+    if (!lifecycleActiveRef.current || runtimeSuspendedRef.current) {
+      return Promise.reject(new MessengerInactiveError());
+    }
     // Pin the task to the account it is enqueued under, so an account switch (real ↔ decoy) that
     // lands while it runs makes its every DB op fail closed (StaleAccountGenerationError) instead of
     // persisting the outgoing account's DEK-sealed data into the incoming database. onInbox's catch
@@ -1646,9 +2003,12 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     // sends + gossip/self-sync tails) funnels through here, so this one choke point covers them all.
     const origin = currentDbName();
     const run = inboxQueueRef.current.catch(() => undefined).then(async () => {
+      assertMessengerActive();
       pinTaskAccount(origin);
       try {
-        return await task();
+        const result = await task();
+        assertMessengerActive();
+        return result;
       } finally {
         clearTaskAccount();
       }
@@ -1657,7 +2017,67 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     return run;
   }
 
+  /** Resolve a Contact again only after a queued task owns the mutation barrier.
+   * Receive processing works on an isolated clone and deletion/re-key can run
+   * ahead of an already-scheduled UI send; persisting a captured stale object
+   * would otherwise roll the ratchet back or resurrect an erased contact. */
+  function requireCurrentContact(captured: Contact): Contact {
+    const current =
+      contactsRef.current.find((contact) => contact === captured) ??
+      contactsRef.current.find(
+        (contact) =>
+          contact.roomId === captured.roomId &&
+          bytesEqual(contact.peerMasterPub, captured.peerMasterPub),
+      );
+    if (!current) {
+      throw new Error('Kontaktzustand ist nicht mehr aktuell.');
+    }
+    return current;
+  }
+
+  /** Publish a durably committed receive candidate without replacing the
+   * canonical object. Already-queued send callbacks may hold that object; an
+   * in-place publication makes them observe the committed ratchet generation. */
+  function publishContactCandidate(
+    live: Contact,
+    candidate: Contact,
+  ): Contact {
+    Object.assign(live, candidate);
+    return live;
+  }
+
+  function enqueueMessageMutation<T>(
+    roomId: string,
+    task: () => Promise<T>,
+  ): Promise<T> {
+    return enqueueMessageMutations([roomId], task);
+  }
+
+  function enqueueMessageMutations<T>(
+    roomIds: readonly string[],
+    task: () => Promise<T>,
+  ): Promise<T> {
+    if (!lifecycleActiveRef.current || runtimeSuspendedRef.current) {
+      return Promise.reject(new MessengerInactiveError());
+    }
+    return messageMutationQueueRef.current.runMany(roomIds, task);
+  }
+
+  function enqueueRecallMutation<T>(task: () => Promise<T>): Promise<T> {
+    if (!lifecycleActiveRef.current || runtimeSuspendedRef.current) {
+      return Promise.reject(new MessengerInactiveError());
+    }
+    const run = recallMutationQueueRef.current
+      .catch(() => undefined)
+      .then(task);
+    recallMutationQueueRef.current = run.catch(() => undefined);
+    return run;
+  }
+
   function enqueueGroupMutation<T>(task: () => Promise<T>): Promise<T> {
+    if (!lifecycleActiveRef.current || runtimeSuspendedRef.current) {
+      return Promise.reject(new MessengerInactiveError());
+    }
     const run = groupMutationQueueRef.current
       .catch(() => undefined)
       .then(task);
@@ -1665,18 +2085,55 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     return run;
   }
 
+  /** Every fresh X3DH initiation carries our current master-signed DeviceList.
+   * This is essential after a safe backup restore replaces the source device:
+   * a peer that still has list V can authenticate the fresh device from V+1
+   * before applying its ordinary per-device authorization gate. */
+  function fanoutFromThisDevice(
+    me: IdentityKeys,
+    contact: Contact,
+    content: MessageContent,
+    mid: string,
+    exclude?: Bytes,
+    only?: Bytes,
+    minPv = 0,
+  ) {
+    return fanoutDeliveries(
+      me,
+      contact,
+      content,
+      mid,
+      exclude,
+      only,
+      minPv,
+      ownListRef.current ?? undefined,
+    );
+  }
+
   // Listen on our own inbox and authenticate as its owner (Ed25519 sig over the
   // DO's challenge) so the relay hands us our queued + live messages.
   function connectInbox(room: string) {
     const id = identityRef.current;
-    if (!id || relaysRef.current.has(room)) return;
+    if (
+      !lifecycleActiveRef.current ||
+      runtimeSuspendedRef.current ||
+      !id ||
+      relaysRef.current.has(room)
+    ) return;
     const client = new RelayClient(room, {
-      onCipher: (bytes, ackId) => void enqueueInbox(() => onInbox(bytes, ackId)),
+      onCipher: (bytes, ackId) => {
+        if (!lifecycleActiveRef.current || runtimeSuspendedRef.current) return;
+        void enqueueInbox(() => onInbox(bytes, ackId)).catch(() => undefined);
+      },
       auth: {
         signPub: id.sign.publicKey,
         sign: (nonce) => sign(nonce, id.sign.privateKey),
       },
     });
+    if (!lifecycleActiveRef.current || runtimeSuspendedRef.current) {
+      client.close();
+      return;
+    }
     relaysRef.current.set(room, client);
     inboxClientRef.current = client;
     client.connect();
@@ -1684,12 +2141,18 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
 
   // A send channel to a contact's inbox. Status = reachability dot for them.
   async function connectSend(contact: Contact) {
-    if (contact.localOnly) return;
+    if (
+      !lifecycleActiveRef.current ||
+      runtimeSuspendedRef.current ||
+      contact.localOnly
+    ) return;
     const room = await inboxRoom(contact.peerSignPub);
+    if (!lifecycleActiveRef.current || runtimeSuspendedRef.current) return;
     sendRoomRef.current.set(contact.roomId, room);
     if (relaysRef.current.has(room)) return;
     const client = new RelayClient(room, {
       onStatus: (s) => {
+        if (!lifecycleActiveRef.current || runtimeSuspendedRef.current) return;
         setStatuses((prev) => ({ ...prev, [contact.roomId]: s }));
         // Coming back online is the strongest moment to re-offer my device list:
         // a peer that was offline when I linked a device learns it here.
@@ -1698,11 +2161,23 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           void schedulePendingGroupMutationRetry();
         }
       },
-      onAck: (mid) => markStatus(mid, 'sent'),
-      onNack: (mid, reason) => markStatus(mid, 'failed', reason === 'full'
-        ? t('Nicht zugestellt — das Postfach des Empfängers ist voll.')
-        : t('Keine Bestätigung vom Relay — noch nicht zugestellt (evtl. offline).')),
+      onAck: (mid) => {
+        if (lifecycleActiveRef.current && !runtimeSuspendedRef.current) {
+          markStatus(mid, 'sent');
+        }
+      },
+      onNack: (mid, reason) => {
+        if (lifecycleActiveRef.current && !runtimeSuspendedRef.current) {
+          markStatus(mid, 'failed', reason === 'full'
+            ? t('Nicht zugestellt — das Postfach des Empfängers ist voll.')
+            : t('Keine Bestätigung vom Relay — noch nicht zugestellt (evtl. offline).'));
+        }
+      },
     });
+    if (!lifecycleActiveRef.current || runtimeSuspendedRef.current) {
+      client.close();
+      return;
+    }
     relaysRef.current.set(room, client);
     client.connect();
   }
@@ -1711,10 +2186,13 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   // key). Used by the linking flow, whose recipient is our own other device and
   // has no Contact/roomId. Reuses an open relay for that room if one exists.
   async function sendToInbox(recipientSignPub: Bytes, sealed: Bytes): Promise<void> {
+    assertRuntimeAvailable();
     const room = await inboxRoom(recipientSignPub);
+    assertRuntimeAvailable();
     let client = relaysRef.current.get(room);
     if (!client) {
       client = new RelayClient(room, {});
+      assertRuntimeAvailable();
       relaysRef.current.set(room, client);
       client.connect();
     }
@@ -1722,6 +2200,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     // socket write alone is not delivery: only the relay's `sent` receipt proves
     // that the grant is durably queued.
     await client.sendConfirmed(sealed, true);
+    assertRuntimeAvailable();
   }
 
   async function retryPendingLinkGrant(
@@ -1765,14 +2244,16 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     // Publish the durable CAS result immediately. In particular, the hidden
     // self-contact must authorize N before the Grant can reach it and trigger a
     // bootreq back to this primary.
-    ownListRef.current = list;
-    setMultiDevice(list.devices.length > 1);
+    const authoritative = await reconcileOwnDeviceList(list);
     const self = await ensureSelfContact();
     const durable = ownListRef.current;
     if (
       !self ||
       !durable ||
-      !bytesEqual(await encodeDeviceList(durable), await encodeDeviceList(list))
+      !self.peerDeviceList ||
+      compareDeviceList(durable, list) < 0 ||
+      compareDeviceList(authoritative, list) < 0 ||
+      compareDeviceList(self.peerDeviceList, list) < 0
     ) {
       throw new Error(t('Durable Geräteliste konnte nicht in den Selbstkontakt übernommen werden.'));
     }
@@ -1832,20 +2313,20 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       }
       setPrimaryLinkDeliveryPending(false);
       primaryPendingLinkTargetRef.current = null;
-      ownListRef.current = cancelled.newList;
-      setMultiDevice(cancelled.newList.devices.length > 1);
+      const authoritative = await reconcileOwnDeviceList(cancelled.newList);
       if (self) {
         try {
           const { deliveries } = await enqueueInbox(async () => {
-            const result = await fanoutDeliveries(
+            const current = requireCurrentContact(self);
+            const result = await fanoutFromThisDevice(
               id,
-              self,
-              { kind: 'devlist', list: cancelled.newList },
+              current,
+              { kind: 'devlist', list: authoritative },
               randomMid(),
               undefined,
               cancelled.targetSignPub,
             );
-            await saveContact(dek, self);
+            await saveContact(dek, current);
             return result;
           });
           for (const delivery of deliveries) {
@@ -1858,7 +2339,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           // and is also gossiped to every reachable peer below.
         }
       }
-      await gossipDeviceList(cancelled.newList);
+      await gossipDeviceList(authoritative);
       bump();
       setError(t('Ausstehende Kopplung abgebrochen und das Gerät mit einer neueren Geräteliste widerrufen.'));
     } catch (e) {
@@ -1882,15 +2363,25 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     }
   }
   function startAckTimer(mid: string) {
+    if (!lifecycleActiveRef.current) return;
     clearAckTimer(mid);
     ackTimers.current.set(
       mid,
       setTimeout(() => {
+        if (runtimeSuspendedRef.current) {
+          // A reversible restore fence may outlive the original timeout. Keep
+          // the delivery pending and restart its deadline after another window
+          // instead of mutating the old message store during the import.
+          ackTimers.current.delete(mid);
+          startAckTimer(mid);
+          return;
+        }
         markStatus(mid, 'failed', t('Keine Bestätigung vom Relay — noch nicht zugestellt (evtl. offline).'));
       }, 10_000),
     );
   }
   function markStatus(id: string | null, status: 'sent' | 'failed', errorMsg?: string) {
+    if (!lifecycleActiveRef.current || runtimeSuspendedRef.current) return;
     if (!id) {
       if (status === 'failed' && errorMsg) setError(errorMsg);
       return;
@@ -1912,20 +2403,45 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         const dels = arr[fi].deliveries!;
         const d = dels.find((x) => x.deliveryId === id)!;
         if (d.status === 'sent' || d.status === 'stale') return; // terminal per delivery — no change, no banner
-        const next = [...arr];
-        next[fi] = { ...arr[fi], deliveries: dels.map((x) => (x.deliveryId === id ? { ...x, status } : x)) };
-        messagesRef.current[roomId] = next;
-        // Global error banner ONLY when the message reached NO device at all. A single device's
-        // inbox being full/offline (a rarely-online or stale secondary device) still delivered to
-        // the peer's live devices — that partial is shown subtly on the bubble, and must not pop a
-        // "mailbox full" alarm for a message that actually arrived. aggregateDelivery is 'failed'
-        // only when EVERY live device failed (and 'pending' while any is still in flight).
-        if (status === 'failed' && errorMsg && aggregateDelivery(next[fi].deliveries!).label === 'failed') {
-          setError(errorMsg);
-        }
-        void saveMessages(dek, roomId, next);
-        commitMessages();
-        bump();
+        void enqueueMessageMutation(roomId, async () => {
+          const live = messagesRef.current[roomId] ?? [];
+          const liveIndex = live.findIndex((message) =>
+            message.deliveries?.some((delivery) => delivery.deliveryId === id),
+          );
+          if (liveIndex < 0) return;
+          const liveDeliveries = live[liveIndex].deliveries!;
+          const liveDelivery = liveDeliveries.find(
+            (delivery) => delivery.deliveryId === id,
+          );
+          if (
+            !liveDelivery ||
+            liveDelivery.status === 'sent' ||
+            liveDelivery.status === 'stale'
+          ) {
+            return;
+          }
+          const next = [...live];
+          next[liveIndex] = {
+            ...live[liveIndex],
+            deliveries: liveDeliveries.map((delivery) =>
+              delivery.deliveryId === id
+                ? { ...delivery, status }
+                : delivery,
+            ),
+          };
+          await saveMessages(dek, roomId, next);
+          messagesRef.current[roomId] = next;
+          // Global error banner ONLY when the message reached NO device at all.
+          if (
+            status === 'failed' &&
+            errorMsg &&
+            aggregateDelivery(next[liveIndex].deliveries!).label === 'failed'
+          ) {
+            setError(errorMsg);
+          }
+          commitMessages();
+          bump();
+        }).catch(() => undefined);
         return;
       }
       // Legacy single-status (groups / pre-3d records).
@@ -1936,13 +2452,20 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         // INVARIANT: once 'sent' (relay durably has it), always 'sent'. A late
         // nack/timeout must never downgrade a confirmed delivery.
         if (cur === 'sent') return;
-        const next = [...arr];
-        next[idx] = { ...arr[idx], status };
-        messagesRef.current[roomId] = next;
-        if (status === 'failed' && errorMsg) setError(errorMsg);
-        void saveMessages(dek, roomId, next);
-        commitMessages();
-        bump();
+        void enqueueMessageMutation(roomId, async () => {
+          const live = messagesRef.current[roomId] ?? [];
+          const liveIndex = live.findIndex((message) => message.mid === id);
+          if (liveIndex < 0) return;
+          const liveStatus = live[liveIndex].status;
+          if (liveStatus === status || liveStatus === 'sent') return;
+          const next = [...live];
+          next[liveIndex] = { ...live[liveIndex], status };
+          await saveMessages(dek, roomId, next);
+          messagesRef.current[roomId] = next;
+          if (status === 'failed' && errorMsg) setError(errorMsg);
+          commitMessages();
+          bump();
+        }).catch(() => undefined);
         return;
       }
     }
@@ -1958,13 +2481,29 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   // A relay to ONE peer device's inbox (Stage 3d fan-out). Ack/nack carry the
   // per-delivery id, so markStatus finds the right per-device entry.
   function connectDeviceInbox(room: string) {
-    if (relaysRef.current.has(room)) return;
+    if (
+      !lifecycleActiveRef.current ||
+      runtimeSuspendedRef.current ||
+      relaysRef.current.has(room)
+    ) return;
     const client = new RelayClient(room, {
-      onAck: (id) => markStatus(id, 'sent'),
-      onNack: (id, reason) => markStatus(id, 'failed', reason === 'full'
-        ? t('An ein Gerät nicht zugestellt — Postfach voll.')
-        : t('Keine Bestätigung vom Relay — noch nicht zugestellt (evtl. offline).')),
+      onAck: (id) => {
+        if (lifecycleActiveRef.current && !runtimeSuspendedRef.current) {
+          markStatus(id, 'sent');
+        }
+      },
+      onNack: (id, reason) => {
+        if (lifecycleActiveRef.current && !runtimeSuspendedRef.current) {
+          markStatus(id, 'failed', reason === 'full'
+            ? t('An ein Gerät nicht zugestellt — Postfach voll.')
+            : t('Keine Bestätigung vom Relay — noch nicht zugestellt (evtl. offline).'));
+        }
+      },
     });
+    if (!lifecycleActiveRef.current || runtimeSuspendedRef.current) {
+      client.close();
+      return;
+    }
     relaysRef.current.set(room, client);
     client.connect();
   }
@@ -1977,8 +2516,9 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     const id = identityRef.current;
     if (!id) return [];
     const { deliveries, unreachable } = await enqueueInbox(async () => {
-      const r = await fanoutDeliveries(id, contact, content, mid, undefined, undefined, minPv);
-      await saveContact(dek, contact); // persist advanced sessions before the wire
+      const current = requireCurrentContact(contact);
+      const r = await fanoutFromThisDevice(id, current, content, mid, undefined, undefined, minPv);
+      await saveContact(dek, current); // persist advanced sessions before the wire
       return r;
     });
     const silent = isSilentFrame(content.kind); // recall/attreq don't push; text/file/reply/attoffer do
@@ -2009,15 +2549,16 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     const id = identityRef.current;
     if (!id) return;
     const { deliveries, unreachable } = await enqueueInbox(async () => {
-      const result = await fanoutDeliveries(
+      const current = requireCurrentContact(contact);
+      const result = await fanoutFromThisDevice(
         id,
-        contact,
+        current,
         content,
         randomMid(),
         undefined,
         only,
       );
-      await saveContact(dek, contact);
+      await saveContact(dek, current);
       return result;
     });
     if (deliveries.length === 0 || unreachable.length > 0) {
@@ -2043,17 +2584,29 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   ): Promise<boolean> {
     const id = identityRef.current;
     if (!id) return false;
-    const tid = newAttachmentId();
+    // One 128-bit id is both the transfer/storage id and the visible message
+    // MID. Recall addresses MIDs; using a second random bubble id made completed
+    // chunked attachments impossible to retract on the recipient.
+    const tid = randomMid();
     const total = Math.max(1, Math.ceil(data.length / CHUNK_BYTES));
     // Store locally under the SAME id the peer will use, so the sender sees it too.
     await putAttachment(dek, tid, data, name, mime);
     const out = await enqueueInbox(async () => {
+      const current = requireCurrentContact(contact);
       // Only the RECIPIENT's chunks are flagged view-once; the sender keeps a normal copy.
       // View-once chunks carry `vo` in the header, which only a pv>=4 receiver reads — a
       // pv 2/3 receiver would reassemble a permanent copy. Gate view-once on pv>=4 so such a
       // device is `incapable` (not silently downgraded); normal chunks stay pv>=2.
-      const r = await fanoutChunks(id, contact, { tid, total, size: data.length, name, mime, viewOnce }, data, CHUNK_BYTES, viewOnce ? 4 : 2);
-      await saveContact(dek, contact); // persist ratchet advances BEFORE the wire (Invariant II)
+      const r = await fanoutChunks(
+        id,
+        current,
+        { tid, total, size: data.length, name, mime, viewOnce },
+        data,
+        CHUNK_BYTES,
+        viewOnce ? 4 : 2,
+        ownListRef.current ?? undefined,
+      );
+      await saveContact(dek, current); // persist ratchet advances BEFORE the wire (Invariant II)
       return r;
     });
     if (out.perDevice.length === 0) {
@@ -2073,11 +2626,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     await appendMessage(contact.roomId, {
       mine: true,
       ts: Date.now(),
-      mid: randomMid(),
+      mid: tid,
       file: { name, mime, attId: tid, size: data.length },
       status: 'sent',
     });
-    await saveContact(dek, contact);
     bump();
     return true;
   }
@@ -2099,18 +2651,20 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     // byte-16 frame it would throw on and lose.
     const devs = contact.peerDeviceList?.devices.map((d) => d.signPub) ?? [contact.peerSignPub];
     if (!devs.some((sp) => deviceProtocolVersion(contact, sp) >= 3)) return false;
-    const tid = newAttachmentId();
+    // Keep transfer id == message MID, matching the recipient's placeholder.
+    // This makes a later recall refer to the same authenticated identifier on
+    // both sides without changing the wire format.
+    const tid = randomMid();
     const total = Math.max(1, Math.ceil(data.length / CHUNK_BYTES));
     await putAttachment(dek, tid, data, name, mime); // keep locally to serve pulls + show to me
     await fanoutSend(contact, { kind: 'attoffer', tid, name, mime, size: data.length, total }, randomMid(), 3);
     await appendMessage(contact.roomId, {
       mine: true,
       ts: Date.now(),
-      mid: randomMid(),
+      mid: tid,
       file: { name, mime, attId: tid, size: data.length },
       status: 'sent',
     });
-    await saveContact(dek, contact);
     bump();
     return true;
   }
@@ -2142,8 +2696,17 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     const total = Math.max(1, Math.ceil(data.length / CHUNK_BYTES));
     if (currentDbName() !== servedOrigin) return; // account switched during prep — don't write cross-account
     const out = await enqueueInbox(async () => {
-      const r = await fanoutChunks(id, contact, { tid, total, size: data.length, name: meta.name, mime: meta.mime }, data, CHUNK_BYTES);
-      await saveContact(dek, contact); // persist ratchet advances BEFORE the wire (Invariant II)
+      const current = requireCurrentContact(contact);
+      const r = await fanoutChunks(
+        id,
+        current,
+        { tid, total, size: data.length, name: meta.name, mime: meta.mime },
+        data,
+        CHUNK_BYTES,
+        2,
+        ownListRef.current ?? undefined,
+      );
+      await saveContact(dek, current); // persist ratchet advances BEFORE the wire (Invariant II)
       return r;
     });
     for (const dev of out.perDevice) {
@@ -2239,13 +2802,20 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       // Reconcile the placeholder → a downloaded attachment. Keep view-once so it opens in
       // the self-destruct viewer (not inline) and gets crypto-erased after the single view.
       const vo = m.file.viewOnce;
-      const arr = messagesRef.current[roomId] ?? (await loadMessages(dek, roomId));
-      const next = arr.map((x) =>
-        x.mid === mid ? { ...x, file: { name, mime, size: valid.size, attId, viewOnce: vo || undefined } } : x,
-      );
-      await saveMessages(dek, roomId, next);
-      messagesRef.current[roomId] = next;
-      commitMessages();
+      await enqueueMessageMutation(roomId, async () => {
+        if (messagesRef.current[roomId] === undefined) {
+          messagesRef.current[roomId] = await loadMessages(dek, roomId);
+        }
+        const arr = messagesRef.current[roomId] ?? [];
+        const next = arr.map((x) =>
+          x.mid === mid
+            ? { ...x, file: { name, mime, size: valid.size, attId, viewOnce: vo || undefined } }
+            : x,
+        );
+        await saveMessages(dek, roomId, next);
+        messagesRef.current[roomId] = next;
+        commitMessages();
+      });
     } catch (e) {
       await secureWipeAttachment(attId).catch(() => undefined);
       setError(t('Download fehlgeschlagen: {msg}', { msg: (e as Error).message }));
@@ -2276,7 +2846,8 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   // device list, so I can fan out to my OTHER devices (self-sync). Its sessions are
   // to my devices; it never shows in the UI. Refreshed to my current device list so
   // a revoked own device is pruned (applyDeviceListUpdate also drops its session).
-  async function ensureSelfContact(): Promise<Contact | null> {
+  /** Contact/session mutation for callers that already hold the inbox barrier. */
+  async function ensureSelfContactWithinInbox(): Promise<Contact | null> {
     const id = identityRef.current;
     const pre = prekeysRef.current;
     if (!id || !pre) return null;
@@ -2301,12 +2872,18 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     }
     const ownList = await loadOrCreateOwnDeviceList(dek, id, ownSpkPublic(pre));
     if (ownList) {
-      ownListRef.current = ownList; // the (epoch, version) peers must acknowledge
-      await applyDeviceListUpdate(c, ownList, retiredMastersRef.current);
+      const authoritative = publishOwnDeviceList(ownList);
+      await applyDeviceListUpdate(c, authoritative, retiredMastersRef.current);
     }
-    setMultiDevice((ownList?.devices.length ?? 1) > 1);
+    setMultiDevice((ownListRef.current?.devices.length ?? 1) > 1);
     await saveContact(dek, c);
     return c;
+  }
+
+  /** Public self-contact entry point. The Contact includes live ratchet state, so
+   * creating/updating and serializing it must share the receive/send barrier. */
+  async function ensureSelfContact(): Promise<Contact | null> {
+    return enqueueInbox(ensureSelfContactWithinInbox);
   }
 
   // Mirror a message I sent to my OWN other devices (Stage 3d self-sync). The copy
@@ -2320,8 +2897,9 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     if (!self || !self.peerDeviceList || self.peerDeviceList.devices.length < 2) return; // no other device
     const content: MessageContent = { kind: 'sync', targetPeerMaster, origin, innerMid, ts, inner };
     const { deliveries } = await enqueueInbox(async () => {
-      const r = await fanoutDeliveries(id, self, content, randomMid(), id.sign.publicKey);
-      await saveContact(dek, self);
+      const current = requireCurrentContact(self);
+      const r = await fanoutFromThisDevice(id, current, content, randomMid(), id.sign.publicKey);
+      await saveContact(dek, current);
       return r;
     });
     for (const d of deliveries) {
@@ -2375,8 +2953,9 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     if (!self) throw new Error('Bootstrap-Selbstkontakt nicht verfügbar.');
     const content: MessageContent = { kind: 'bootstrap', bid, parts };
     const { deliveries, unreachable } = await enqueueInbox(async () => {
-      const r = await fanoutDeliveries(id, self, content, randomMid(), id.sign.publicKey, targetSignPub);
-      await saveContact(dek, self);
+      const current = requireCurrentContact(self);
+      const r = await fanoutFromThisDevice(id, current, content, randomMid(), id.sign.publicKey, targetSignPub);
+      await saveContact(dek, current);
       return r;
     });
     if (unreachable.length > 0) {
@@ -2596,8 +3175,9 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     if (!self || !self.peerDeviceList || self.peerDeviceList.devices.length < 2) return;
     const content: MessageContent = { kind: 'bootreq', requestId: req.requestId };
     const { deliveries } = await enqueueInbox(async () => {
-      const r = await fanoutDeliveries(id, self, content, randomMid(), id.sign.publicKey);
-      await saveContact(dek, self);
+      const current = requireCurrentContact(self);
+      const r = await fanoutFromThisDevice(id, current, content, randomMid(), id.sign.publicKey);
+      await saveContact(dek, current);
       return r;
     });
     await dispatchDeliveries(deliveries);
@@ -2621,13 +3201,21 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         // offered by their secondary would never see an ack and that device would
         // re-offer forever, filling the mailbox.
         const { deliveries } = await enqueueInbox(async () => {
-          const r = await fanoutDeliveries(id, contact, { kind: 'listack', epoch, version }, randomMid(), undefined, toDevice);
-          await saveContact(dek, contact);
+          const current = requireCurrentContact(contact);
+          const r = await fanoutFromThisDevice(id, current, { kind: 'listack', epoch, version }, randomMid(), undefined, toDevice);
+          await saveContact(dek, current);
           return r;
         });
         await dispatchDeliveries(deliveries);
       } else {
-        await sendEnvelopeTo(contact, await encryptAndPersist(contact, () => sendListAck(id, contact, epoch, version)), undefined, true);
+        await sendEnvelopeTo(
+          contact,
+          await encryptAndPersist(contact, (current) =>
+            sendListAck(id, current, epoch, version),
+          ),
+          undefined,
+          true,
+        );
       }
     } catch {
       /* best effort — they re-offer and we ack again */
@@ -2787,7 +3375,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
             installed.tombstone.blockReadd ||
             current.revision <= installed.tombstone.revision
           ) {
-            await deleteGroupAction(
+            await deleteGroupActionWithinInbox(
               installed.tombstone.groupId,
               installed.tombstone,
             );
@@ -2802,57 +3390,53 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         ) {
           continue;
         }
-        let base = messagesRef.current[p.groupId];
-        if (base === undefined) {
-          const persisted = await loadMessages(dek, p.groupId);
-          base = messagesRef.current[p.groupId] ?? persisted;
-        }
-        const next = [...base];
-        let added = 0;
-        for (const history of p.msgs) {
-          if (hasMessage(next, history.mid, history.mine)) continue;
-          next.push({
-            mine: history.mine,
-            ts: history.ts,
-            mid: history.mid,
-            text: history.text,
-            sender: history.sender,
-          });
-          added++;
-        }
-        if (added) {
+        await enqueueMessageMutation(p.groupId, async () => {
+          if (messagesRef.current[p.groupId] === undefined) {
+            messagesRef.current[p.groupId] = await loadMessages(dek, p.groupId);
+          }
+          const base = messagesRef.current[p.groupId] ?? [];
+          const next = [...base];
+          let added = 0;
+          for (const history of p.msgs) {
+            if (hasMessage(next, history.mid, history.mine)) continue;
+            next.push({
+              mine: history.mine,
+              ts: history.ts,
+              mid: history.mid,
+              text: history.text,
+              sender: history.sender,
+            });
+            added++;
+          }
+          if (!added) return;
           next.sort((a, b) => a.ts - b.ts);
           await saveMessages(dek, p.groupId, next);
-        }
-        messagesRef.current[p.groupId] = added ? next : base;
+          messagesRef.current[p.groupId] = next;
+        });
       } else if (p.t === 'history') {
         // DISPLAY ROOM derived locally from (my master, pm) — never from the wire,
         // exactly like a roster entry. Missing messages are appended and the log
         // re-sorted by timestamp; dedup by (mid, direction) so a message this device
         // already holds from the live path is not duplicated.
         const room = await computeMasterRoomId(myMaster, asMasterPub(p.pm));
-        let base = messagesRef.current[room];
-        if (base === undefined) {
-          const persisted = await loadMessages(dek, room);
-          // Re-read AFTER the await: a send during the load hydrates the room, and
-          // overwriting it here would drop that message from memory AND storage.
-          base = messagesRef.current[room] ?? persisted;
-        }
-        const next = [...base];
-        let added = 0;
-        for (const h of p.msgs) {
-          if (hasMessage(next, h.mid, h.mine)) continue;
-          next.push({ mine: h.mine, ts: h.ts, mid: h.mid, text: h.text, sender: h.sender });
-          added++;
-        }
-        if (added) {
+        await enqueueMessageMutation(room, async () => {
+          if (messagesRef.current[room] === undefined) {
+            messagesRef.current[room] = await loadMessages(dek, room);
+          }
+          const base = messagesRef.current[room] ?? [];
+          const next = [...base];
+          let added = 0;
+          for (const h of p.msgs) {
+            if (hasMessage(next, h.mid, h.mine)) continue;
+            next.push({ mine: h.mine, ts: h.ts, mid: h.mid, text: h.text, sender: h.sender });
+            added++;
+          }
+          if (!added) return;
           next.sort((a, b) => a.ts - b.ts);
-          // As with profile: never publish the merged snapshot until it is durable. Otherwise a
-          // retry after AbortError deduplicates against RAM and can ACK/bootstrap-mark data that
-          // never made it to storage.
+          // Never publish the merged snapshot until it is durable.
           await saveMessages(dek, room, next);
-        }
-        messagesRef.current[room] = added ? next : base;
+          messagesRef.current[room] = next;
+        });
       } else if (p.t === 'done') {
         if (p.skipped > 0) console.info(`[erst-sync] ${p.skipped} Nachrichten nicht übertragen (Anhänge / ohne mid).`);
       } else if (p.t === 'roster') {
@@ -2882,36 +3466,42 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   // device set (Review fund 6): a message the person actually received on their
   // other devices stops showing a permanent partial-failure. A 'sent' row stays
   // (once delivered, always delivered).
-  function sweepRevokedDeliveries(contact: Contact) {
+  async function sweepRevokedDeliveries(contact: Contact): Promise<void> {
     const list = contact.peerDeviceList;
-    const arr = messagesRef.current[contact.roomId];
-    if (!list || !arr) return;
+    if (!list) return;
     const live = new Set(list.devices.map((d) => bytesToB64(d.signPub)));
-    let changed = false;
-    for (let i = 0; i < arr.length; i++) {
-      const dels = arr[i].deliveries;
-      if (!dels) continue;
-      const updated = dels.map((d) => {
-        if (d.status !== 'stale' && d.status !== 'sent' && !live.has(d.device)) {
-          // The device is gone from the list — its ack will never come. Disarm the
-          // still-running 10s timer NOW, else it fires markStatus(...,'failed') on a
-          // row we just made terminal ('stale') and the guard there suppresses the
-          // downgrade but the banner would already have popped (Review-2 fund).
-          clearAckTimer(d.deliveryId);
-          return { ...d, status: 'stale' as const };
-        }
-        return d;
+    await enqueueMessageMutation(contact.roomId, async () => {
+      const arr = messagesRef.current[contact.roomId];
+      if (!arr) return;
+      let changed = false;
+      const next = arr.map((message) => {
+        const deliveries = message.deliveries;
+        if (!deliveries) return message;
+        let messageChanged = false;
+        const updated = deliveries.map((delivery) => {
+          if (
+            delivery.status !== 'stale' &&
+            delivery.status !== 'sent' &&
+            !live.has(delivery.device)
+          ) {
+            // The device is gone from the list — its ack will never come.
+            clearAckTimer(delivery.deliveryId);
+            changed = true;
+            messageChanged = true;
+            return { ...delivery, status: 'stale' as const };
+          }
+          return delivery;
+        });
+        return messageChanged
+          ? { ...message, deliveries: updated }
+          : message;
       });
-      if (updated.some((d, k) => d !== dels[k])) {
-        arr[i] = { ...arr[i], deliveries: updated };
-        changed = true;
-      }
-    }
-    if (changed) {
-      void saveMessages(dek, contact.roomId, arr);
+      if (!changed) return;
+      await saveMessages(dek, contact.roomId, next);
+      messagesRef.current[contact.roomId] = next;
       commitMessages();
       bump();
-    }
+    });
   }
 
   // ── roomId migration (device-DH → master) ──────────────────────────
@@ -2923,58 +3513,63 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   async function reKeyContactInMemory(oldRoomId: string, contact: Contact): Promise<void> {
     const newRoomId = contact.roomId;
     if (oldRoomId === newRoomId) return;
-    // Stage BOTH scoped recall namespaces before moving the contact/history.
-    // A crash on either side of moveContactStorage then retains a key matching
-    // the surviving room generation; the old aliases are removed afterwards.
-    const stagedRecalls = moveRecallRegistryRoom(
-      recalledMidsRef.current,
-      oldRoomId,
-      newRoomId,
-      true,
-    );
-    if (
-      stagedRecalls.length !== recalledMidsRef.current.size ||
-      stagedRecalls.some((value) => !recalledMidsRef.current.has(value))
-    ) {
-      await saveRecalledMids(dek, stagedRecalls);
-      recalledMidsRef.current = new Set(stagedRecalls);
-    }
-    await moveContactStorage(dek, oldRoomId, contact); // re-seal storage old → new
-    const movedRecalls = moveRecallRegistryRoom(
-      recalledMidsRef.current,
-      oldRoomId,
-      newRoomId,
-    );
-    if (
-      movedRecalls.length !== recalledMidsRef.current.size ||
-      movedRecalls.some((value) => !recalledMidsRef.current.has(value))
-    ) {
-      await saveRecalledMids(dek, movedRecalls);
-      recalledMidsRef.current = new Set(movedRecalls);
-    }
-    if (messagesRef.current[oldRoomId] !== undefined) {
-      messagesRef.current[newRoomId] = messagesRef.current[oldRoomId];
-      delete messagesRef.current[oldRoomId];
-    }
-    if (unreadRef.current[oldRoomId] !== undefined) {
-      unreadRef.current[newRoomId] = unreadRef.current[oldRoomId];
-      delete unreadRef.current[oldRoomId];
-    }
-    const room = sendRoomRef.current.get(oldRoomId);
-    if (room !== undefined) {
-      sendRoomRef.current.set(newRoomId, room);
-      sendRoomRef.current.delete(oldRoomId);
-    }
-    if (profileSentRef.current.has(oldRoomId)) {
-      profileSentRef.current.delete(oldRoomId);
-      profileSentRef.current.add(newRoomId);
-    }
-    setStatuses((prev) => {
-      if (prev[oldRoomId] === undefined) return prev;
-      const n = { ...prev };
-      n[newRoomId] = n[oldRoomId];
-      delete n[oldRoomId];
-      return n;
+    // Lock BOTH aliases as one queue entry. Waiting only on the old id lets an
+    // ACK/append under the already-derived master id race moveContactStorage;
+    // locking them independently in caller order can deadlock two inverse moves.
+    await enqueueMessageMutations([oldRoomId, newRoomId], async () => {
+      // Stage BOTH scoped recall namespaces before moving the contact/history.
+      // A crash on either side of moveContactStorage then retains a key matching
+      // the surviving room generation; the old aliases are removed afterwards.
+      const stagedRecalls = moveRecallRegistryRoom(
+        recalledMidsRef.current,
+        oldRoomId,
+        newRoomId,
+        true,
+      );
+      if (
+        stagedRecalls.length !== recalledMidsRef.current.size ||
+        stagedRecalls.some((value) => !recalledMidsRef.current.has(value))
+      ) {
+        await saveRecalledMids(dek, stagedRecalls);
+        recalledMidsRef.current = new Set(stagedRecalls);
+      }
+      await moveContactStorage(dek, oldRoomId, contact); // re-seal storage old → new
+      const movedRecalls = moveRecallRegistryRoom(
+        recalledMidsRef.current,
+        oldRoomId,
+        newRoomId,
+      );
+      if (
+        movedRecalls.length !== recalledMidsRef.current.size ||
+        movedRecalls.some((value) => !recalledMidsRef.current.has(value))
+      ) {
+        await saveRecalledMids(dek, movedRecalls);
+        recalledMidsRef.current = new Set(movedRecalls);
+      }
+      if (messagesRef.current[oldRoomId] !== undefined) {
+        messagesRef.current[newRoomId] = messagesRef.current[oldRoomId];
+        delete messagesRef.current[oldRoomId];
+      }
+      if (unreadRef.current[oldRoomId] !== undefined) {
+        unreadRef.current[newRoomId] = unreadRef.current[oldRoomId];
+        delete unreadRef.current[oldRoomId];
+      }
+      const room = sendRoomRef.current.get(oldRoomId);
+      if (room !== undefined) {
+        sendRoomRef.current.set(newRoomId, room);
+        sendRoomRef.current.delete(oldRoomId);
+      }
+      if (profileSentRef.current.has(oldRoomId)) {
+        profileSentRef.current.delete(oldRoomId);
+        profileSentRef.current.add(newRoomId);
+      }
+      setStatuses((prev) => {
+        if (prev[oldRoomId] === undefined) return prev;
+        const n = { ...prev };
+        n[newRoomId] = n[oldRoomId];
+        delete n[oldRoomId];
+        return n;
+      });
     });
   }
 
@@ -3169,7 +3764,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         linkConfirmedRef.current &&
         linkPendingGrantsRef.current.size > 0
       ) {
-        void installGrant();
+        void installGrant().catch(() => undefined);
       }
     }
   }
@@ -3212,7 +3807,9 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     const session = linkSessionRef.current;
     if (!session || session.role !== 'new') return;
     linkPendingGrantsRef.current.set(ackId, payload);
-    if (linkConfirmedRef.current && !linkAbortInProgressRef.current) void installGrant();
+    if (linkConfirmedRef.current && !linkAbortInProgressRef.current) {
+      void installGrant().catch(() => undefined);
+    }
   }
 
   async function matchesDiscardedLinkGrant(payload: Bytes): Promise<boolean> {
@@ -3278,7 +3875,12 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   function installGrant(): Promise<boolean> {
     if (linkInstallPromiseRef.current) return linkInstallPromiseRef.current;
     if (linkAbortInProgressRef.current) return Promise.resolve(false);
-    const run = drainPendingLinkGrants().finally(() => {
+    const run = runRuntimeOperation(async (signal) => {
+      if (signal.aborted) throw new MessengerInactiveError();
+      const installed = await drainPendingLinkGrants();
+      if (signal.aborted) throw new MessengerInactiveError();
+      return installed;
+    }).finally(() => {
       if (linkInstallPromiseRef.current === run) linkInstallPromiseRef.current = null;
     });
     linkInstallPromiseRef.current = run;
@@ -3331,8 +3933,8 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           try {
             await sendEnvelopeTo(
               c,
-              await encryptAndPersist(c, () =>
-                sendMessage(id, c, t('🔗 Ich habe ein neues Gerät gekoppelt — meine Identität ändert sich. Bitte bestätige die neue Identität, wenn du gefragt wirst.')),
+              await encryptAndPersist(c, (current) =>
+                sendMessage(id, current, t('🔗 Ich habe ein neues Gerät gekoppelt — meine Identität ändert sich. Bitte bestätige die neue Identität, wenn du gefragt wirst.')),
               ),
             );
           } catch {
@@ -3344,24 +3946,35 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       // commit uses previousMasterPub and must not overwrite that witness.
       const preSwapMaster = asMasterPub(id.previousMasterPub ?? id.master.publicKey);
       const alreadyInstalled = await confirmedLinkGrantAlreadyInstalled(id, session, grant);
-      const linked = alreadyInstalled
-        ? id
-        : await completeLinkOnN(dek, id, session, grant, farewell);
-      identityCommitted = true; // newly committed, or proven by the durable witness
-      // Publish the send barrier synchronously after the identity commit.
-      for (const c of contactsRef.current) {
-        c.staleIdentity = true;
-        if (!c.ownMasterPub) c.ownMasterPub = preSwapMaster;
-      }
-      identityRef.current = linked;
-      for (const c of contactsRef.current) await saveContact(dek, c);
-      // Preserve an already-created request id across a post-commit retry, but
-      // always repeat the durable write. Publishing a RAM ref before a failed
-      // IndexedDB write must not let the next retry skip this barrier.
-      const bootstrapRequest =
-        bootstrapRequestRef.current ?? { requestId: randomMid(), pending: true };
-      await saveBootstrapRequest(dek, bootstrapRequest);
-      bootstrapRequestRef.current = bootstrapRequest;
+      // Farewell uses encryptAndPersist, which enters the inbox queue itself.
+      // Finish those courtesy sends first; the security-critical identity swap,
+      // every stale-contact barrier and its bootstrap witness then commit as ONE
+      // inbox task. No live receive/UI writer can land a stale full Contact after
+      // the swap or observe the new identity with old send permissions.
+      if (!alreadyInstalled) await farewell();
+      const linked = await enqueueInbox(async () => {
+        const installed = alreadyInstalled
+          ? id
+          : await completeLinkOnN(dek, id, session, grant);
+        identityCommitted = true; // newly committed, or proven by durable witness
+        for (const c of contactsRef.current) {
+          c.staleIdentity = true;
+          if (!c.ownMasterPub) c.ownMasterPub = preSwapMaster;
+        }
+        identityRef.current = installed;
+        for (const c of contactsRef.current) await saveContact(dek, c);
+        // Preserve an already-created request id across a post-commit retry, but
+        // always repeat the durable write. Publishing a RAM ref before a failed
+        // IndexedDB write must not let the next retry skip this barrier.
+        const bootstrapRequest =
+          bootstrapRequestRef.current ?? {
+            requestId: randomMid(),
+            pending: true,
+          };
+        await saveBootstrapRequest(dek, bootstrapRequest);
+        bootstrapRequestRef.current = bootstrapRequest;
+        return installed;
+      });
       // Identity/list, every contact barrier and the bootstrap request are now
       // durable. Only then retire the recovery capability and held relay rows.
       await clearConfirmedNewDeviceLinkIntent(dek);
@@ -3435,6 +4048,9 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   async function gossipDeviceList(list: DeviceList) {
     const id = identityRef.current;
     if (!id) return;
+    // A caller may finish after another CAS writer. Reconcile first and use one
+    // monotonic authority for peer gossip and the explicit self-device fanout.
+    const authoritative = await reconcileOwnDeviceList(list);
     for (const c of contactsRef.current) {
       if (
         c.localOnly ||
@@ -3456,8 +4072,9 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     if (self && self.peerDeviceList && self.peerDeviceList.devices.length >= 2) {
       try {
         const { deliveries } = await enqueueInbox(async () => {
-          const r = await fanoutDeliveries(id, self, { kind: 'devlist', list }, randomMid(), id.sign.publicKey);
-          await saveContact(dek, self);
+          const current = requireCurrentContact(self);
+          const r = await fanoutFromThisDevice(id, current, { kind: 'devlist', list: authoritative }, randomMid(), id.sign.publicKey);
+          await saveContact(dek, current);
           return r;
         });
         for (const d of deliveries) {
@@ -3588,7 +4205,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       if (!contact && env.type === 'prekey' && bytesEqual(env.x3dh.masterPub, id.master.publicKey)) {
         // A prekey under MY OWN master is one of my other devices (self-sync). Route
         // it to the hidden self-contact, never auto-create a visible "contact for me".
-        contact = (await ensureSelfContact()) ?? undefined;
+        contact = (await ensureSelfContactWithinInbox()) ?? undefined;
       }
       if (!contact) {
         if (env.type !== 'prekey') return;
@@ -3668,16 +4285,14 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           if (!prekeys) throw new Error('Prekey-Zustand nicht geladen.');
           await saveContactAndConsumeOneTimePreKey(
             dek,
-            contact,
+            contact!,
             prekeys,
             authenticatedOneTimePreKeyId,
           );
         } else {
-          await saveContact(dek, contact);
+          await saveContact(dek, contact!);
         }
-        contactsRef.current = contactsRef.current.map((entry) =>
-          entry === liveContact ? contact : entry
-        );
+        contact = publishContactCandidate(liveContact, contact!);
         receiveStateCommitted = true;
       };
 
@@ -3692,7 +4307,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           // There are no application side effects to coordinate, so commit the
           // authenticated drop immediately and ACK it.
           await commitReceiveState();
-          console.warn(`[recv] authenticated-drop (${r.reason}) von ${displayName(contact)} — verworfen.`);
+          console.warn(`[recv] authenticated-drop (${r.reason}) — verworfen.`);
           return;
         }
         content = r.content;
@@ -3705,9 +4320,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           // the same claim can be replayed at will by anyone who can reach our
           // inbox, and a warning per copy would blunt the user against it.
           await saveContact(dek, contact);
-          contactsRef.current = contactsRef.current.map((entry) =>
-            entry === liveContact ? contact : entry
-          );
+          contact = publishContactCandidate(liveContact, contact);
           if (e.firstOccurrence) {
             setError(t('⚠ Sicherheit: Für {name} wird eine neue Identität behauptet — nicht übernommen. Prüfe sie in der Kontaktansicht, bevor du sie akzeptierst.', { name: displayName(contact) }));
           }
@@ -3718,9 +4331,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           // would be a harassment lever and would blunt the user against real
           // warnings. The state stays visible in the contact view.
           await saveContact(dek, contact);
-          contactsRef.current = contactsRef.current.map((entry) =>
-            entry === liveContact ? contact : entry
-          );
+          contact = publishContactCandidate(liveContact, contact);
           if (e.firstOccurrence) {
             setError(t('⚠ Sicherheit: Jemand hat sich als {name} mit einer bereits ersetzten Identität gemeldet — abgelehnt.', { name: displayName(contact) }));
           }
@@ -3730,7 +4341,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           // per-message alerts would be the same fatigue lever as the retired
           // case. Logged for diagnosis. Full "delivered to a no-longer-valid
           // device" surfacing is the send-side status work (3d).
-          console.warn(`[recv] Prekey von widerrufenem Gerät von ${displayName(contact)} verworfen.`);
+          console.warn('[recv] Prekey von widerrufenem Gerät verworfen.');
         }
         throw e; // drop the message (don't process the unpinned master)
       }
@@ -3789,7 +4400,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           legacy.revision === 0 &&
           isGroupMember(legacy, contact.peerMasterPub)
         ) {
-          await deleteGroupAction(legacy.id);
+          await deleteGroupActionWithinInbox(legacy.id);
         }
       } else if (content.kind === 'gleave') {
         await applyGroupLeave(
@@ -3804,13 +4415,39 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         // success the final receive-state commit persists it together with the
         // advanced ratchet.
         if (await applyDeviceListUpdate(contact, content.list, retiredMastersRef.current)) {
-          sweepRevokedDeliveries(contact); // fund 6: drop revoked devices from open bubbles
+          let acceptedList = content.list;
+          const ownUpdate = bytesEqual(
+            contact.peerMasterPub,
+            id.master.publicKey,
+          );
+          if (ownUpdate) {
+            const durableBefore = await reconcileOwnDeviceList();
+            if (compareDeviceList(content.list, durableBefore) > 0) {
+              // A genuinely newer, master-authenticated list that omits this
+              // linked device is a revocation. An older delayed continuation is
+              // not: durable authority wins, avoiding a stale-list self-wipe.
+              if (!deviceInList(content.list, id.sign.publicKey)) {
+                void doWipeAccount().catch(() => undefined);
+                return;
+              }
+              await adoptDeviceList(dek, id, content.list);
+            }
+            acceptedList = await reconcileOwnDeviceList(content.list);
+            // The self-contact may just have accepted a list older than our
+            // durable CAS record. Restore it monotonically before persistence.
+            await applyDeviceListUpdate(
+              contact,
+              acceptedList,
+              retiredMastersRef.current,
+            );
+          }
+          await sweepRevokedDeliveries(contact); // fund 6: drop revoked devices from open bubbles
           // The same independently signed directory is cached in every group
           // roster containing this master. Merge by its own (epoch, version)
           // clock; an owner roster revision is never allowed to roll it back.
           const nextGroups: Group[] = [];
           for (const group of groupsRef.current) {
-            const result = await applyGroupMemberDeviceList(group, content.list);
+            const result = await applyGroupMemberDeviceList(group, acceptedList);
             nextGroups.push(result.group);
             if (result.applied) await saveGroup(dek, result.group);
           }
@@ -3818,19 +4455,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           // If this is MY OWN list (delivered from my primary to the self-contact),
           // adopt it as my stored own list too, so a secondary device's self-sync
           // targets a later-linked sibling as well (Review fund 4).
-          if (bytesEqual(contact.peerMasterPub, id.master.publicKey)) {
-            // My primary re-signed MY OWN device list. If this (verified, newer) list no
-            // longer contains THIS device, my primary has revoked/unlinked me → the agreed
-            // outcome is that this container self-destructs. Forgery-safe: applyDeviceListUpdate
-            // already proved it's signed by my own master and is strictly newer.
-            if (!deviceInList(content.list, id.sign.publicKey)) {
-              void doWipeAccount();
-              return;
-            }
-            await adoptDeviceList(dek, id, content.list);
-            ownListRef.current = content.list;
-            setMultiDevice(content.list.devices.length > 1);
-          }
+          if (ownUpdate) publishOwnDeviceList(acceptedList);
         }
         // ACK UNCONDITIONALLY — also when the list was NOT newer and applyDevice-
         // ListUpdate returned false. The sender re-offers until our ack catches up;
@@ -3876,9 +4501,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           const from = env.type === 'prekey' ? env.x3dh.identitySignPub : env.dev;
           const next = from ? await revokeDevice(dek, id, ownListRef.current, from) : null;
           if (next) {
-            ownListRef.current = next;
-            setMultiDevice(next.devices.length > 1);
-            await gossipDeviceList(next);
+            const authoritative = await reconcileOwnDeviceList(next);
+            // Gossip encrypts through enqueueInbox. Detach it from this already
+            // held receive task or it would await its own queue tail forever.
+            void gossipDeviceList(authoritative).catch(() => undefined);
           }
         }
       } else if (content.kind === 'rotation') {
@@ -3904,9 +4530,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           } else {
             const r = await acceptRotation(contact, content.statement, retiredMastersRef.current);
             await reKeyContactInMemory(r.oldRoomId, contact); // persists contact + moves storage
-            contactsRef.current = contactsRef.current.map((entry) =>
-              entry === liveContact ? contact : entry
-            );
+            contact = publishContactCandidate(liveContact, contact);
             receiveStateCommitted = true;
             if (activeRoomRef.current === r.oldRoomId) setActiveRoom(r.newRoomId);
           }
@@ -4180,72 +4804,93 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         setError('Das ist dein eigener Verbindungscode.');
         return;
       }
-      const contact = await makeContact(asMasterPub(id.master.publicKey), bundle);
-      const existing = contactsRef.current.find(
-        (candidate) => candidate.roomId === contact.roomId,
-      );
-      if (existing) {
-        if (
-          !bytesEqual(existing.peerMasterPub, bundle.masterPub) ||
-          bundle.epoch < existing.peerEpoch
-        ) {
-          throw new Error('Der Verbindungscode passt nicht zum bereits gepinnten Kontaktstand.');
+      const contact = await enqueueInbox(async () => {
+        const candidate = await makeContact(
+          asMasterPub(id.master.publicKey),
+          bundle,
+        );
+        const existing = contactsRef.current.find(
+          (entry) => entry.roomId === candidate.roomId,
+        );
+        if (existing) {
+          if (
+            !bytesEqual(existing.peerMasterPub, bundle.masterPub) ||
+            bundle.epoch < existing.peerEpoch
+          ) {
+            throw new Error('Der Verbindungscode passt nicht zum bereits gepinnten Kontaktstand.');
+          }
+          if (
+            existing.peerDeviceList &&
+            bundle.epoch === existing.peerDeviceList.epoch &&
+            !deviceInList(existing.peerDeviceList, bundle.identitySignPub)
+          ) {
+            throw new Error('Der Verbindungscode gehört zu einem widerrufenen Gerät.');
+          }
+          // A member first learned through a group becomes a normal visible
+          // contact when its code is scanned. Keep newer DeviceLists/sessions and
+          // local verification, but adopt the freshly verified initiator bundle.
+          existing.hidden = undefined;
+          existing.bundle = bundle;
+          existing.peerEpoch = Math.max(existing.peerEpoch, bundle.epoch);
+          existing.peerSignPub = bundle.identitySignPub;
+          existing.peerDhPub = bundle.identityDhPub;
+          if (
+            existing.peerDeviceList &&
+            bundle.epoch > existing.peerDeviceList.epoch
+          ) {
+            existing.peerDeviceList = undefined;
+            existing.sessions = new Map();
+          }
+          await saveContact(dek, existing);
+          return existing;
         }
-        if (
-          existing.peerDeviceList &&
-          bundle.epoch === existing.peerDeviceList.epoch &&
-          !deviceInList(existing.peerDeviceList, bundle.identitySignPub)
-        ) {
-          throw new Error('Der Verbindungscode gehört zu einem widerrufenen Gerät.');
-        }
-        // A member first learned through a group becomes a normal visible
-        // contact when its code is scanned. Keep newer DeviceLists/sessions and
-        // local verification, but adopt the freshly verified initiator bundle.
-        existing.hidden = undefined;
-        existing.bundle = bundle;
-        existing.peerEpoch = Math.max(existing.peerEpoch, bundle.epoch);
-        existing.peerSignPub = bundle.identitySignPub;
-        existing.peerDhPub = bundle.identityDhPub;
-        if (
-          existing.peerDeviceList &&
-          bundle.epoch > existing.peerDeviceList.epoch
-        ) {
-          existing.peerDeviceList = undefined;
-          existing.sessions = new Map();
-        }
-        await saveContact(dek, existing);
-        await connectSend(existing);
-        setAddInput('');
-        openChat(existing.roomId);
-        bump();
-        return;
-      }
-      contactsRef.current = [...contactsRef.current, contact];
-      // Do NOT clobber an existing log: under master-based rooms my other device may
-      // already have SELF-SYNCED sent messages into exactly this roomId before I
-      // added the peer here (the display room = computeMasterRoomId(myMaster, peer)).
-      // Unconditional `= []` would silently discard that history (Review fund, LOW).
-      // Load the PERSISTED log first (→ [] if none), THEN read messagesRef — reading
-      // it only AFTER the await keeps a concurrent onInbox self-sync (addBundle is a
-      // UI handler, not enqueueInbox-serialised) from being overwritten (TOCTOU).
-      const persistedLog = await loadMessages(dek, contact.roomId);
-      messagesRef.current[contact.roomId] = messagesRef.current[contact.roomId] ?? persistedLog;
-      commitMessages();
-      await saveContact(dek, contact);
+        contactsRef.current = [...contactsRef.current, candidate];
+        // Do NOT clobber an existing log: under master-based rooms my other
+        // device may already have self-synced history into this exact room.
+        // The inbox barrier makes this load-and-publish one ordered operation.
+        const persistedLog = await loadMessages(dek, candidate.roomId);
+        messagesRef.current[candidate.roomId] =
+          messagesRef.current[candidate.roomId] ?? persistedLog;
+        commitMessages();
+        await saveContact(dek, candidate);
+        return candidate;
+      });
       await connectSend(contact);
       setAddInput('');
       openChat(contact.roomId);
+      bump();
     } catch (e) {
       setError(t('Ungültiges Bundle: {msg}', { msg: (e as Error).message }));
     }
   }
 
+  useEffect(
+    () => {
+      const unregister = registerVaultRuntimeQuiescer(quiesceForUnmount);
+      return () => {
+        // Keep the bridge registered until this unawaitable React cleanup has at
+        // least started and joined the same quiescence path. App teardown can
+        // therefore still obtain the promise instead of releasing its Web Lock
+        // merely because child-effect cleanup happened first.
+        void quiesceForUnmount()
+          .catch(() => undefined)
+          .finally(unregister);
+      };
+    },
+    // The mounted Messenger owns one stable account generation. Re-registering
+    // on renders would let a late disposer clear a newer callback.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
   useEffect(() => {
     if (initedRef.current) return;
     initedRef.current = true;
-    void (async () => {
+    const bootTask = (async () => {
       const id = await loadOrCreateIdentity(dek);
+      assertMessengerActive();
       const pre = await loadOrCreatePreKeys(dek, id);
+      assertMessengerActive();
       identityRef.current = id;
       prekeysRef.current = pre;
       lookupRef.current = {
@@ -4259,17 +4904,21 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       // canonical transcript to current Identity/SPK, proves the ephemeral
       // keypair and recomputes SAS rather than trusting stored display/flags.
       const discardedLinkIntents = await loadDiscardedNewDeviceLinkIntents(dek);
+      assertMessengerActive();
       discardedLinkSessionsRef.current = await Promise.all(
         discardedLinkIntents.map((intent) =>
           restoreDiscardedNewDeviceLinkSession(intent, id)),
       );
+      assertMessengerActive();
       const confirmedLinkIntent = await loadConfirmedNewDeviceLinkIntent(dek);
+      assertMessengerActive();
       if (confirmedLinkIntent) {
         const recovered = await restoreConfirmedNewDeviceLinkSession(
           confirmedLinkIntent,
           id,
           ownSpkPublic(pre),
         );
+        assertMessengerActive();
         confirmedLinkIntentRef.current = confirmedLinkIntent;
         linkSessionRef.current = recovered;
         linkConfirmedRef.current = true;
@@ -4278,25 +4927,43 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         setLinkBusy(true);
         setLinkView('sas');
       }
-      setFingerprint(await fingerprintOf(id));
+      const fingerprint = await fingerprintOf(id);
+      assertMessengerActive();
+      setFingerprint(fingerprint);
 
       const prof = await loadProfile(dek);
+      assertMessengerActive();
       myProfileRef.current = prof;
-      setDeviceNames(await loadDeviceNames(dek));
-      setStickers(await loadStickers(dek));
+      const [deviceNames, storedStickers] = await Promise.all([
+        loadDeviceNames(dek),
+        loadStickers(dek),
+      ]);
+      assertMessengerActive();
+      setDeviceNames(deviceNames);
+      setStickers(storedStickers);
       setMyAvatarB64(prof.avatarB64 ?? '');
       setProfileName(prof.name ?? '');
 
       const token = await encodeBundle(currentBundle(id, pre));
+      assertMessengerActive();
       const link = `${location.origin}/#add=${token}`;
       setShareLink(link);
-      makeQr(link).then(setQrDataUrl).catch(() => undefined);
+      makeQr(link)
+        .then((qr) => {
+          if (lifecycleActiveRef.current && !runtimeSuspendedRef.current) {
+            setQrDataUrl(qr);
+          }
+        })
+        .catch(() => undefined);
 
       retiredMastersRef.current = await loadRetiredMasters(dek);
+      assertMessengerActive();
       // Erst-Sync state: which snapshots this device already imported, and whether
       // it is still waiting for one (a linked device keeps asking across reloads).
       bootstrapAppliedRef.current = await loadBootstrapApplied(dek);
+      assertMessengerActive();
       bootstrapRequestRef.current = await loadBootstrapRequest(dek);
+      assertMessengerActive();
       // Crash recovery for the narrow post-identity-commit window in linking:
       // if the grant was installed but the first bootstrap request record did
       // not make it to disk, reconstruct it from the linked-identity witness.
@@ -4308,8 +4975,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       ) {
         bootstrapRequestRef.current = { requestId: randomMid(), pending: true };
         await saveBootstrapRequest(dek, bootstrapRequestRef.current);
+        assertMessengerActive();
       }
       contactsRef.current = await loadContacts(dek);
+      assertMessengerActive();
       // Crash reconciliation for device linking: installLinkedIdentity commits
       // the new identity/list atomically before the old contacts can be marked.
       // previousMasterPub is the durable witness that this identity swap happened.
@@ -4319,10 +4988,12 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         const currentMaster = asMasterPub(id.master.publicKey);
         const previousMaster = asMasterPub(id.previousMasterPub);
         for (const c of contactsRef.current) {
+          assertMessengerActive();
           if (c.ownMasterPub && bytesEqual(c.ownMasterPub, currentMaster)) continue;
           c.staleIdentity = true;
           if (!c.ownMasterPub) c.ownMasterPub = previousMaster;
           await saveContact(dek, c);
+          assertMessengerActive();
         }
       }
       // A primary may have crashed after atomically authorising a new device but
@@ -4336,13 +5007,16 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           // The durable list must reach RAM + hidden self-contact before the
           // retried Grant can let N send an immediately valid bootreq.
           const self = await ensureSelfContact();
+          assertMessengerActive();
           if (!self) throw new Error(t('Selbstkontakt nicht verfügbar.'));
         });
+        assertMessengerActive();
         setPrimaryLinkDeliveryPending(false);
         if (discardedCorruptGrant) {
           setError(t('Beschädigter Kopplungs-Retry wurde entfernt. Prüfe jetzt unter Profil → Geräte die Liste und widerrufe jedes unbekannte oder noch nicht bestätigte Gerät; der ursprüngliche Nachweis könnte bereits zugestellt worden sein.'));
         }
       } catch (e) {
+        if (e instanceof MessengerInactiveError) throw e;
         setPrimaryLinkDeliveryPending(true);
         setError(t('Ausstehende Gerätekopplung noch nicht zugestellt: {msg}', { msg: (e as Error).message }));
       }
@@ -4352,12 +5026,24 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       // by the current roomIds, so the duplicate-collapse tiebreak compares real
       // history counts (not an empty map); reKeyContactInMemory relocates them.
       const bootLoad = enqueueInbox(async () => {
-        for (const c of contactsRef.current) messagesRef.current[c.roomId] = await loadMessages(dek, c.roomId);
+        for (const c of contactsRef.current) {
+          assertMessengerActive();
+          messagesRef.current[c.roomId] = await loadMessages(dek, c.roomId);
+          assertMessengerActive();
+        }
         await migrateContactsToMaster();
-        await ensureSelfContact(); // hidden self-contact for self-sync; refresh my device list
-        for (const c of contactsRef.current) await connectSend(c);
+        assertMessengerActive();
+        await ensureSelfContactWithinInbox(); // hidden self-contact for self-sync; refresh my device list
+        assertMessengerActive();
+        for (const c of contactsRef.current) {
+          assertMessengerActive();
+          await connectSend(c);
+          assertMessengerActive();
+        }
         let gs = await loadGroups(dek);
+        assertMessengerActive();
         for (const snapshot of await loadGroupRemovalTombstones(dek)) {
+          assertMessengerActive();
           const stored = gs.find(
             (group) => group.id === snapshot.tombstone.groupId,
           );
@@ -4376,39 +5062,52 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
             // Tombstone-first deletion may have crashed before erasing the live
             // group. Finish it before any relay is connected.
             await removeGroup(dek, stored.id);
+            assertMessengerActive();
             gs = gs.filter((group) => group.id !== stored.id);
           } else {
             // A strictly newer accepted re-add was saved before its exact
             // tombstone clear completed.
             await clearGroupRemovalTombstone(snapshot);
+            assertMessengerActive();
           }
         }
         groupsRef.current = gs;
         for (const g of gs) {
+          assertMessengerActive();
           messagesRef.current[g.id] = await loadMessages(dek, g.id);
-          for (const member of g.members) await ensureMemberContact(member);
+          assertMessengerActive();
+          for (const member of g.members) {
+            await ensureMemberContactWithinInbox(member);
+            assertMessengerActive();
+          }
         }
         groupsBootReadyRef.current = true;
         // Include cardless/self-sync histories when reconstructing the scope of
         // legacy flat recall entries. Ambiguous legacy values are discarded.
         for (const roomId of await allMessageRoomIds()) {
+          assertMessengerActive();
           if (messagesRef.current[roomId] === undefined) {
             messagesRef.current[roomId] = await loadMessages(dek, roomId);
+            assertMessengerActive();
           }
         }
         const storedRecalls = await loadRecalledMids(dek);
+        assertMessengerActive();
         const scopedRecalls = migrateLegacyRecalledMids(storedRecalls, messagesRef.current);
         if (
           scopedRecalls.length !== storedRecalls.length ||
           scopedRecalls.some((value, index) => value !== storedRecalls[index])
         ) {
           await saveRecalledMids(dek, scopedRecalls);
+          assertMessengerActive();
         }
         recalledMidsRef.current = new Set(scopedRecalls);
         await reconcileLoadedRecallRegistry();
+        assertMessengerActive();
         commitMessages();
         bump();
         await sweepOrphanAttachments(); // race-free: still inside the boot task
+        assertMessengerActive();
       });
       // AFTER the boot task (never inside it — both of these enqueue on the same
       // chain, so awaiting them from within it would deadlock the inbox):
@@ -4416,23 +5115,36 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       // my device list to every peer whose acknowledgement is behind.
       void bootLoad
         .then(async () => {
+          assertMessengerActive();
           await requestBootstrap();
+          assertMessengerActive();
           await schedulePendingGroupMutationRetry();
-          for (const c of contactsRef.current) await ensureListGossiped(c);
+          assertMessengerActive();
+          for (const c of contactsRef.current) {
+            await ensureListGossiped(c);
+            assertMessengerActive();
+          }
         })
         .catch(() => undefined);
 
       await bootLoad; // contacts are on their final master roomIds; messages loaded
+      assertMessengerActive();
 
       // Only connect after every persisted history authenticated successfully.
       // Otherwise a corrupt room could fail boot while live ciphertexts are
       // already decrypted, ACKed and permanently removed from the relay.
-      connectInbox(await inboxRoom(id.sign.publicKey));
+      const ownInbox = await inboxRoom(id.sign.publicKey);
+      assertMessengerActive();
+      connectInbox(ownInbox);
       // Restore an existing push subscription so the DO keeps waking this device.
       if (pushSupported()) {
         currentSubscription()
           .then((sub) => {
-            if (sub) {
+            if (
+              sub &&
+              lifecycleActiveRef.current &&
+              !runtimeSuspendedRef.current
+            ) {
               inboxClientRef.current?.setPush(sub);
               setNotifOn(true);
             }
@@ -4442,21 +5154,38 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
 
       const hashMatch = location.hash.match(/[#&]add=([^&]+)/);
       if (hashMatch) {
+        assertMessengerActive();
         history.replaceState(null, '', location.pathname + location.search);
         await addBundle(decodeURIComponent(hashMatch[1]));
+        assertMessengerActive();
       }
-    })().catch((e) => {
+    })();
+    bootTaskRef.current = bootTask;
+    void bootTask.catch((e) => {
+      if (e instanceof MessengerInactiveError || !lifecycleActiveRef.current) return;
       for (const relay of relaysRef.current.values()) relay.close();
       relaysRef.current.clear();
       inboxClientRef.current = null;
       setError(t('Tresor konnte nicht sicher geladen werden: {msg}', { msg: (e as Error).message }));
     });
+    void bootTask.then(
+      () => {
+        if (bootTaskRef.current === bootTask) bootTaskRef.current = null;
+      },
+      () => {
+        if (bootTaskRef.current === bootTask) bootTaskRef.current = null;
+      },
+    );
 
     // iOS freezes PWAs in the background and silently kills their sockets. When
     // we come back to the foreground, force every relay to reconnect so the
     // inbox re-drains — otherwise the app looks "connected" but receives nothing.
     const onForeground = () => {
-      if (document.visibilityState === 'visible') {
+      if (
+        lifecycleActiveRef.current &&
+        !runtimeSuspendedRef.current &&
+        document.visibilityState === 'visible'
+      ) {
         for (const r of relaysRef.current.values()) r.reconnect();
         void schedulePendingGroupMutationRetry();
       }
@@ -4465,14 +5194,27 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     window.addEventListener('pageshow', onForeground);
 
     return () => {
+      // Invalidate first: a promise that resumes while sockets are being closed
+      // cannot enqueue work, update state, or create a replacement relay.
+      lifecycleActiveRef.current = false;
       document.removeEventListener('visibilitychange', onForeground);
       window.removeEventListener('pageshow', onForeground);
       groupsBootReadyRef.current = false;
       for (const r of relaysRef.current.values()) r.close();
       relaysRef.current.clear();
+      sendRoomRef.current.clear();
+      inboxClientRef.current = null;
       for (const t of ackTimers.current.values()) clearTimeout(t);
       ackTimers.current.clear();
       earlyDeliveryReceiptsRef.current.clear();
+      // Drop the component's last strong references to long-lived secret/session
+      // material. Suspended operations fail at their next lifecycle checkpoint.
+      identityRef.current = null;
+      prekeysRef.current = null;
+      lookupRef.current = null;
+      ownListRef.current = null;
+      contactsRef.current = [];
+      groupsRef.current = [];
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -4535,7 +5277,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   // this recomputes and repaints the badge whenever it actually changes.
   const totalUnread = Object.values(unreadRef.current).reduce((s, n) => s + (n || 0), 0);
   useEffect(() => {
-    void applyBadge(totalUnread);
+    launchRuntimeOperation(() => applyBadge(totalUnread));
+    // launchRuntimeOperation reads stable lifetime refs; depending on its render
+    // identity would repeat the badge write on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [totalUnread]);
 
   // After an older page is prepended, keep the viewport on the same message instead
@@ -4556,26 +5301,41 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   async function sweepOrphanAttachments() {
     const referenced = new Set<string>();
     for (const roomId of await allMessageRoomIds()) {
-      for (const m of await loadMessages(dek, roomId)) if (m.file?.attId) referenced.add(m.file.attId);
+      assertMessengerActive();
+      for (const m of await loadMessages(dek, roomId)) {
+        if (m.file?.attId) referenced.add(m.file.attId);
+      }
+      assertMessengerActive();
     }
     // An in-progress INCOMING transfer is in-use, not an orphan — protect it. A stale
     // one (sender vanished mid-transfer, marker older than the TTL) is dropped along
     // with its partial chunks. A marker whose attachment already completed (referenced
     // by a message) is just a leftover → clear it without touching the attachment.
     for (const tid of await allRecvMarkerIds()) {
+      assertMessengerActive();
       if (referenced.has(tid)) {
         await clearRecvMarker(tid);
+        assertMessengerActive();
         continue;
       }
       const marker = await getRecvMarker(dek, tid);
+      assertMessengerActive();
       if (marker && Date.now() - marker.ts > RECV_TTL_MS) {
         await clearRecvMarker(tid);
+        assertMessengerActive();
         await secureWipeAttachment(tid);
+        assertMessengerActive();
       } else {
         referenced.add(tid); // live transfer — keep its chunks
       }
     }
-    for (const id of await allAttachmentIds()) if (!referenced.has(id)) await secureWipeAttachment(id);
+    for (const id of await allAttachmentIds()) {
+      assertMessengerActive();
+      if (!referenced.has(id)) {
+        await secureWipeAttachment(id);
+        assertMessengerActive();
+      }
+    }
   }
 
   // Crypto-erase every attachment this room references. Loads from the store if the
@@ -4589,33 +5349,47 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
 
   async function deleteContactAction(roomId: string) {
     setChatMenu(false);
-    await gcRoomAttachments(roomId); // crypto-erase attachments while the room still exists
-    const sendRoom = sendRoomRef.current.get(roomId);
-    if (sendRoom) {
-      relaysRef.current.get(sendRoom)?.close();
-      relaysRef.current.delete(sendRoom);
-      sendRoomRef.current.delete(roomId);
-    }
-    contactsRef.current = contactsRef.current.filter((c) => c.roomId !== roomId);
-    delete messagesRef.current[roomId];
-    delete unreadRef.current[roomId];
-    profileSentRef.current.delete(roomId);
-    await removeContact(dek, roomId);
-    if (activeRoom === roomId) {
-      setActiveRoom(null);
-      setView('list');
-    }
-    commitMessages();
-    bump();
+    // The inbox barrier must be OUTER: a receive task may already be decrypting
+    // (and therefore not have entered the room queue yet). Let that task finish
+    // its append + saveContact before erasing both records, then prevent every
+    // later inbox task from overtaking this deletion.
+    await enqueueInbox(() =>
+      enqueueMessageMutation(roomId, async () => {
+        await gcRoomAttachments(roomId); // crypto-erase attachments while the room still exists
+        const sendRoom = sendRoomRef.current.get(roomId);
+        if (sendRoom) {
+          relaysRef.current.get(sendRoom)?.close();
+          relaysRef.current.delete(sendRoom);
+          sendRoomRef.current.delete(roomId);
+        }
+        contactsRef.current = contactsRef.current.filter((c) => c.roomId !== roomId);
+        delete messagesRef.current[roomId];
+        delete unreadRef.current[roomId];
+        profileSentRef.current.delete(roomId);
+        await removeContact(dek, roomId);
+        if (activeRoom === roomId) {
+          setActiveRoom(null);
+          setView('list');
+        }
+        commitMessages();
+        bump();
+      }),
+    );
   }
 
   async function clearChatAction(roomId: string) {
     setChatMenu(false);
-    await gcRoomAttachments(roomId); // crypto-erase this room's attachments first
-    messagesRef.current[roomId] = [];
-    await clearMessages(roomId); // crypto-erase the per-room key → history unrecoverable
-    commitMessages();
-    bump();
+    // See deleteContactAction: room-only ordering misses an older inbox task
+    // that is still decrypting/building an attachment before appendMessage().
+    await enqueueInbox(() =>
+      enqueueMessageMutation(roomId, async () => {
+        await gcRoomAttachments(roomId); // crypto-erase this room's attachments first
+        messagesRef.current[roomId] = [];
+        await clearMessages(roomId); // crypto-erase the per-room key → history unrecoverable
+        commitMessages();
+        bump();
+      }),
+    );
   }
 
   /**
@@ -4643,7 +5417,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
    *     merely with a narrower window.
    * A lost message is recoverable. A reused (key, nonce) pair is not.
    */
-  async function encryptAndPersist(contact: Contact, produce: () => Promise<Bytes>): Promise<Bytes> {
+  async function encryptAndPersist(
+    contact: Contact,
+    produce: (current: Contact) => Promise<Bytes>,
+  ): Promise<Bytes> {
     // Serialize the ratchet-mutating send through the SAME chain as onInbox.
     // ratchetEncrypt advances CKs/Ns IN PLACE on contact.ratchet; a CONCURRENT
     // onInbox ratchetDecrypt clones the whole state and commits it back via
@@ -4655,8 +5432,9 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     // same contact was still open. No awaited send runs inside an onInbox task
     // (ensureProfileSent is fire-and-forget), so this cannot self-deadlock.
     return enqueueInbox(async () => {
-      const envelope = await produce();
-      await saveContact(dek, contact);
+      const current = requireCurrentContact(contact);
+      const envelope = await produce(current);
+      await saveContact(dek, current);
       return envelope;
     });
   }
@@ -4666,11 +5444,14 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   // changes). Defaults to false because this helper ALSO carries real messages
   // (group chat messages, the device-linking notice) that must still push.
   async function sendEnvelopeTo(contact: Contact, envelope: Bytes, mid?: string, silent = false) {
+    assertRuntimeAvailable();
     let room = sendRoomRef.current.get(contact.roomId);
     if (!room) {
       await connectSend(contact);
+      assertRuntimeAvailable();
       room = sendRoomRef.current.get(contact.roomId);
     }
+    assertRuntimeAvailable();
     (room ? relaysRef.current.get(room) : undefined)?.send(envelope, mid, silent);
   }
 
@@ -4732,7 +5513,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   // Upsert the hidden pairwise contact that backs one group member. DeviceLists
   // are re-verified through the normal Contact path, so group-originated keys do
   // not get a weaker revocation or rollback rule.
-  async function ensureMemberContact(m: GroupMember): Promise<Contact | null> {
+  /** Contact/session mutation for group flows already running as an inbox task. */
+  async function ensureMemberContactWithinInbox(
+    m: GroupMember,
+  ): Promise<Contact | null> {
     const id = identityRef.current;
     if (!id) return null;
     const master = memberMasterPub(m);
@@ -4782,10 +5566,18 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       await saveContact(dek, contact);
       await connectSend(contact);
       return contact;
-    } catch (error) {
-      console.warn('[group] Versteckter Mitgliedskontakt abgelehnt:', error);
+    } catch {
+      console.warn('[group] Versteckter Mitgliedskontakt abgelehnt.');
       return null;
     }
+  }
+
+  /** Public group-directory entry point. Device-list reconciliation may prune
+   * ratchet sessions, so the mutation and full Contact write are inbox-serial. */
+  async function ensureMemberContact(
+    m: GroupMember,
+  ): Promise<Contact | null> {
+    return enqueueInbox(() => ensureMemberContactWithinInbox(m));
   }
 
   async function confirmedFanout(
@@ -4796,17 +5588,17 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     const id = identityRef.current;
     if (!id) throw new Error('Keine lokale Identität.');
     const { deliveries, unreachable } = await enqueueInbox(async () => {
-      const result = await fanoutDeliveries(
+      const current = requireCurrentContact(contact);
+      const result = await fanoutFromThisDevice(
         id,
-        contact,
+        current,
         content,
         randomMid(),
         undefined,
         undefined,
         minPv,
-        ownListRef.current ?? undefined,
       );
-      await saveContact(dek, contact);
+      await saveContact(dek, current);
       return result;
     });
     if (deliveries.length === 0) {
@@ -4843,17 +5635,17 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     }
     const invite = await toInvite(group);
     const { deliveries, unreachable } = await enqueueInbox(async () => {
-      const result = await fanoutDeliveries(
+      const current = requireCurrentContact(self);
+      const result = await fanoutFromThisDevice(
         id,
-        self,
+        current,
         { kind: 'ginvite', group: invite },
         randomMid(),
         id.sign.publicKey,
         undefined,
         6,
-        ownListRef.current ?? undefined,
       );
-      await saveContact(dek, self);
+      await saveContact(dek, current);
       return result;
     });
     await Promise.all(
@@ -4954,37 +5746,24 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
    * device cannot receive v4. A partial commit would otherwise strand the
    * owner on a roster revision that some member devices can never parse.
    */
-  async function preflightGroupMutation(
+  async function preflightGroupMutationWithinInbox(
     group: Group,
-    removedMasters: Bytes[],
   ): Promise<void> {
     const checked = new Set<string>();
     for (const member of group.members) {
       const master = memberMasterPub(member);
       const key = bytesToB64(master);
       if (checked.has(key)) continue;
-      const contact = await ensureMemberContact(member);
+      const contact = await ensureMemberContactWithinInbox(member);
       if (!contact) {
         throw new Error(`${member.name || 'Mitglied'} ist nicht erreichbar.`);
       }
       assertGroupContactReady(contact, member.name || 'Ein Gruppenmitglied');
       checked.add(key);
     }
-    for (const master of removedMasters) {
-      const key = bytesToB64(master);
-      if (checked.has(key)) continue;
-      const contact = contactsRef.current.find((candidate) =>
-        bytesEqual(candidate.peerMasterPub, master),
-      );
-      if (!contact) {
-        throw new Error('Entferntes Mitglied ist für den signierten Entfernungsnachweis nicht erreichbar.');
-      }
-      assertGroupContactReady(contact, contact.peerName || 'Entferntes Mitglied');
-      checked.add(key);
-    }
 
     const id = identityRef.current;
-    const self = await ensureSelfContact();
+    const self = await ensureSelfContactWithinInbox();
     if (!id || !self || !self.peerDeviceList) {
       throw new Error('Eigene signierte Geräteliste ist nicht verfügbar.');
     }
@@ -5005,7 +5784,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     }
   }
 
-  async function gcUnreferencedHiddenContacts(): Promise<void> {
+  async function gcUnreferencedHiddenContactsWithinInbox(): Promise<void> {
     const id = identityRef.current;
     if (!id) return;
     const referenced = new Set<string>();
@@ -5044,7 +5823,11 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     commitMessages();
   }
 
-  async function dispatchPendingGroupMutation(
+  async function gcUnreferencedHiddenContacts(): Promise<void> {
+    return enqueueInbox(gcUnreferencedHiddenContactsWithinInbox);
+  }
+
+  async function dispatchPendingGroupMutationWithinRuntime(
     requested: PendingGroupMutationSnapshot,
   ): Promise<void> {
     const id = identityRef.current;
@@ -5114,13 +5897,21 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       const contact = contactsRef.current.find((candidate) =>
         bytesEqual(candidate.peerMasterPub, master),
       );
-      if (!contact) {
-        throw new Error('Entfernter Gruppenkontakt für Retry nicht mehr verfügbar.');
+      if (!contact) continue;
+      try {
+        await confirmedFanout(contact, {
+          kind: 'gremove',
+          state: await toGroupStateProof(group),
+        }, 6);
+      } catch {
+        // The signed removal proof is a courtesy/cleanup notification, never an
+        // authorization veto. A malicious member controls its own DeviceList
+        // and could otherwise add an unreachable/old device to make itself
+        // permanently unremovable. Remaining members already received the new
+        // owner-signed roster above; all subsequent fan-out excludes this
+        // master and stale group frames from it are rejected.
+        console.warn('[group] Entfernungsnachweis konnte nicht an alle entfernten Geräte zugestellt werden.');
       }
-      await confirmedFanout(contact, {
-        kind: 'gremove',
-        state: await toGroupStateProof(group),
-      }, 6);
     }
     if (mutation.deleteLocalAfterDispatch) {
       const barrier: GroupRemovalTombstone = {
@@ -5141,7 +5932,20 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     }
   }
 
-  async function commitDurableGroupMutation(
+  async function dispatchPendingGroupMutation(
+    requested: PendingGroupMutationSnapshot,
+  ): Promise<void> {
+    return runRuntimeOperation(async (signal) => {
+      if (signal.aborted) throw new MessengerInactiveError();
+      await dispatchPendingGroupMutationWithinRuntime(requested);
+      if (signal.aborted) throw new MessengerInactiveError();
+    });
+  }
+
+  /** Atomic owner-state commit for callers that already hold the inbox barrier.
+   * Lock order is always inbox -> group; reversing it deadlocks an inbound leave
+   * against a simultaneous local group mutation. */
+  async function commitDurableGroupMutationWithinInbox(
     group: Group,
     removedMasters: Bytes[] = [],
     deleteLocalAfterDispatch = false,
@@ -5150,7 +5954,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       throw new Error('Legacy-Gruppen haben keinen dauerhaften Owner-Mutationspfad.');
     }
     return enqueueGroupMutation(async () => {
-      await preflightGroupMutation(group, removedMasters);
+      await preflightGroupMutationWithinInbox(group);
       const previous = (await loadPendingGroupMutationSnapshots(dek)).find(
         (candidate) => candidate.mutation.groupId === group.id,
       );
@@ -5182,6 +5986,20 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       confirmedGroupStateRef.current.delete(refreshed.id);
       return { group: refreshed, snapshot };
     });
+  }
+
+  async function commitDurableGroupMutation(
+    group: Group,
+    removedMasters: Bytes[] = [],
+    deleteLocalAfterDispatch = false,
+  ): Promise<{ group: Group; snapshot: PendingGroupMutationSnapshot }> {
+    return enqueueInbox(() =>
+      commitDurableGroupMutationWithinInbox(
+        group,
+        removedMasters,
+        deleteLocalAfterDispatch,
+      ),
+    );
   }
 
   async function persistAndDispatchGroupMutation(
@@ -5344,9 +6162,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         }
       }
       const { deliveries, unreachable } = await enqueueInbox(async () => {
+        const currentContacts = contacts.map(requireCurrentContact);
         const result = await groupFanoutToDevices(
           id,
-          contacts,
+          currentContacts,
           group!.id,
           group!.revision,
           group!.stateHash,
@@ -5362,7 +6181,9 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         );
         // All advanced member ratchets cross the durability boundary before the
         // first ciphertext is allowed onto any relay.
-        await Promise.all(contacts.map((contact) => saveContact(dek, contact)));
+        await Promise.all(
+          currentContacts.map((contact) => saveContact(dek, contact)),
+        );
         return result;
       });
       const rows: DeviceDelivery[] = [];
@@ -5442,17 +6263,17 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       inner,
     };
     const { deliveries, unreachable } = await enqueueInbox(async () => {
-      const result = await fanoutDeliveries(
+      const current = requireCurrentContact(self);
+      const result = await fanoutFromThisDevice(
         id,
-        self,
+        current,
         content,
         randomMid(),
         id.sign.publicKey,
         undefined,
         6,
-        ownListRef.current ?? undefined,
       );
-      await saveContact(dek, self);
+      await saveContact(dek, current);
       return result;
     });
     if (unreachable.length > 0) {
@@ -5471,44 +6292,60 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     );
   }
 
-  async function deleteGroupAction(
+  /** Internal group erase for call sites that already execute as an inbox task.
+   * Calling enqueueInbox again from those paths would await our own tail forever. */
+  async function deleteGroupActionWithinInbox(
     gid: string,
     removal?: GroupRemovalTombstone,
     preserveMutation = false,
   ) {
     setChatMenu(false);
-    const existing = groupsRef.current.find((group) => group.id === gid);
-    const barrier =
-      removal ??
-      (existing?.ownerMasterPub && existing.stateHash
-        ? {
-            groupId: existing.id,
-            ownerMasterPub: existing.ownerMasterPub,
-            revision: existing.revision,
-            stateHash: existing.stateHash,
-            blockReadd: true,
-          }
-        : undefined);
-    if (barrier) {
-      // Persist replay protection before erasing the live state. Boot recovery
-      // completes a crash between these two writes.
-      await saveGroupRemovalTombstone(dek, barrier);
-    }
-    groupsRef.current = groupsRef.current.filter((g) => g.id !== gid);
-    delete messagesRef.current[gid];
-    delete unreadRef.current[gid];
-    await gcRoomAttachments(gid);
-    await removeGroup(dek, gid);
-    // Delete state first. If the app crashes before this explicit discard, boot
-    // recovery sees no group and compare-clears only the stale exact marker.
-    if (!preserveMutation) await discardPendingGroupMutation(gid);
-    await gcUnreferencedHiddenContacts();
-    if (activeGroup === gid) {
-      setActiveGroup(null);
-      setView('list');
-    }
-    commitMessages();
-    bump();
+    await enqueueMessageMutation(gid, async () => {
+      const existing = groupsRef.current.find((group) => group.id === gid);
+      const barrier =
+        removal ??
+        (existing?.ownerMasterPub && existing.stateHash
+          ? {
+              groupId: existing.id,
+              ownerMasterPub: existing.ownerMasterPub,
+              revision: existing.revision,
+              stateHash: existing.stateHash,
+              blockReadd: true,
+            }
+          : undefined);
+      if (barrier) {
+        // Persist replay protection before erasing the live state. Boot recovery
+        // completes a crash between these two writes.
+        await saveGroupRemovalTombstone(dek, barrier);
+      }
+      groupsRef.current = groupsRef.current.filter((g) => g.id !== gid);
+      delete messagesRef.current[gid];
+      delete unreadRef.current[gid];
+      await gcRoomAttachments(gid);
+      await removeGroup(dek, gid);
+      // Delete state first. If the app crashes before this explicit discard, boot
+      // recovery sees no group and compare-clears only the stale exact marker.
+      if (!preserveMutation) await discardPendingGroupMutation(gid);
+      await gcUnreferencedHiddenContactsWithinInbox();
+      if (activeGroup === gid) {
+        setActiveGroup(null);
+        setView('list');
+      }
+      commitMessages();
+      bump();
+    });
+  }
+
+  /** External/UI group erase. The outer inbox barrier covers receive work that
+   * started before the click but has not reached appendMessage's room queue yet. */
+  async function deleteGroupAction(
+    gid: string,
+    removal?: GroupRemovalTombstone,
+    preserveMutation = false,
+  ) {
+    await enqueueInbox(() =>
+      deleteGroupActionWithinInbox(gid, removal, preserveMutation),
+    );
   }
 
   function groupTransitionContentBytes(
@@ -5802,8 +6639,8 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       group = safeOlderOwnHistory
         ? current
         : await applyGroupInvite(content.group, sender, true);
-    } catch (error) {
-      console.warn('[group] Ungültiger eigener Gruppen-Sync verworfen:', error);
+    } catch {
+      console.warn('[group] Ungültiger eigener Gruppen-Sync verworfen.');
       return;
     }
     if (
@@ -5884,8 +6721,8 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     let incoming: Group;
     try {
       incoming = await fromInvite(invite);
-    } catch (error) {
-      console.warn('[group] Ungültige Einladung verworfen:', error);
+    } catch {
+      console.warn('[group] Ungültige Einladung verworfen.');
       return null;
     }
     if (contactsRef.current.some((contact) => contact.roomId === incoming.id)) {
@@ -5963,7 +6800,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         blockReadd: true,
       };
       await saveGroupRemovalTombstone(dek, barrier);
-      if (existing) await deleteGroupAction(g.id, barrier);
+      if (existing) await deleteGroupActionWithinInbox(g.id, barrier);
       return null;
     }
     for (const member of g.members) {
@@ -5977,7 +6814,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         }
         continue;
       }
-      if (!(await ensureMemberContact(member))) {
+      if (!(await ensureMemberContactWithinInbox(member))) {
         console.warn('[group] Einladung enthält ein nicht erreichbares Mitglied.');
         return null;
       }
@@ -6005,7 +6842,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       await clearGroupRemovalTombstone(removalBarrier);
     }
     await flushGroupTransitionFrames(installed);
-    await gcUnreferencedHiddenContacts();
+    await gcUnreferencedHiddenContactsWithinInbox();
     bump();
     return installed;
   }
@@ -6022,8 +6859,8 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     let removedState: Group;
     try {
       removedState = await fromGroupStateProof(proof);
-    } catch (error) {
-      console.warn('[group] Ungültiger Entfernungsnachweis verworfen:', error);
+    } catch {
+      console.warn('[group] Ungültiger Entfernungsnachweis verworfen.');
       return;
     }
     const id = identityRef.current;
@@ -6079,7 +6916,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       blockReadd: removedState.dissolved === true,
     };
     await saveGroupRemovalTombstone(dek, barrier);
-    if (g) await deleteGroupAction(removedState.id, barrier);
+    if (g) await deleteGroupActionWithinInbox(removedState.id, barrier);
   }
 
   async function updateGroup(
@@ -6189,10 +7026,6 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       !isGroupOwner(group, id.master.publicKey)
     ) {
       setError(t('Nur das primäre Owner-Gerät kann Mitglieder entfernen.'));
-      return;
-    }
-    if (!(await ensureMemberContact(member))) {
-      setError(t('Das zu entfernende Mitglied ist kryptographisch nicht erreichbar.'));
       return;
     }
     const newGroup = {
@@ -6329,7 +7162,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       },
       id,
     );
-    const committed = await commitDurableGroupMutation(
+    const committed = await commitDurableGroupMutationWithinInbox(
       newGroup,
       [contact.peerMasterPub],
     );
@@ -6398,12 +7231,16 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   }
 
   async function saveNickname() {
-    const c = contactsRef.current.find((x) => x.roomId === activeRoom);
-    if (!c) return;
+    const roomId = activeRoom;
+    if (!roomId) return;
     const name = renameInput.trim();
-    c.nickname = name || undefined;
     setRenaming(false);
-    await saveContact(dek, c);
+    await enqueueInbox(async () => {
+      const c = contactsRef.current.find((x) => x.roomId === roomId);
+      if (!c) return;
+      c.nickname = name || undefined;
+      await saveContact(dek, c);
+    });
     bump();
   }
 
@@ -6603,7 +7440,6 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       const deliveries = await fanoutSend(contact, { kind: 'file', name, mime, data, viewOnce: viewOnce || undefined }, mid, viewOnce ? 4 : 0);
       void syncToOwnDevices(contact.peerMasterPub, 'sent', mid, localMsg.ts, { kind: 'file', name, mime, data });
       await appendMessage(contact.roomId, { ...localMsg, deliveries });
-      await saveContact(dek, contact);
       bump();
     } catch (err) {
       setError('Anhang fehlgeschlagen: ' + (err as Error).message);
@@ -6636,7 +7472,6 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         4,
       );
       await appendMessage(contact.roomId, { ...localMsg, deliveries });
-      await saveContact(dek, contact);
       bump();
     } catch (e) {
       await secureWipeAttachment(attId).catch(() => undefined);
@@ -6753,11 +7588,22 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     setRecSeconds(0);
   }
 
-  async function startRecording() {
+  async function startRecording(signal?: AbortSignal) {
     if (!activeRoom) return;
     setError('');
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Permission prompts can outlive a vault lock. If the user grants access
+      // after quiescence already ran, stop the just-created stream immediately
+      // instead of installing a microphone the cleanup could never have seen.
+      if (
+        signal?.aborted ||
+        !lifecycleActiveRef.current ||
+        runtimeSuspendedRef.current
+      ) {
+        stream.getTracks().forEach((track) => track.stop());
+        throw new MessengerInactiveError();
+      }
       recStreamRef.current = stream;
       const mime = pickAudioMime();
       const rec = new MediaRecorder(stream, {
@@ -6769,7 +7615,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       rec.ondataavailable = (e) => {
         if (e.data.size) recChunksRef.current.push(e.data);
       };
-      rec.onstop = () => void finishRecording(rec.mimeType || mime || 'audio/webm');
+      rec.onstop = () =>
+        launchRuntimeOperation(() =>
+          finishRecording(rec.mimeType || mime || 'audio/webm'),
+        );
       mediaRecorderRef.current = rec;
       rec.start();
       setRecording(true);
@@ -6781,6 +7630,9 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         });
       }, 1000);
     } catch (e) {
+      if (e instanceof MessengerInactiveError || !lifecycleActiveRef.current) {
+        return;
+      }
       setError(t('Mikrofon nicht verfügbar: {msg}', { msg: (e as Error).message }));
       cleanupRecording();
     }
@@ -6826,7 +7678,6 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       const deliveries = await fanoutSend(contact, { kind: 'file', name, mime, data }, mid);
       void syncToOwnDevices(contact.peerMasterPub, 'sent', mid, localMsg.ts, { kind: 'file', name, mime, data });
       await appendMessage(contact.roomId, { ...localMsg, deliveries });
-      await saveContact(dek, contact);
       bump();
     } catch (e) {
       setError('Senden fehlgeschlagen: ' + (e as Error).message);
@@ -6839,8 +7690,8 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     if (!id || !hasSession(contact) || profileSentRef.current.has(contact.roomId)) return;
     if (!p.name && !p.avatarB64) return;
     try {
-      const envelope = await encryptAndPersist(contact, () =>
-        sendProfile(id, contact, p.name, p.avatarB64 ? b64ToBytes(p.avatarB64) : undefined),
+      const envelope = await encryptAndPersist(contact, (current) =>
+        sendProfile(id, current, p.name, p.avatarB64 ? b64ToBytes(p.avatarB64) : undefined),
       );
       let room = sendRoomRef.current.get(contact.roomId);
       if (!room) {
@@ -6849,7 +7700,6 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       }
       (room ? relaysRef.current.get(room) : undefined)?.send(envelope, undefined, true); // profile refresh — silent
       profileSentRef.current.add(contact.roomId);
-      await saveContact(dek, contact);
     } catch {
       /* retry next session */
     }
@@ -6996,32 +7846,44 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   }
 
   async function markVerified() {
-    const c = contactsRef.current.find((x) => x.roomId === activeRoom);
-    if (!c) return;
-    c.verified = true;
-    c.verifiedSuggestion = undefined; // acted on — the hint has served its purpose
-    await saveContact(dek, c);
+    const roomId = activeRoom;
+    if (!roomId) return;
+    await enqueueInbox(async () => {
+      const c = contactsRef.current.find((x) => x.roomId === roomId);
+      if (!c) return;
+      c.verified = true;
+      c.verifiedSuggestion = undefined; // acted on — the hint has served its purpose
+      await saveContact(dek, c);
+    });
     bump();
   }
 
   /** Hide the "verified on your other device" hint for good. Only the hint — it
    *  never granted trust, so dismissing it changes nothing about `verified`. */
   async function dismissVerifiedSuggestion() {
-    const c = contactsRef.current.find((x) => x.roomId === activeRoom);
-    if (!c) return;
-    c.verifiedSuggestion = undefined;
-    c.verifiedSuggestionDismissed = true; // survives a re-delivered snapshot
-    await saveContact(dek, c);
+    const roomId = activeRoom;
+    if (!roomId) return;
+    await enqueueInbox(async () => {
+      const c = contactsRef.current.find((x) => x.roomId === roomId);
+      if (!c) return;
+      c.verifiedSuggestion = undefined;
+      c.verifiedSuggestionDismissed = true; // survives a re-delivered snapshot
+      await saveContact(dek, c);
+    });
     bump();
   }
 
   /** Acknowledge the retired-identity notice. Clears only the *notice*, never
    *  the denylist itself — the rejection stays permanent, the banner does not. */
   async function dismissRetiredNotice() {
-    const c = contactsRef.current.find((x) => x.roomId === activeRoom);
-    if (!c) return;
-    c.retiredAttempt = undefined;
-    await saveContact(dek, c);
+    const roomId = activeRoom;
+    if (!roomId) return;
+    await enqueueInbox(async () => {
+      const c = contactsRef.current.find((x) => x.roomId === roomId);
+      if (!c) return;
+      c.retiredAttempt = undefined;
+      await saveContact(dek, c);
+    });
     bump();
   }
 
@@ -7030,9 +7892,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   // accept it. Re-pins to the new identity, drops the session, forces a fresh
   // safety-number comparison. Deliberate user action only.
   async function acceptNewIdentity() {
-    const c = contactsRef.current.find((x) => x.roomId === activeRoom);
-    if (!c || !c.pendingMaster) return;
-    if (masterReferencedByLiveGroup(c.peerMasterPub)) {
+    const roomId = activeRoom;
+    const current = contactsRef.current.find((x) => x.roomId === roomId);
+    if (!roomId || !current?.pendingMaster) return;
+    if (masterReferencedByLiveGroup(current.peerMasterPub)) {
       setError(
         t('Entferne den Kontakt zuerst aus allen Gruppen; erst danach kann seine neue Identität übernommen werden.'),
       );
@@ -7040,17 +7903,30 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     }
     if (!confirm(t('Neue Identität dieses Kontakts übernehmen? Danach musst du die Sicherheitsnummer erneut vergleichen.')))
       return;
-    const r = await acceptMasterChange(c); // sets new roomId + verified=false
+    const r = await enqueueInbox(async () => {
+      const c = contactsRef.current.find((entry) => entry.roomId === roomId);
+      if (!c?.pendingMaster) return null;
+      // The roster may have changed while the confirmation dialog was open.
+      if (masterReferencedByLiveGroup(c.peerMasterPub)) {
+        setError(
+          t('Entferne den Kontakt zuerst aus allen Gruppen; erst danach kann seine neue Identität übernommen werden.'),
+        );
+        return null;
+      }
+      const changed = await acceptMasterChange(c); // sets new roomId + verified=false
+      if (!changed) return null;
+      // Commit the contact re-key BEFORE persisting the denylist entry (Review E):
+      // a crash between the two leaves the milder, self-correcting state — the
+      // contact is on the NEW master and the old master is not yet retired.
+      await reKeyContactInMemory(changed.oldRoomId, c);
+      retiredMastersRef.current = await addRetiredMaster(
+        dek,
+        changed.retiredMaster,
+      );
+      return changed;
+    });
     if (!r) return;
-    // Commit the contact re-key BEFORE persisting the denylist entry (Review E): a
-    // crash between the two must leave the milder, self-correcting state — the
-    // contact already moved to the NEW master (off the denylist), only the
-    // retirement not yet recorded — never the contact stranded on a master that is
-    // already denylisted, which would silently reject all its future device-list
-    // and rotation updates.
-    await reKeyContactInMemory(r.oldRoomId, c); // move storage + maps to the new room
-    retiredMastersRef.current = await addRetiredMaster(dek, r.retiredMaster); // global denylist
-    if (activeRoom === r.oldRoomId) setActiveRoom(r.newRoomId);
+    if (activeRoomRef.current === r.oldRoomId) setActiveRoom(r.newRoomId);
     setError('');
     bump();
   }
@@ -7060,12 +7936,21 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   // is blocked. Reconnecting resets the session; the next message runs a fresh
   // X3DH under our current identity, which the peer then has to accept.
   async function reconnectStaleContact() {
-    const c = contactsRef.current.find((x) => x.roomId === activeRoom);
+    const roomId = activeRoom;
     const id = identityRef.current;
-    if (!c || !id) return;
-    const r = await reconnectContact(c, asMasterPub(id.master.publicKey)); // sets new roomId
-    await reKeyContactInMemory(r.oldRoomId, c); // move storage + maps
-    if (activeRoom === r.oldRoomId) setActiveRoom(r.newRoomId);
+    if (!roomId || !id) return;
+    const r = await enqueueInbox(async () => {
+      const c = contactsRef.current.find((entry) => entry.roomId === roomId);
+      if (!c) return null;
+      const changed = await reconnectContact(
+        c,
+        asMasterPub(id.master.publicKey),
+      ); // sets new roomId
+      await reKeyContactInMemory(changed.oldRoomId, c);
+      return changed;
+    });
+    if (!r) return;
+    if (activeRoomRef.current === r.oldRoomId) setActiveRoom(r.newRoomId);
     setError('');
     bump();
   }
@@ -7076,7 +7961,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   // tab should not spend battery on gossip nobody is waiting for.
   useEffect(() => {
     const t = window.setInterval(() => {
-      if (document.hidden) return;
+      if (document.hidden || runtimeSuspendedRef.current) return;
       void requestBootstrap();
       void schedulePendingGroupMutationRetry();
       for (const c of contactsRef.current) void ensureListGossiped(c);
@@ -7150,7 +8035,12 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           <button className="btn btn-outline" onClick={cancelPendingMedia}>
             {t('Abbrechen')}
           </button>
-          <button className="btn btn-primary" onClick={() => void confirmPendingMedia()}>
+          <button
+            className="btn btn-primary"
+            onClick={() =>
+              launchRuntimeOperation(() => confirmPendingMedia())
+            }
+          >
             {t('Senden')}
           </button>
         </div>
@@ -7202,7 +8092,9 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                 onClick={() => {
                   const mm = msgMenu;
                   close();
-                  void deleteFromMenu(mm.roomId, mm.m);
+                  launchRuntimeOperation(() =>
+                    deleteFromMenu(mm.roomId, mm.m),
+                  );
                 }}
               >
                 <IconTrash />
@@ -7223,7 +8115,13 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           {contactsRef.current
             .filter((c) => !c.hidden && !c.staleIdentity)
             .map((c) => (
-              <button key={c.roomId} className="fwd-row" onClick={() => void forwardTo(c, forwardMsg)}>
+              <button
+                key={c.roomId}
+                className="fwd-row"
+                onClick={() =>
+                  launchRuntimeOperation(() => forwardTo(c, forwardMsg))
+                }
+              >
                 <div className="avatar-wrap">
                   {c.peerAvatarB64 ? (
                     <img className="avatar-img" src={avatarSrc(c.peerAvatarB64)} alt="" />
@@ -7253,7 +8151,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           className="btn btn-primary"
           onClick={(e) => {
             e.stopPropagation();
-            void addStickerToLibrary(stickerZoom);
+            launchRuntimeOperation(() => addStickerToLibrary(stickerZoom));
           }}
         >
           {t('Zu meinen Stickern hinzufügen')}
@@ -7282,7 +8180,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     <QrScanner
       onResult={(text) => {
         if (linkBusy || linkSessionRef.current) return;
-        void onScanNewDevice(text.trim());
+        launchRuntimeOperation(() => onScanNewDevice(text.trim()));
       }}
       onClose={closeLink}
     />
@@ -7305,7 +8203,11 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                 <button
                   className="btn btn-outline btn-tall"
                   disabled={linkBusy}
-                  onClick={() => void retryPrimaryLinkGrantDeliveryNow()}
+                  onClick={() =>
+                    launchRuntimeOperation(() =>
+                      retryPrimaryLinkGrantDeliveryNow(),
+                    )
+                  }
                 >
                   {linkBusy ? t('Zustellung läuft…') : t('Ausstehende Zustellung erneut versuchen')}
                 </button>
@@ -7313,7 +8215,11 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                   className="btn btn-danger btn-tall"
                   style={{ marginTop: 10 }}
                   disabled={linkBusy}
-                  onClick={() => void cancelPrimaryPendingLinkGrant()}
+                  onClick={() =>
+                    launchRuntimeOperation(() =>
+                      cancelPrimaryPendingLinkGrant(),
+                    )
+                  }
                 >
                   {t('Autorisierung abbrechen und widerrufen')}
                 </button>
@@ -7322,7 +8228,9 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
             <button
               className="btn btn-primary btn-tall"
               disabled={primaryLinkDeliveryPending}
-              onClick={() => void startJoinAsNewDevice()}
+              onClick={() =>
+                launchRuntimeOperation(() => startJoinAsNewDevice())
+              }
             >
               {t('Dieses Gerät verbinden')}
               <span className="link-btn-note">{t('Zeigt einen QR-Code, den das Hauptgerät scannt')}</span>
@@ -7385,7 +8293,13 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                 </button>
                 <button
                   className="btn btn-primary"
-                  onClick={() => (linkRole === 'primary' ? void onPConfirmSas() : void onNConfirmSas())}
+                  onClick={() =>
+                    launchRuntimeOperation(() =>
+                      linkRole === 'primary'
+                        ? onPConfirmSas()
+                        : onNConfirmSas(),
+                    )
+                  }
                 >
                   {t('Stimmt überein')}
                 </button>
@@ -7399,7 +8313,11 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                 <button
                   className="btn btn-danger btn-tall"
                   disabled={linkAbortBusy}
-                  onClick={() => void discardConfirmedNewDeviceRecovery()}
+                  onClick={() =>
+                    launchRuntimeOperation(() =>
+                      discardConfirmedNewDeviceRecovery(),
+                    )
+                  }
                 >
                   {linkAbortBusy
                     ? t('Recovery wird verworfen…')
@@ -7459,7 +8377,9 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       file={stickerFile}
       shape="square"
       onCancel={() => setStickerFile(null)}
-      onDone={(b, mime) => void onStickerCropped(b, mime)}
+      onDone={(b, mime) =>
+        launchRuntimeOperation(() => onStickerCropped(b, mime))
+      }
     />
   ) : null;
 
@@ -7473,13 +8393,21 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       <div className="sticker-grid">
         {stickers.map((st) => (
           <div key={st.id} className="sticker-cell">
-            <button className="sticker-btn" onClick={() => void sendSticker(st)} aria-label={t('Sticker senden')}>
+            <button
+              className="sticker-btn"
+              onClick={() =>
+                launchRuntimeOperation(() => sendSticker(st))
+              }
+              aria-label={t('Sticker senden')}
+            >
               <img src={`data:${st.mime};base64,${st.dataB64}`} alt="" />
             </button>
             <button
               className="sticker-del"
               aria-label={t('Sticker löschen')}
-              onClick={() => void deleteSticker(st.id)}
+              onClick={() =>
+                launchRuntimeOperation(() => deleteSticker(st.id))
+              }
             >
               ×
             </button>
@@ -7522,7 +8450,14 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           </button>
         </div>
       )}
-      <input ref={fileInputRef} type="file" hidden onChange={(e) => void onPickFile(e)} />
+      <input
+        ref={fileInputRef}
+        type="file"
+        hidden
+        onChange={(e) =>
+          launchRuntimeOperation(() => onPickFile(e))
+        }
+      />
       <input
         ref={stickerInputRef}
         type="file"
@@ -7551,15 +8486,29 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           defaultValue=""
           placeholder={t('Verschlüsselte Nachricht…')}
           onChange={(e) => setHasText(e.target.value.trim().length > 0)}
-          onKeyDown={(e) => e.key === 'Enter' && void onSend()}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              launchRuntimeOperation(() => onSend());
+            }
+          }}
         />
       </div>
       {hasText ? (
-        <button className="send-btn" onClick={() => void onSend()} aria-label={t('Senden')}>
+        <button
+          className="send-btn"
+          onClick={() => launchRuntimeOperation(() => onSend())}
+          aria-label={t('Senden')}
+        >
           <IconSend />
         </button>
       ) : (
-        <button className="send-btn mic" onClick={() => void startRecording()} aria-label={t('Sprachnachricht')}>
+        <button
+          className="send-btn mic"
+          onClick={() =>
+            launchRuntimeOperation((signal) => startRecording(signal))
+          }
+          aria-label={t('Sprachnachricht')}
+        >
           <IconMic />
         </button>
       )}
@@ -7741,9 +8690,18 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                 value={renameInput}
                 placeholder={t('Name für diesen Kontakt…')}
                 onChange={(e) => setRenameInput(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && void saveNickname()}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    launchRuntimeOperation(() => saveNickname());
+                  }
+                }}
               />
-              <button className="btn btn-primary" onClick={() => void saveNickname()}>
+              <button
+                className="btn btn-primary"
+                onClick={() =>
+                  launchRuntimeOperation(() => saveNickname())
+                }
+              >
                 ✓
               </button>
             </div>
@@ -7755,7 +8713,9 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
               <button
                 className="verify-line"
                 style={{ color: verified ? 'var(--verified)' : 'var(--muted)' }}
-                onClick={() => void openVerify()}
+                onClick={() =>
+                  launchRuntimeOperation(() => openVerify())
+                }
               >
                 <IconLock size={10} />
                 {verified ? t('verifiziert') : t('nicht verifiziert · antippen')}
@@ -7771,7 +8731,11 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
               <button
                 onClick={() => {
                   setChatMenu(false);
-                  if (confirm(t('Chatverlauf wirklich löschen?'))) void clearChatAction(activeContact.roomId);
+                  if (confirm(t('Chatverlauf wirklich löschen?'))) {
+                    launchRuntimeOperation(() =>
+                      clearChatAction(activeContact.roomId),
+                    );
+                  }
                 }}
               >
                 {t('Chatverlauf löschen')}
@@ -7780,7 +8744,11 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                 className="danger"
                 onClick={() => {
                   setChatMenu(false);
-                  if (confirm(t('Kontakt und Chat wirklich löschen?'))) void deleteContactAction(activeContact.roomId);
+                  if (confirm(t('Kontakt und Chat wirklich löschen?'))) {
+                    launchRuntimeOperation(() =>
+                      deleteContactAction(activeContact.roomId),
+                    );
+                  }
                 }}
               >
                 {t('Kontakt löschen')}
@@ -7828,7 +8796,11 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                       <button
                         className="pull-chip"
                         disabled={!!(m.mid && downloadingRef.current.has(m.mid))}
-                        onClick={() => void downloadR2Message(activeContact?.roomId ?? '', m)}
+                        onClick={() =>
+                          launchRuntimeOperation(() =>
+                            downloadR2Message(activeContact?.roomId ?? '', m),
+                          )
+                        }
                       >
                         <IconArchive />
                         <span className="pull-name">{m.file.name || (m.file.mime.startsWith('video/') ? t('Video') : t('Datei'))}</span>
@@ -7844,7 +8816,14 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                           <IconBomb size={14} /> {t('Foto angesehen')}
                         </span>
                       ) : (
-                        <button className="vo-open" onClick={() => void openViewOnce(activeContact?.roomId ?? '', m)}>
+                        <button
+                          className="vo-open"
+                          onClick={() =>
+                            launchRuntimeOperation(() =>
+                              openViewOnce(activeContact?.roomId ?? '', m),
+                            )
+                          }
+                        >
                           <IconBomb size={16} />
                           <span className="vo-open-tx">
                             <span className="vo-open-title">{t('Einmal ansehen')}</span>
@@ -7856,7 +8835,11 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                       <button
                         className="pull-chip"
                         disabled={!!(m.file.attId && downloadingRef.current.has(m.file.attId))}
-                        onClick={() => void pullAttachment(activeContact?.roomId ?? '', m)}
+                        onClick={() =>
+                          launchRuntimeOperation(() =>
+                            pullAttachment(activeContact?.roomId ?? '', m),
+                          )
+                        }
                       >
                         <IconArchive />
                         <span className="pull-name">{m.file.name}</span>
@@ -7942,7 +8925,11 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
               <button
                 onClick={() => {
                   setChatMenu(false);
-                  if (confirm(t('Chatverlauf wirklich löschen?'))) void clearChatAction(activeGroupData.id);
+                  if (confirm(t('Chatverlauf wirklich löschen?'))) {
+                    launchRuntimeOperation(() =>
+                      clearChatAction(activeGroupData.id),
+                    );
+                  }
                 }}
               >
                 {t('Chatverlauf löschen')}
@@ -7951,7 +8938,11 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                 className="danger"
                 onClick={() => {
                   setChatMenu(false);
-                  if (confirm(t('Gruppe wirklich verlassen?'))) void leaveGroup(activeGroupData);
+                  if (confirm(t('Gruppe wirklich verlassen?'))) {
+                    launchRuntimeOperation(() =>
+                      leaveGroup(activeGroupData),
+                    );
+                  }
                 }}
               >
                 {t('Gruppe verlassen')}
@@ -8068,7 +9059,12 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
 
           <div className="sect-lbl">{t('Kontakt hinzufügen')}</div>
           <div className="card pad16">
-            <button className="btn btn-primary" onClick={() => void pasteAndAdd()}>
+            <button
+              className="btn btn-primary"
+              onClick={() =>
+                launchRuntimeOperation(() => pasteAndAdd())
+              }
+            >
               {t('Aus Zwischenablage verbinden')}
             </button>
             <button className="btn btn-outline scan-btn" style={{ marginTop: 10 }} onClick={() => setScanning(true)}>
@@ -8081,7 +9077,12 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
               value={addInput}
               onChange={(e) => setAddInput(e.target.value)}
             />
-            <button className="btn btn-ghost" onClick={() => void addBundle(addInput)}>
+            <button
+              className="btn btn-ghost"
+              onClick={() =>
+                launchRuntimeOperation(() => addBundle(addInput))
+              }
+            >
               {t('Hinzufügen')}
             </button>
           </div>
@@ -8092,7 +9093,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
             <QrScanner
               onResult={(text) => {
                 setScanning(false);
-                void addBundle(text);
+                launchRuntimeOperation(() => addBundle(text));
               }}
               onClose={() => setScanning(false)}
             />
@@ -8148,7 +9149,13 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
               {t('Als verifiziert markiert')}
             </div>
           ) : (
-            <button className="btn btn-primary" style={{ height: 50 }} onClick={() => void markVerified()}>
+            <button
+              className="btn btn-primary"
+              style={{ height: 50 }}
+              onClick={() =>
+                launchRuntimeOperation(() => markVerified())
+              }
+            >
               {t('Als verifiziert markieren')}
             </button>
           )}
@@ -8190,7 +9197,9 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           <button
             className="contact-verify-chip"
             style={{ color: verified ? 'var(--verified)' : 'var(--muted)' }}
-            onClick={() => void openVerify()}
+            onClick={() =>
+              launchRuntimeOperation(() => openVerify())
+            }
           >
             <IconLock size={12} />
             {verified ? t('verifiziert') : t('nicht verifiziert · zum Prüfen antippen')}
@@ -8204,10 +9213,22 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                   {t('Beim Übernehmen deiner Kontakte kam die Info mit, dass du diesen Kontakt auf einem anderen Gerät schon verifiziert hast. Das allein zählt hier NICHT als Bestätigung — vergleiche die Sicherheitsnummer auf diesem Gerät selbst.')}
                 </span>
               </div>
-              <button className="btn btn-primary sm" onClick={() => void openVerify()}>
+              <button
+                className="btn btn-primary sm"
+                onClick={() =>
+                  launchRuntimeOperation(() => openVerify())
+                }
+              >
                 {t('Sicherheitsnummer vergleichen')}
               </button>
-              <button className="btn btn-ghost sm" onClick={() => void dismissVerifiedSuggestion()}>
+              <button
+                className="btn btn-ghost sm"
+                onClick={() =>
+                  launchRuntimeOperation(() =>
+                    dismissVerifiedSuggestion(),
+                  )
+                }
+              >
                 {t('Ausblenden')}
               </button>
             </div>
@@ -8221,7 +9242,14 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                   {t('Es kamen Nachrichten unter einer früheren, bereits ersetzten Identität dieses Kontakts an. Sie wurden verworfen. Das ist normal, wenn ein altes Gerät noch läuft — kann aber auch bedeuten, dass jemand einen alten Schlüssel besitzt.')}
                 </span>
               </div>
-              <button className="btn btn-ghost sm" onClick={() => void dismissRetiredNotice()}>
+              <button
+                className="btn btn-ghost sm"
+                onClick={() =>
+                  launchRuntimeOperation(() =>
+                    dismissRetiredNotice(),
+                  )
+                }
+              >
                 {t('Verstanden')}
               </button>
             </div>
@@ -8235,7 +9263,12 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                   {t('Dieser Kontakt meldet sich mit einem neuen Identitätsschlüssel — etwa nach einem Gerätewechsel. Übernimm ihn nur, wenn du sicher bist, dass es wirklich diese Person ist. Danach ist ein neuer Sicherheitsnummer-Vergleich fällig.')}
                 </span>
               </div>
-              <button className="btn btn-primary sm" onClick={() => void acceptNewIdentity()}>
+              <button
+                className="btn btn-primary sm"
+                onClick={() =>
+                  launchRuntimeOperation(() => acceptNewIdentity())
+                }
+              >
                 {t('Neue Identität akzeptieren')}
               </button>
             </div>
@@ -8249,7 +9282,14 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                   {t('Du hast ein Gerät gekoppelt, seitdem hat sich deine Identität geändert. Dieser Kontakt kennt noch die alte. „Neu verbinden“ baut die Sitzung frisch auf — die Gegenseite sieht dann eine Identitätswarnung und muss dich neu bestätigen.')}
                 </span>
               </div>
-              <button className="btn btn-primary sm" onClick={() => void reconnectStaleContact()}>
+              <button
+                className="btn btn-primary sm"
+                onClick={() =>
+                  launchRuntimeOperation(() =>
+                    reconnectStaleContact(),
+                  )
+                }
+              >
                 {t('Neu verbinden')}
               </button>
             </div>
@@ -8265,9 +9305,18 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                     value={renameInput}
                     placeholder={t('Nickname…')}
                     onChange={(e) => setRenameInput(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && void saveNickname()}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        launchRuntimeOperation(() => saveNickname());
+                      }
+                    }}
                   />
-                  <button className="btn btn-primary" onClick={() => void saveNickname()}>
+                  <button
+                    className="btn btn-primary"
+                    onClick={() =>
+                      launchRuntimeOperation(() => saveNickname())
+                    }
+                  >
                     ✓
                   </button>
                 </div>
@@ -8295,13 +9344,25 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           <div className="contact-actions">
             <button
               className="btn btn-ghost"
-              onClick={() => confirm(t('Chatverlauf wirklich löschen?')) && void clearChatAction(c.roomId)}
+              onClick={() => {
+                if (confirm(t('Chatverlauf wirklich löschen?'))) {
+                  launchRuntimeOperation(() =>
+                    clearChatAction(c.roomId),
+                  );
+                }
+              }}
             >
               {t('Chatverlauf löschen')}
             </button>
             <button
               className="btn btn-danger"
-              onClick={() => confirm(t('Kontakt und Chat wirklich löschen?')) && void deleteContactAction(c.roomId)}
+              onClick={() => {
+                if (confirm(t('Kontakt und Chat wirklich löschen?'))) {
+                  launchRuntimeOperation(() =>
+                    deleteContactAction(c.roomId),
+                  );
+                }
+              }}
             >
               {t('Kontakt löschen')}
             </button>
@@ -8351,7 +9412,18 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                     <span className="setting-sub">{isMe ? t('Dieses Gerät') : t('Verknüpftes Gerät')}</span>
                   </span>
                   {primary && (
-                    <button className="dev-act" title={t('Umbenennen')} onClick={() => void renameDevice(d.signPub, deviceNames[b64] ?? '')}>
+                    <button
+                      className="dev-act"
+                      title={t('Umbenennen')}
+                      onClick={() =>
+                        launchRuntimeOperation(() =>
+                          renameDevice(
+                            d.signPub,
+                            deviceNames[b64] ?? '',
+                          ),
+                        )
+                      }
+                    >
                       ✎
                     </button>
                   )}
@@ -8387,7 +9459,15 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
               </button>
               <button
                 className="btn btn-danger"
-                onClick={() => (removingSelf ? void unlinkSelfAction() : void removeDeviceAction(removeDev))}
+                onClick={() => {
+                  if (removingSelf) {
+                    void unlinkSelfAction();
+                  } else {
+                    launchRuntimeOperation(() =>
+                      removeDeviceAction(removeDev),
+                    );
+                  }
+                }}
               >
                 {t('Entfernen')}
               </button>
@@ -8414,7 +9494,13 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         <div className="profile-body">
           <input ref={avatarInputRef} type="file" accept="image/*" hidden onChange={onPickAvatar} />
           {cropFile && (
-            <CropModal file={cropFile} onCancel={() => setCropFile(null)} onDone={(b) => void onCropDone(b)} />
+            <CropModal
+              file={cropFile}
+              onCancel={() => setCropFile(null)}
+              onDone={(b) =>
+                launchRuntimeOperation(() => onCropDone(b))
+              }
+            />
           )}
 
           {/* Identity: avatar + name + save, one quiet line on what happens to it. */}
@@ -8431,7 +9517,12 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
               placeholder={t('Dein Name')}
               onChange={(e) => setProfileName(e.target.value)}
             />
-            <button className="btn btn-primary profile-save" onClick={() => void saveProfileMeta()}>
+            <button
+              className="btn btn-primary profile-save"
+              onClick={() =>
+                launchRuntimeOperation(() => saveProfileMeta())
+              }
+            >
               {t('Speichern & teilen')}
             </button>
             <p className="profile-id-hint">
@@ -8452,9 +9543,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                 onClick={() => {
                   if (bioOn) {
                     if (confirm(t('Face ID / Touch ID entfernen? Der Tresor bleibt per Passphrase entsperrbar.'))) {
-                      void disableBiometricUnlock()
-                        .then(() => setBioOn(false))
-                        .catch(() => {}); // header keeps prf → toggle stays on, which is the honest state
+                      launchRuntimeOperation(async () => {
+                        await disableBiometricUnlock();
+                        setBioOn(false);
+                      }); // on failure the header keeps PRF → toggle honestly stays on
                     }
                   } else {
                     setBioEnroll(true);
@@ -8574,7 +9666,11 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
 
             <div className="settings-sec">{t('Allgemein')}</div>
             {pushSupported() && (
-              <button className="setting-row" onClick={() => void togglePush()} disabled={notifBusy}>
+              <button
+                className="setting-row"
+                onClick={() => launchRuntimeOperation(() => togglePush())}
+                disabled={notifBusy}
+              >
                 <span className="setting-ic"><IconBell /></span>
                 <span className="setting-tx">
                   <span className="setting-title">{t('Benachrichtigungen')}</span>
@@ -8645,7 +9741,11 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                 <button className="btn btn-outline" onClick={() => setDeleteOpen(false)} disabled={wiping}>
                   {t('Abbrechen')}
                 </button>
-                <button className="btn btn-danger" onClick={() => void doWipeAccount()} disabled={wiping}>
+                <button
+                  className="btn btn-danger"
+                  onClick={() => void doWipeAccount().catch(() => undefined)}
+                  disabled={wiping}
+                >
                   {wiping ? '…' : t('Endgültig löschen')}
                 </button>
               </div>
@@ -8657,13 +9757,15 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
               mode={backupMode}
               dek={dek}
               onClose={() => setBackupMode(null)}
-              onBeforeImport={quiesceInbox}
+              onBeforeImport={suspendForRestore}
               onImportFailed={resumeAfterFailedRestore}
+              runRuntimeOperation={runRuntimeOperation}
             />
           )}
           {bugOpen && <BugReport onClose={() => setBugOpen(false)} />}
           {bioEnroll && (
             <BiometricEnroll
+              runRuntimeOperation={runRuntimeOperation}
               onDone={() => {
                 setBioOn(true);
                 setBioEnroll(false);
@@ -8674,6 +9776,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           {duressModal && (
             <DuressSetup
               mode={duressModal}
+              runRuntimeOperation={runRuntimeOperation}
               onDone={() => {
                 setDuressOn(duressModal === 'set');
                 setDuressModal(null);
@@ -8806,7 +9909,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
             className="btn btn-primary"
             style={{ marginTop: 18 }}
             disabled={groupSel.size === 0}
-            onClick={() => void createGroup()}
+            onClick={() => launchRuntimeOperation(() => createGroup())}
           >
             {t('Gruppe erstellen ({n})', { n: groupSel.size })}
           </button>
@@ -8856,7 +9959,15 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
               onChange={(e) => setGroupRenameInput(e.target.value)}
             />
             {canManage && (
-              <button className="btn btn-primary" style={{ width: 'auto' }} onClick={() => void renameGroup(g, groupRenameInput)}>
+              <button
+                className="btn btn-primary"
+                style={{ width: 'auto' }}
+                onClick={() =>
+                  launchRuntimeOperation(() =>
+                    renameGroup(g, groupRenameInput),
+                  )
+                }
+              >
                 ✓
               </button>
             )}
@@ -8890,7 +10001,11 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                     className="icon-mini danger"
                     aria-label={t('Entfernen')}
                     onClick={() => {
-                      if (confirm(t('{name} entfernen?', { name: m.name || t('Mitglied') }))) void removeMemberFromGroup(g, m);
+                      if (confirm(t('{name} entfernen?', { name: m.name || t('Mitglied') }))) {
+                        launchRuntimeOperation(() =>
+                          removeMemberFromGroup(g, m),
+                        );
+                      }
                     }}
                   >
                     <IconTrash size={15} />
@@ -8935,10 +10050,12 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                   className="btn btn-primary"
                   style={{ marginTop: 12 }}
                   disabled={groupSel.size === 0}
-                  onClick={async () => {
-                    await addMembersToGroup(g, [...groupSel]);
-                    setGroupSel(new Set());
-                  }}
+                  onClick={() =>
+                    launchRuntimeOperation(async () => {
+                      await addMembersToGroup(g, [...groupSel]);
+                      setGroupSel(new Set());
+                    })
+                  }
                 >
                   {t('{n} hinzufügen', { n: groupSel.size })}
                 </button>
@@ -8958,7 +10075,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                     : t('Gruppe wirklich verlassen?'),
                 )
               ) {
-                void leaveGroup(g);
+                launchRuntimeOperation(() => leaveGroup(g));
               }
             }}
           >

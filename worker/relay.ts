@@ -38,8 +38,8 @@ export interface Env {
   VAPID_PUBLIC?: string;
   VAPID_SUBJECT?: string;
   VAPID_JWK?: string;
-  // Optional bug-report sink. Two ways, checked in this order; if neither is set the
-  // report is only logged (visible via `wrangler tail`):
+  // Optional bug-report sink. Two ways, checked in this order. If neither is
+  // configured, /api/bug fails with 503 rather than claiming the report arrived:
   //  1. Resend email — set the secret RESEND_API_KEY plus the vars BUG_FROM (a verified
   //     sender, e.g. "SKYTALE <bugs@skytale.chat>") and BUG_TO (your inbox).
   //  2. A generic incoming webhook (Discord/Slack) — set the secret BUG_WEBHOOK_URL.
@@ -750,8 +750,20 @@ export class RelayRoom extends DurableObject<Env> {
 
   async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer): Promise<void> {
     try {
+      // Reject by the allocation-free representation length first. Workers can
+      // receive WebSocket frames much larger than this protocol's cap; encoding
+      // an attacker-sized string before checking it needlessly pressures the
+      // isolate's 128 MiB memory limit.
+      if (typeof raw === 'string' && raw.length > MAX_FRAME_CHARS) {
+        closeSocket(ws, 1009, 'frame too large');
+        return;
+      }
+      if (raw instanceof ArrayBuffer && raw.byteLength > MAX_FRAME_CHARS) {
+        closeSocket(ws, 1009, 'frame too large');
+        return;
+      }
       const frameBytes = typeof raw === 'string' ? enc.encode(raw).byteLength : raw.byteLength;
-      if ((typeof raw === 'string' && raw.length > MAX_FRAME_CHARS) || frameBytes > MAX_FRAME_CHARS) {
+      if (frameBytes > MAX_FRAME_CHARS) {
         closeSocket(ws, 1009, 'frame too large');
         return;
       }

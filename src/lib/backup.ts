@@ -10,6 +10,14 @@
  * via full Argon2id (the same MIN_ARGON2 floor as the vault — the recovery
  * passphrase never bypasses it). See SECURITY.md.
  *
+ * Only a PRIMARY-device snapshot is exportable/restorable. Import preserves
+ * its stable master identity but always creates a fresh device identity,
+ * prekeys and empty pairwise sessions, then retires every device contained in
+ * the snapshot and publishes only the restored device in a master-signed
+ * DeviceList at version + 1. A stale backup must never re-authorize a linked
+ * device that was revoked after the snapshot. A backup is recovery material,
+ * not a way to clone one live device onto another.
+ *
  * Note: the backup contains the master private key. After a master rotation an
  * old backup still decrypts the OLD master, which can issue device-certs for its
  * epoch to peers that haven't rotated — so old backups must be destroyed on
@@ -20,12 +28,14 @@ import {
   DEFAULT_ARGON2,
   serializeIdentity,
   deserializeIdentity,
+  freshDeviceIdentityForRestore,
   encodeDeviceList,
   decodeDeviceList,
   signDeviceList,
   verifyDeviceList,
   deviceInList,
   isPrimaryDevice,
+  PROTOCOL_VERSION,
   verify,
   getSodium,
   bytesEqual,
@@ -37,11 +47,18 @@ import {
   type Argon2Params,
   type Bytes,
   type DeviceList,
+  type IdentityKeys,
 } from '../crypto';
 import { encSection, decSection, backupMetaAad, backupAttAad } from './backupSections';
-import { serializeContact, deserializeContact, type GroupInvite } from './session';
+import {
+  serializeContact,
+  deserializeContact,
+  type Contact,
+  type GroupInvite,
+} from './session';
 import { loadOrCreateIdentity } from './identity';
 import {
+  createFreshPreKeyState,
   loadOrCreatePreKeys,
   serializePreKeys,
   deserializePreKeys,
@@ -192,8 +209,30 @@ interface BackupBlob {
   attMeta?: Record<string, AttachmentManifest>;
 }
 
-async function gather(dek: CryptoKey, attMeta: Record<string, AttachmentManifest>): Promise<Bytes> {
-  const id = await loadOrCreateIdentity(dek);
+export class LinkedDeviceBackupUnsupportedError extends Error {
+  constructor() {
+    super(
+      'Backup stammt von einem verknüpften Gerät. Ein sicherer Identitäts-Restore benötigt ein Backup vom Hauptgerät.',
+    );
+    this.name = 'LinkedDeviceBackupUnsupportedError';
+  }
+}
+
+function requirePrimaryBackupIdentity(identity: IdentityKeys): void {
+  if (!isPrimaryDevice(identity) || identity.master.privateKey.length !== 64) {
+    throw new LinkedDeviceBackupUnsupportedError();
+  }
+}
+
+async function gather(
+  dek: CryptoKey,
+  attMeta: Record<string, AttachmentManifest>,
+  sourceIdentity?: IdentityKeys,
+): Promise<Bytes> {
+  const id = sourceIdentity ?? (await loadOrCreateIdentity(dek));
+  // Defence in depth: exportBackup rejects this before scanning attachments,
+  // but gather must never become an alternate linked-device export path.
+  requirePrimaryBackupIdentity(id);
   const pre = await loadOrCreatePreKeys(dek, id);
   let deviceList = await loadOrCreateOwnDeviceList(dek, id, ownSpkPublic(pre));
   if (!deviceList) throw new Error('Geräteliste fehlt — vollständiges Backup nicht möglich.');
@@ -336,6 +375,156 @@ async function validatePreKeys(pre: PreKeyState, identitySignPub: Bytes): Promis
   }
 }
 
+export interface PreparedRestoreCrypto {
+  /** Device entry present in the snapshot and deliberately revoked by restore. */
+  sourceDeviceSignPub: Bytes;
+  /** Stable master plus a freshly generated/certified device identity. */
+  identity: IdentityKeys;
+  /** Fresh SPK/OPKs belonging only to the new device identity. */
+  prekeys: PreKeyState;
+  /** Fresh single-device directory at snapshot version + 1. */
+  deviceList: DeviceList;
+}
+
+/**
+ * Validate the snapshot's coupled identity/prekey/directory state, then renew
+ * every device-scoped secret before it can enter the restore stage.
+ *
+ * Keeping this transformation separate and pure makes the safety property
+ * testable without committing a vault generation.
+ */
+export async function regenerateBackupCryptoForRestore(
+  sourceIdentity: IdentityKeys,
+  sourcePrekeys: PreKeyState,
+  sourceDeviceList: DeviceList,
+): Promise<PreparedRestoreCrypto> {
+  requirePrimaryBackupIdentity(sourceIdentity);
+  await validatePreKeys(sourcePrekeys, sourceIdentity.sign.publicKey);
+  if (
+    !(await verifyDeviceList(
+      sourceDeviceList,
+      sourceIdentity.master.publicKey,
+      sourceIdentity.epoch,
+    )) ||
+    !deviceInList(sourceDeviceList, sourceIdentity.sign.publicKey)
+  ) {
+    throw new Error('Geräteliste gehört nicht zur Backup-Identität.');
+  }
+  const sourceEntry = sourceDeviceList.devices.find((device) =>
+    bytesEqual(device.signPub, sourceIdentity.sign.publicKey),
+  );
+  const sourceSpk = ownSpkPublic(sourcePrekeys);
+  if (
+    !sourceEntry?.signedPreKey ||
+    sourceEntry.signedPreKey.id !== sourceSpk.id ||
+    !bytesEqual(sourceEntry.signedPreKey.pub, sourceSpk.pub) ||
+    !bytesEqual(sourceEntry.signedPreKey.signature, sourceSpk.signature)
+  ) {
+    throw new Error('Geräteliste und Backup-Prekeys sind inkonsistent.');
+  }
+  if (sourceDeviceList.version >= Number.MAX_SAFE_INTEGER) {
+    throw new Error('Gerätelisten-Version kann für den sicheren Restore nicht erhöht werden.');
+  }
+
+  const identity = await freshDeviceIdentityForRestore(sourceIdentity);
+  const prekeys = await createFreshPreKeyState(identity);
+  // The snapshot cannot tell which linked devices were revoked after it was
+  // created. Carrying any of them forward could silently authorize a stale
+  // device again for peers that never observed the later revocation.
+  const deviceList = await signDeviceList(
+    identity.master.privateKey,
+    identity.master.publicKey,
+    identity.epoch,
+    sourceDeviceList.version + 1,
+    [{
+      signPub: identity.sign.publicKey,
+      dhPub: identity.dh.publicKey,
+      deviceCert: identity.deviceCert,
+      signedPreKey: ownSpkPublic(prekeys),
+      protocolVersion: PROTOCOL_VERSION,
+    }],
+  );
+  if (
+    !(await verifyDeviceList(
+      deviceList,
+      identity.master.publicKey,
+      identity.epoch,
+    )) ||
+    deviceList.devices.length !== 1 ||
+    deviceInList(deviceList, sourceIdentity.sign.publicKey) ||
+    !deviceInList(deviceList, identity.sign.publicKey)
+  ) {
+    throw new Error('Erneuerte Geräteliste konnte nicht sicher verifiziert werden.');
+  }
+  return {
+    sourceDeviceSignPub: new Uint8Array(sourceIdentity.sign.publicKey),
+    identity,
+    prekeys,
+    deviceList,
+  };
+}
+
+async function prepareBackupCrypto(blob: BackupBlob): Promise<PreparedRestoreCrypto> {
+  if (
+    !isObject(blob) ||
+    blob.v !== 1 ||
+    typeof blob.identity !== 'string'
+  ) {
+    throw new Error('Unbekanntes oder beschädigtes Backup-Format.');
+  }
+  const sourceIdentity = await deserializeIdentity(await b64decode(blob.identity));
+  // Reject before decoding the remaining metadata and, more importantly, before
+  // beginAccountRestore installs its durable write fence.
+  requirePrimaryBackupIdentity(sourceIdentity);
+  if (typeof blob.prekeys !== 'string' || typeof blob.deviceList !== 'string') {
+    throw new Error(
+      'Legacy-Backup ohne authentifizierte Geräteliste kann nicht sicher wiederhergestellt werden.',
+    );
+  }
+  const sourcePrekeys = await deserializePreKeys(await b64decode(blob.prekeys));
+  const sourceDeviceList = await decodeDeviceList(await b64decode(blob.deviceList));
+  return regenerateBackupCryptoForRestore(
+    sourceIdentity,
+    sourcePrekeys,
+    sourceDeviceList,
+  );
+}
+
+/**
+ * Drop every device-session secret from a restored contact. Public peer
+ * directories and human trust metadata remain useful for a fresh X3DH setup.
+ * The hidden self-contact is rebuilt at boot against the renewed own list.
+ */
+export function sanitizeContactForRestore(
+  contact: Contact,
+  ownMasterPub: Bytes,
+): Contact | null {
+  if (bytesEqual(contact.peerMasterPub, ownMasterPub)) return null;
+  return {
+    ...contact,
+    bundle: contact.bundle?.oneTimePreKey
+      ? { ...contact.bundle, oneTimePreKey: undefined }
+      : contact.bundle,
+    sessions: new Map(),
+  };
+}
+
+/** Move only the source label to the sole restored device. Snapshot labels for
+ * retired linked devices must not survive as misleading local state. */
+export async function remapDeviceNamesForRestore(
+  names: DeviceNames,
+  sourceDeviceSignPub: Bytes,
+  restoredDeviceSignPub: Bytes,
+): Promise<DeviceNames> {
+  const sourceKey = await b64encode(sourceDeviceSignPub);
+  const restoredKey = await b64encode(restoredDeviceSignPub);
+  const remapped = Object.create(null) as DeviceNames;
+  if (Object.prototype.hasOwnProperty.call(names, sourceKey)) {
+    remapped[restoredKey] = names[sourceKey];
+  }
+  return remapped;
+}
+
 async function putStaged(
   stageId: string,
   key: string,
@@ -350,7 +539,14 @@ async function putStaged(
  * Validate and stage every non-attachment record. Staging is deliberately
  * invisible: no live account state changes until commitRestoreStage().
  */
-async function stageMetadata(dek: CryptoKey, stageId: string, blob: BackupBlob): Promise<void> {
+async function stageMetadata(
+  dek: CryptoKey,
+  stageId: string,
+  blob: BackupBlob,
+  restoredCrypto: PreparedRestoreCrypto,
+  signal?: AbortSignal,
+): Promise<void> {
+  throwIfBackupAborted(signal);
   if (!isObject(blob) || blob.v !== 1 || !Number.isFinite(blob.createdAt)) {
     throw new Error('Unbekanntes oder beschädigtes Backup-Format.');
   }
@@ -362,42 +558,15 @@ async function stageMetadata(dek: CryptoKey, stageId: string, blob: BackupBlob):
     throw new Error('Ungültiger oder zu großer Nachrichtenindex im Backup.');
   }
 
-  const identity = await deserializeIdentity(await b64decode(blob.identity));
-  const prekeys = await deserializePreKeys(await b64decode(blob.prekeys));
-  await validatePreKeys(prekeys, identity.sign.publicKey);
-
-  let deviceList: DeviceList;
-  if (blob.deviceList) {
-    deviceList = await decodeDeviceList(await b64decode(blob.deviceList));
-  } else {
-    // Absence cannot prove that the snapshot predates multi-device use. Minting
-    // version 1 would silently forget linked devices and be rejected as rollback
-    // by peers while those old devices remain authorised there.
-    throw new Error('Legacy-Backup ohne authentifizierte Geräteliste kann nicht sicher wiederhergestellt werden.');
-  }
-  if (
-    !(await verifyDeviceList(deviceList, identity.master.publicKey, identity.epoch)) ||
-    !deviceInList(deviceList, identity.sign.publicKey)
-  ) {
-    throw new Error('Geräteliste gehört nicht zur Backup-Identität.');
-  }
+  const { identity, prekeys, deviceList } = restoredCrypto;
   boundedArray(deviceList.devices, 'Geräte', 1000);
-  const ownEntry = deviceList.devices.find((d) => bytesEqual(d.signPub, identity.sign.publicKey));
-  const ownSpk = ownSpkPublic(prekeys);
-  if (
-    !ownEntry?.signedPreKey ||
-    ownEntry.signedPreKey.id !== ownSpk.id ||
-    !bytesEqual(ownEntry.signedPreKey.pub, ownSpk.pub) ||
-    !bytesEqual(ownEntry.signedPreKey.signature, ownSpk.signature)
-  ) {
-    throw new Error('Geräteliste und Backup-Prekeys sind inkonsistent.');
-  }
 
-  const deviceNames = blob.deviceNames ?? {};
-  if (!isObject(deviceNames) || Object.keys(deviceNames).length > 1000) {
+  const importedDeviceNames = blob.deviceNames ?? {};
+  if (!isObject(importedDeviceNames) || Object.keys(importedDeviceNames).length > 1000) {
     throw new Error('Ungültige Gerätenamen im Backup.');
   }
-  for (const [device, name] of Object.entries(deviceNames)) {
+  for (const [device, name] of Object.entries(importedDeviceNames)) {
+    throwIfBackupAborted(signal);
     if (
       typeof name !== 'string' ||
       name.length > 40 ||
@@ -407,6 +576,11 @@ async function stageMetadata(dek: CryptoKey, stageId: string, blob: BackupBlob):
       throw new Error('Ungültiger Gerätename im Backup.');
     }
   }
+  const deviceNames = await remapDeviceNamesForRestore(
+    importedDeviceNames,
+    restoredCrypto.sourceDeviceSignPub,
+    identity.sign.publicKey,
+  );
 
   if (!isObject(blob.profile)) throw new Error('Ungültiges Profil im Backup.');
   if (
@@ -419,6 +593,7 @@ async function stageMetadata(dek: CryptoKey, stageId: string, blob: BackupBlob):
   const contacts = [];
   const roomIds = new Set<string>();
   for (const encoded of blob.contacts) {
+    throwIfBackupAborted(signal);
     if (typeof encoded !== 'string') throw new Error('Ungültiger Kontakt im Backup.');
     const contact = await deserializeContact(await b64decode(encoded));
     validId(contact.roomId, 'Kontakt');
@@ -431,14 +606,18 @@ async function stageMetadata(dek: CryptoKey, stageId: string, blob: BackupBlob):
       throw new Error('Inkonsistenter Kontakt im Backup.');
     }
     roomIds.add(contact.roomId);
-    // A restored snapshot cannot know whether an advertised one-time prekey was
-    // consumed after capture. Dropping it safely falls back to signed-prekey X3DH.
-    if (contact.bundle?.oneTimePreKey) contact.bundle = { ...contact.bundle, oneTimePreKey: undefined };
-    contacts.push(contact);
+    const sanitized = sanitizeContactForRestore(
+      contact,
+      identity.master.publicKey,
+    );
+    // The hidden self-contact contains sessions to our own backed-up devices.
+    // Recreate it at boot against the fresh identity/list instead of cloning it.
+    if (sanitized) contacts.push(sanitized);
   }
 
   const groups: Group[] = [];
   for (const invite of blob.groups) {
+    throwIfBackupAborted(signal);
     if (!isObject(invite)) throw new Error('Ungültige Gruppe im Backup.');
     const group = await fromInvite(invite as unknown as GroupInvite);
     validId(group.id, 'Gruppen');
@@ -451,6 +630,7 @@ async function stageMetadata(dek: CryptoKey, stageId: string, blob: BackupBlob):
   const groupTombstones = [];
   const tombstoneIds = new Set<string>();
   for (const encoded of tombstoneWires) {
+    throwIfBackupAborted(signal);
     if (!isObject(encoded)) {
       throw new Error('Ungültiger Gruppen-Tombstone im Backup.');
     }
@@ -465,6 +645,7 @@ async function stageMetadata(dek: CryptoKey, stageId: string, blob: BackupBlob):
   }
 
   for (const [roomId, messages] of Object.entries(blob.messages)) {
+    throwIfBackupAborted(signal);
     validId(roomId, 'Nachrichtenraum');
     boundedArray(messages, 'Nachrichten', MAX_MESSAGES_PER_ROOM);
   }
@@ -483,12 +664,14 @@ async function stageMetadata(dek: CryptoKey, stageId: string, blob: BackupBlob):
   const importedRetired = blob.retiredMasters ?? [];
   boundedArray(importedRetired, 'Retired-Master');
   for (const master of importedRetired) {
+    throwIfBackupAborted(signal);
     if (typeof master !== 'string' || master.length > 128 || (await b64decode(master)).length !== 32) {
       throw new Error('Ungültiger retired-master-Eintrag im Backup.');
     }
     retired.add(master);
   }
 
+  throwIfBackupAborted(signal);
   await putStaged(stageId, 'identity', dek, await serializeIdentity(identity), aad.identity);
   await putStaged(stageId, 'prekeys', dek, await serializePreKeys(prekeys), aad.prekeys);
   await putStaged(stageId, 'devicelist', dek, await encodeDeviceList(deviceList), aad.devices);
@@ -502,6 +685,7 @@ async function stageMetadata(dek: CryptoKey, stageId: string, blob: BackupBlob):
   await putStaged(stageId, 'profile', dek, utf8.encode(JSON.stringify(blob.profile)), aad.profile);
 
   for (const contact of contacts) {
+    throwIfBackupAborted(signal);
     await putStaged(
       stageId,
       `contact:${contact.roomId}`,
@@ -519,6 +703,7 @@ async function stageMetadata(dek: CryptoKey, stageId: string, blob: BackupBlob):
   );
 
   for (const group of groups) {
+    throwIfBackupAborted(signal);
     await putStaged(
       stageId,
       `group:${group.id}`,
@@ -535,6 +720,7 @@ async function stageMetadata(dek: CryptoKey, stageId: string, blob: BackupBlob):
     aad.groups,
   );
   for (const tombstone of groupTombstones) {
+    throwIfBackupAborted(signal);
     await stageRestoreRecord(
       stageId,
       groupRemovalTombstoneRecordKey(tombstone.groupId),
@@ -543,6 +729,7 @@ async function stageMetadata(dek: CryptoKey, stageId: string, blob: BackupBlob):
   }
 
   for (const [roomId, messages] of Object.entries(blob.messages)) {
+    throwIfBackupAborted(signal);
     const raw = crypto.getRandomValues(new Uint8Array(32)) as Uint8Array<ArrayBuffer>;
     const roomKey = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
     await putStaged(stageId, `roomkey:${roomId}`, dek, raw, aad.roomKey(roomId));
@@ -559,12 +746,21 @@ async function stageMetadata(dek: CryptoKey, stageId: string, blob: BackupBlob):
   await putStaged(stageId, 'stickers', dek, utf8.encode(JSON.stringify(stickers)), aad.stickers);
   await putStaged(stageId, 'retired-masters', dek, utf8.encode(JSON.stringify([...retired])), aad.retired);
   await putStaged(stageId, 'recalled-mids', dek, utf8.encode(JSON.stringify(recalled)), aad.recalled);
+  throwIfBackupAborted(signal);
 }
 
 // --- Public API ------------------------------------------------------------
 
 const CORRUPT = 'Beschädigtes Backup — die Datei ist unvollständig oder kein SKYTALE-Backup.';
 const WRONG_PASS = 'Falsche Export-Passphrase oder beschädigtes Backup.';
+
+function throwIfBackupAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  const error = new Error('Backup-Vorgang wurde wegen der Tresor-Sperre abgebrochen.');
+  error.name = 'AbortError';
+  throw error;
+}
 
 async function sliceBytes(file: Blob, start: number, end: number): Promise<Bytes> {
   if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end > file.size) {
@@ -704,7 +900,9 @@ async function exportAttachment(
   source: AttachmentMeta,
   manifest: Required<Pick<AttachmentManifest, 'size' | 'chunks'>>,
   bodyParts: BlobPart[],
+  signal?: AbortSignal,
 ): Promise<V4BinaryHeader['atts'][number]> {
+  throwIfBackupAborted(signal);
   const sourceKey = await sourceAttachmentKey(dek, id);
   const chunks: V4BinaryHeader['atts'][number]['chunks'] = [];
   let buffer = new Uint8Array(BACKUP_CHUNK);
@@ -712,6 +910,7 @@ async function exportAttachment(
   let total = 0;
 
   const flush = async (): Promise<void> => {
+    throwIfBackupAborted(signal);
     const index = chunks.length;
     const plain = buffer.slice(0, used);
     const sec = await encSection(exportKey, plain, v4AttAad(id, index, manifest.chunks, manifest.size));
@@ -722,6 +921,7 @@ async function exportAttachment(
   };
 
   for (let i = 0; i < source.chunks; i++) {
+    throwIfBackupAborted(signal);
     const rec = await loadRecord(`att:${id}:${i}`);
     if (!rec) throw new Error(`Attachment ${id} ist unvollständig.`);
     const plain = await open(sourceKey, rec, aad.attChunk(id, i));
@@ -738,6 +938,7 @@ async function exportAttachment(
   }
   if (total !== manifest.size) throw new Error(`Attachment ${id} ist unvollständig.`);
   if (used > 0 || chunks.length === 0) await flush();
+  throwIfBackupAborted(signal);
   if (chunks.length !== manifest.chunks) throw new Error(`Attachment ${id} hat eine inkonsistente Chunkzahl.`);
   return { id, chunks };
 }
@@ -746,7 +947,18 @@ async function exportAttachment(
  * Produce a v4 backup. Attachments are read and encrypted in bounded 4 MiB
  * chunks; the encrypted metadata carries their complete size/chunk manifest.
  */
-export async function exportBackup(dek: CryptoKey, exportPassphrase: string): Promise<Blob> {
+export async function exportBackup(
+  dek: CryptoKey,
+  exportPassphrase: string,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  throwIfBackupAborted(signal);
+  // A linked device has no master private key and therefore cannot be restored
+  // as a distinct, newly certified device. Reject before attachment scans/KDF
+  // rather than producing a file whose only possible identity restore is a clone.
+  const sourceIdentity = await loadOrCreateIdentity(dek);
+  throwIfBackupAborted(signal);
+  requirePrimaryBackupIdentity(sourceIdentity);
   if ((await loadPendingGroupMutationSnapshots(dek)).length > 0) {
     throw new Error(
       'Eine Gruppenänderung wartet noch auf bestätigte Zustellung. Backup danach erneut starten.',
@@ -756,8 +968,10 @@ export async function exportBackup(dek: CryptoKey, exportPassphrase: string): Pr
   const attMeta: Record<string, AttachmentManifest> = Object.create(null) as Record<string, AttachmentManifest>;
   let totalPlain = 0;
   const ids = await allAttachmentIds();
+  throwIfBackupAborted(signal);
   if (ids.length > MAX_ATTACHMENTS) throw new Error('Zu viele Attachments für ein Backup.');
   for (const id of ids) {
+    throwIfBackupAborted(signal);
     validId(id, 'Attachment');
     const meta = await getAttachmentMeta(dek, id);
     if (!meta) continue; // incomplete/orphaned local data is not a readable attachment
@@ -774,7 +988,9 @@ export async function exportBackup(dek: CryptoKey, exportPassphrase: string): Pr
 
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const key = await deriveExportKey(exportPassphrase, salt, DEFAULT_ARGON2);
-  const metaPlain = await gather(dek, attMeta);
+  throwIfBackupAborted(signal);
+  const metaPlain = await gather(dek, attMeta, sourceIdentity);
+  throwIfBackupAborted(signal);
   if ((await loadPendingGroupMutationSnapshots(dek)).length > 0) {
     throw new Error(
       'Während des Backups wurde eine Gruppenänderung gestartet. Backup danach erneut starten.',
@@ -785,8 +1001,9 @@ export async function exportBackup(dek: CryptoKey, exportPassphrase: string): Pr
   const bodyParts: BlobPart[] = [new Blob([metaSec.ct])];
   const atts: V4BinaryHeader['atts'] = [];
   for (const [id, meta] of source) {
+    throwIfBackupAborted(signal);
     const manifest = attMeta[id] as Required<Pick<AttachmentManifest, 'size' | 'chunks'>>;
-    atts.push(await exportAttachment(dek, key, id, meta, manifest, bodyParts));
+    atts.push(await exportAttachment(dek, key, id, meta, manifest, bodyParts, signal));
   }
 
   const header: V4BinaryHeader = {
@@ -802,6 +1019,7 @@ export async function exportBackup(dek: CryptoKey, exportPassphrase: string): Pr
   const prefix = new Uint8Array(4);
   new DataView(prefix.buffer).setUint32(0, headerBytes.length);
   const out = new Blob([prefix, headerBytes, ...bodyParts], { type: 'application/octet-stream' });
+  throwIfBackupAborted(signal);
   if (out.size > MAX_TOTAL_FILE) throw new Error('Backup überschreitet die maximale Gesamtgröße.');
   return out;
 }
@@ -812,7 +1030,9 @@ async function stageAttachmentPieces(
   id: string,
   manifest: AttachmentManifest,
   pieces: AsyncIterable<Bytes>,
+  signal?: AbortSignal,
 ): Promise<void> {
+  throwIfBackupAborted(signal);
   validId(id, 'Attachment');
   const expected = manifest.size;
   if (expected !== undefined) assertInt(expected, 0, MAX_ATTACHMENT, 'Attachment-Größe');
@@ -823,9 +1043,11 @@ async function stageAttachmentPieces(
   let total = 0;
   let index = 0;
   for await (const piece of pieces) {
+    throwIfBackupAborted(signal);
     total += piece.length;
     if (total > (expected ?? MAX_LEGACY_SECTION)) throw new Error('Attachment überschreitet seine deklarierte Größe.');
     for (let off = 0; off < piece.length; off += STORE_CHUNK) {
+      throwIfBackupAborted(signal);
       await putStaged(
         stageId,
         `att:${id}:${index}`,
@@ -848,6 +1070,7 @@ async function stageAttachmentPieces(
     chunks: index,
   };
   await putStaged(stageId, `att:${id}:meta`, key, utf8.encode(JSON.stringify(stored)), aad.attMeta(id));
+  throwIfBackupAborted(signal);
 }
 
 function newStageId(): string {
@@ -858,13 +1081,23 @@ async function commitStagedRestore(
   dek: CryptoKey,
   blob: BackupBlob,
   attachments: (stageId: string) => Promise<void>,
+  signal?: AbortSignal,
 ): Promise<void> {
+  // Decode, authenticate and renew device-scoped secrets before installing the
+  // restore fence. A linked-device backup is therefore rejected without
+  // pausing the live account or opening an invisible restore generation.
+  const restoredCrypto = await prepareBackupCrypto(blob);
+  throwIfBackupAborted(signal);
   const stageId = newStageId();
   await beginAccountRestore();
   let committed = false;
   try {
-    await stageMetadata(dek, stageId, blob);
+    throwIfBackupAborted(signal);
+    await stageMetadata(dek, stageId, blob, restoredCrypto, signal);
     await attachments(stageId);
+    // This is the irreversible boundary. A lock/decoy switch aborts before the
+    // single atomic generation replacement, never halfway through it.
+    throwIfBackupAborted(signal);
     await commitRestoreStage(stageId);
     committed = true;
   } catch (error) {
@@ -889,9 +1122,16 @@ function parseMeta(bytes: Bytes): BackupBlob {
  * Restore by staging a complete replacement generation. Any parse, AEAD,
  * semantic, quota, or attachment error happens before the atomic commit.
  */
-export async function importBackup(dek: CryptoKey, exportPassphrase: string, file: Blob): Promise<number> {
+export async function importBackup(
+  dek: CryptoKey,
+  exportPassphrase: string,
+  file: Blob,
+  signal?: AbortSignal,
+): Promise<number> {
+  throwIfBackupAborted(signal);
   if (!Number.isSafeInteger(file.size) || file.size < 1 || file.size > MAX_TOTAL_FILE) throw new Error(CORRUPT);
   const head = await sliceBytes(file, 0, Math.min(4, file.size));
+  throwIfBackupAborted(signal);
 
   // Legacy v1 is deliberately capped because it requires one whole-file JSON
   // allocation and one whole ciphertext allocation.
@@ -913,6 +1153,7 @@ export async function importBackup(dek: CryptoKey, exportPassphrase: string, fil
     const ct = await b64decode(container.ct);
     if (ct.length < GCM_TAG || ct.length > MAX_LEGACY_FILE) throw new Error(CORRUPT);
     const key = await deriveExportKey(exportPassphrase, salt, container.argon2);
+    throwIfBackupAborted(signal);
     let plain: Bytes;
     try {
       plain = await decSection(key, iv, ct);
@@ -920,7 +1161,8 @@ export async function importBackup(dek: CryptoKey, exportPassphrase: string, fil
       throw new Error(WRONG_PASS);
     }
     const blob = parseMeta(plain);
-    await commitStagedRestore(dek, blob, async () => undefined);
+    throwIfBackupAborted(signal);
+    await commitStagedRestore(dek, blob, async () => undefined, signal);
     return 0;
   }
 
@@ -940,6 +1182,7 @@ export async function importBackup(dek: CryptoKey, exportPassphrase: string, fil
   const salt = await fixedB64(header.salt, 16, 'Backup-Salt');
   const metaIv = await fixedB64(header.meta.iv, 12, 'Meta-IV');
   const key = await deriveExportKey(exportPassphrase, salt, header.argon2);
+  throwIfBackupAborted(signal);
   let off = bodyStart;
   const metaCt = await sliceBytes(file, off, off + header.meta.len);
   off += header.meta.len;
@@ -952,9 +1195,11 @@ export async function importBackup(dek: CryptoKey, exportPassphrase: string, fil
   }
   const blob = parseMeta(metaPlain);
   validateBackupManifest(blob, header);
+  throwIfBackupAborted(signal);
 
   await commitStagedRestore(dek, blob, async (stageId) => {
     for (const attachment of header.atts) {
+      throwIfBackupAborted(signal);
       const manifest =
         blob.attMeta && Object.prototype.hasOwnProperty.call(blob.attMeta, attachment.id)
           ? blob.attMeta[attachment.id]
@@ -964,6 +1209,7 @@ export async function importBackup(dek: CryptoKey, exportPassphrase: string, fil
         const entry = attachment as V4BinaryHeader['atts'][number];
         const pieces = (async function* (): AsyncGenerator<Bytes> {
           for (let i = 0; i < entry.chunks.length; i++) {
+            throwIfBackupAborted(signal);
             const chunk = entry.chunks[i];
             const start = off;
             off += chunk.len;
@@ -979,12 +1225,13 @@ export async function importBackup(dek: CryptoKey, exportPassphrase: string, fil
             }
           }
         })();
-        await stageAttachmentPieces(dek, stageId, entry.id, manifest, pieces);
+        await stageAttachmentPieces(dek, stageId, entry.id, manifest, pieces, signal);
       } else {
         const entry = attachment as LegacyBinaryHeader['atts'][number];
         const start = off;
         off += entry.len;
         const pieces = (async function* (): AsyncGenerator<Bytes> {
+          throwIfBackupAborted(signal);
           try {
             yield await decSection(
               key,
@@ -996,10 +1243,11 @@ export async function importBackup(dek: CryptoKey, exportPassphrase: string, fil
             throw new Error(CORRUPT);
           }
         })();
-        await stageAttachmentPieces(dek, stageId, entry.id, manifest, pieces);
+        await stageAttachmentPieces(dek, stageId, entry.id, manifest, pieces, signal);
       }
     }
     if (off !== file.size) throw new Error(CORRUPT);
-  });
+    throwIfBackupAborted(signal);
+  }, signal);
   return 0;
 }

@@ -8,12 +8,23 @@ const ok = (n, c) => { if (c) { pass++; console.log('  ok  ', n); } else { fail+
 
 console.log('\n[recall frame round-trips its target mid]');
 
-const framed = await S.frameContent({ kind: 'recall', targetMid: 'a1b2c3d4e5f6a1b2c3d4e5f6' });
+const wireMid = 'a1'.repeat(16);
+const framed = await S.frameContent({ kind: 'recall', targetMid: wireMid });
 ok('frame byte is 15', framed[0] === 15);
 const back = await S.unframeContent(framed);
-ok('decodes as kind recall with the target mid', back.kind === 'recall' && back.targetMid === 'a1b2c3d4e5f6a1b2c3d4e5f6');
+ok('decodes as kind recall with the target mid', back.kind === 'recall' && back.targetMid === wireMid);
 // NEGATIVE CONTROL: a recall must not be misread as a text/file message.
 ok('Negativkontrolle: nicht als text/file fehlinterpretiert', back.kind !== 'text' && back.kind !== 'file');
+let invalidRecallRejected = false;
+try {
+  await S.unframeContent(new Uint8Array([
+    15,
+    ...new TextEncoder().encode(JSON.stringify({ m: 'not-a-real-mid'.repeat(1000) })),
+  ]));
+} catch {
+  invalidRecallRejected = true;
+}
+ok('missgebildete/überlange Recall-ID wird vor der Registry abgewiesen', invalidRecallRejected);
 
 console.log('\n[recall registry is room + direction scoped]');
 const reflectedMid = '11111111111111111111111111111111';
@@ -80,6 +91,31 @@ ok('Room-Rekey entfernt danach nur alte Aliase und bewahrt Richtung/Fremdräume'
   S.recallRegistryHas(completedMove, 'room-new', false, reflectedMid) &&
   S.recallRegistryHas(completedMove, 'room-new', true, legacyMid) &&
   S.recallRegistryHas(completedMove, 'room-other', false, legacyMid));
+
+console.log('\n[recall registry is globally and per peer bounded]');
+const flooded = [];
+for (let i = 0; i < S.MAX_RECALLS_PER_SCOPE + 25; i++) {
+  flooded.push(S.recallRegistryKey(
+    'room-flood',
+    false,
+    i.toString(16).padStart(32, '0'),
+  ));
+}
+const bounded = S.normalizeRecallRegistry([
+  'v2:malformed',
+  ...flooded,
+  S.recallRegistryKey('room-safe', false, 'f'.repeat(32)),
+]);
+ok('ein Peer-Scope kann die persistente Registry nicht unbegrenzt vergrößern',
+  bounded.filter((value) => value.includes(':room-flood:')).length === S.MAX_RECALLS_PER_SCOPE);
+ok('neuere Intents und andere Räume bleiben beim Begrenzen erhalten',
+  S.recallRegistryHas(new Set(bounded), 'room-flood', false,
+    (S.MAX_RECALLS_PER_SCOPE + 24).toString(16).padStart(32, '0')) &&
+  S.recallRegistryHas(new Set(bounded), 'room-safe', false, 'f'.repeat(32)));
+ok('globale Obergrenze ist explizit und kleiner als unbeschränkt',
+  bounded.length <= S.MAX_RECALLED_MIDS && S.MAX_RECALLED_MIDS === 4096);
+ok('legacy/nonhex Attachment-TID ist einfach kein Recall-Treffer (kein Throw/Poison)',
+  S.recallRegistryHas(new Set(), 'room-a', false, 'legacy_base64url_tid') === false);
 
 console.log('\n[recalled attachments leave no orphan]');
 const recalledAttachmentMid = '44444444444444444444444444444444';

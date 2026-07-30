@@ -1,8 +1,9 @@
 /**
  * Device key — a non-extractable AES-256-GCM CryptoKey generated once per
- * device/browser-profile and stored in IndexedDB. Its raw bytes can never be
- * read by JavaScript, so it can't be exfiltrated. We use it to bind the vault
- * to this device (see vaultService).
+ * device/browser-profile and stored in IndexedDB. Its raw bytes cannot be
+ * exported through WebCrypto. Hostile same-origin code can nevertheless USE
+ * the key as a decrypt oracle, so this binds passive/copied vault data to the
+ * browser profile but is not an XSS sandbox (see vaultService).
  */
 import { loadDeviceKey, saveDeviceKey } from './db';
 

@@ -20,6 +20,7 @@ const quota = readFileSync(new URL('../worker/blob-quota.ts', import.meta.url), 
 const wrangler = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8');
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 const lifecycle = JSON.parse(readFileSync(new URL('../r2-lifecycle.json', import.meta.url), 'utf8'));
+const deployPreflight = readFileSync(new URL('../scripts/deploy-preflight.mjs', import.meta.url), 'utf8');
 
 console.log('\n[worker: beide produktiven Origins bleiben HTTPS-only]');
 ok('Custom Domain und absichtlich unterstützter workers.dev-Origin sind fest allowgelistet',
@@ -31,6 +32,15 @@ ok('workers.dev bleibt aktiviert und wird nicht als Migrationsrest dokumentiert'
   !wrangler.includes('AFTER every client has migrated'));
 ok('HSTS wird auf beiden expliziten Produktionshosts gesetzt',
   /url\.protocol === 'https:' && PROD_HOSTS\.has\(url\.hostname\)/.test(index));
+ok('CSP sperrt ungenutzte Base/Form/Frame/Eventhandler-Sinks ohne React-Styleattribute zu brechen',
+  index.includes(`"base-uri 'none'"`) &&
+  index.includes(`"form-action 'none'"`) &&
+  index.includes(`"frame-src 'none'"`) &&
+  index.includes(`"script-src-attr 'none'"`) &&
+  index.includes(`"style-src-elem 'self'"`) &&
+  index.includes(`"style-src-attr 'unsafe-inline'"`));
+ok('persistente Invocation Logs sind aus Metadatenschutzgründen deaktiviert',
+  /\[observability\.logs\][\s\S]*?invocation_logs\s*=\s*false/.test(wrangler));
 
 console.log('\n[worker: relay trust boundaries]');
 ok('outer Worker overwrites the internal actor header before DO routing',
@@ -50,6 +60,10 @@ ok('durable room and global actor byte/frame budgets are both charged',
   /CREATE TABLE IF NOT EXISTS actor_window/.test(relay) &&
   /chargeRoomActor\(att\.actor, bytes\)/.test(relay) &&
   /RELAY_GUARD\.getByName\(att\.actor\)\.charge\(bytes\)/.test(relay));
+const rawLengthGuard = relay.indexOf("if (typeof raw === 'string' && raw.length > MAX_FRAME_CHARS)");
+const rawEncoding = relay.indexOf("const frameBytes = typeof raw === 'string' ? enc.encode(raw).byteLength");
+ok('übergroße WS-Strings werden vor UTF-8-Allokation verworfen',
+  rawLengthGuard >= 0 && rawEncoding > rawLengthGuard);
 ok('owner slot protection evicts only unauthenticated sockets',
   /if \(!att\.owner\) guests\.push/.test(relay) &&
   /if \(!oldest\) return false/.test(relay));
@@ -113,11 +127,20 @@ ok('ambiguous Worker abort/complete paths remain charged for DO retry',
   /quota\s*\.deferCompletionCleanup/.test(index) &&
   !/quota\.restoreActive\(key, uploadId, token\)/.test(index));
 
-console.log('\n[deploy: repository-controlled R2 lifecycle]');
+console.log('\n[deploy: provenance preflight + separately controlled R2 lifecycle]');
 const deploy = pkg.scripts.deploy;
-ok('deploy applies lifecycle before publishing Worker code',
-  deploy.indexOf('cf:lifecycle:apply') >= 0 &&
-  deploy.indexOf('cf:lifecycle:apply') < deploy.indexOf('wrangler deploy'));
+ok('normal deploy never changes the R2 deletion lifecycle',
+  !deploy.includes('cf:lifecycle:apply') &&
+  deploy.includes('wrangler deploy'));
+ok('deploy checks a clean published commit before and after the build',
+  deploy.match(/deploy:preflight/g)?.length === 2 &&
+  deploy.indexOf('deploy:preflight') < deploy.indexOf('npm run build') &&
+  deploy.lastIndexOf('deploy:preflight') < deploy.indexOf('wrangler deploy'));
+ok('preflight verifies worktree, attached upstream and current remote SHA',
+  deployPreflight.includes("'status', '--porcelain=v1', '--untracked-files=all'") &&
+  deployPreflight.includes("'symbolic-ref', '--quiet', '--short', 'HEAD'") &&
+  deployPreflight.includes("'@{upstream}'") &&
+  deployPreflight.includes("'ls-remote', '--exit-code'"));
 ok('lifecycle application is non-interactive and repository-backed',
   pkg.scripts['cf:lifecycle:apply'] ===
     'wrangler r2 bucket lifecycle set skytale-blobs --file ./r2-lifecycle.json --force');

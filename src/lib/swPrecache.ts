@@ -38,34 +38,8 @@ export function isScytalePrecache(name: string): boolean {
   return name === 'scytale-precache' || name.startsWith(PRECACHE_PREFIX);
 }
 
-/**
- * Look up a request in ANY installed SKYTALE precache, not only the active build's.
- *
- * A precache is only ever populated by populateBuildPrecache, which SHA-256-verifies every hashed
- * asset against the manifest revision before `cache.put` (the sole structural exception is the shell
- * `/index.html`, validated by strict-CSP + reference checks because the CDN rewrites it per request).
- * A hit is therefore trusted, content-addressed bytes from some SKYTALE build — safe to serve. This
- * NEVER touches the live network (read-only over Cache Storage): a miss returns undefined so the
- * caller can fail closed, it never falls through to `fetch`.
- *
- * Purpose: close the update-window build skew. A (possibly old-iOS, possibly uncontrolled)
- * navigation that loaded a DIFFERENT build's shell than this worker's active precache would otherwise
- * 503 its hashed JS/CSS and blank the page; during that window the concurrent build's precache is
- * still installed and holds exactly those bytes. Only SKYTALE precaches are consulted
- * (`isScytalePrecache`); the push-control cache and any other cache name are ignored.
- */
-export async function findInAnyScytalePrecache(req: Request): Promise<Response | undefined> {
-  for (const name of await caches.keys()) {
-    if (!isScytalePrecache(name)) continue;
-    // A concurrent activate() cleanup may delete `name` between keys() and open(); caches.open then
-    // recreates it empty, match() returns undefined, and we fall through — never throws, never blanks.
-    const hit = await (await caches.open(name)).match(req);
-    if (hit) return hit;
-  }
-  return undefined;
-}
-
 type CacheWriter = Pick<Cache, 'put'>;
+type CacheReader = Pick<Cache, 'match'>;
 type AssetFetcher = (path: string) => Promise<Response>;
 
 function manifestPath(url: string): string {
@@ -107,6 +81,8 @@ function expectedContentTypes(path: string): readonly string[] | null {
   if (clean.endsWith('.html') || clean === '/') return ['text/html'];
   if (clean.endsWith('.svg')) return ['image/svg+xml'];
   if (clean.endsWith('.png')) return ['image/png'];
+  if (clean.endsWith('.webp')) return ['image/webp'];
+  if (clean.endsWith('.mp4')) return ['video/mp4'];
   if (clean.endsWith('.woff2')) return ['font/woff2'];
   if (clean.endsWith('.woff')) return ['font/woff', 'application/font-woff'];
   if (clean.endsWith('.webmanifest')) return ['application/manifest+json', 'application/json'];
@@ -160,12 +136,16 @@ async function assertCacheable(
 
 const REQUIRED_SHELL_CSP = new Map<string, ReadonlySet<string>>([
   ['default-src', new Set(["'self'"])],
-  ['base-uri', new Set(["'self'"])],
+  ['base-uri', new Set(["'none'"])],
   ['object-src', new Set(["'none'"])],
   ['frame-ancestors', new Set(["'none'"])],
-  ['form-action', new Set(["'self'"])],
+  ['frame-src', new Set(["'none'"])],
+  ['form-action', new Set(["'none'"])],
   ['script-src', new Set(["'self'", "'wasm-unsafe-eval'"])],
-  ['style-src', new Set(["'self'", "'unsafe-inline'"])],
+  ['script-src-attr', new Set(["'none'"])],
+  ['style-src', new Set(["'self'"])],
+  ['style-src-elem', new Set(["'self'"])],
+  ['style-src-attr', new Set(["'unsafe-inline'"])],
   ['img-src', new Set(["'self'", 'data:', 'blob:'])],
   ['media-src', new Set(["'self'", 'blob:'])],
   ['font-src', new Set(["'self'"])],
@@ -232,9 +212,99 @@ function assertStrictShellCsp(response: Response): void {
   }
 }
 
+interface NormalizedManifestEntry extends PrecacheManifestEntry {
+  path: string;
+}
+
+function normalizeManifest(
+  manifest: readonly PrecacheManifestEntry[],
+): NormalizedManifestEntry[] {
+  const entries = manifest.map((entry) => ({ ...entry, path: manifestPath(entry.url) }));
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    if (seen.has(entry.path)) throw new Error(`Doppelter Precache-Pfad: ${entry.path}`);
+    if (!entry.revision || !/^[a-f0-9]{64}$/.test(entry.revision)) {
+      throw new Error(`Fehlende SHA-256-Revision für ${entry.path}`);
+    }
+    seen.add(entry.path);
+  }
+  return entries;
+}
+
+async function assertCacheableShell(
+  response: Response,
+  verifiedPaths: ReadonlySet<string>,
+): Promise<void> {
+  if (!response.ok || response.redirected || response.type === 'error' || response.type === 'opaque') {
+    throw new Error('Shell-Abruf fehlgeschlagen.');
+  }
+  if (response.headers.has('content-disposition')) {
+    throw new Error('Shell darf keinen Content-Disposition-Header enthalten.');
+  }
+  if (contentTypeEssence(response.headers.get('content-type') ?? '') !== 'text/html') {
+    throw new Error('Shell hat unerwarteten Content-Type.');
+  }
+  // `Refresh` is a non-standard response-header equivalent of meta refresh and
+  // can navigate a standalone PWA cross-origin; CSP does not constrain top-level
+  // navigation. Never persist or serve an injected navigation instruction.
+  if (response.headers.has('refresh')) {
+    throw new Error('Shell darf keinen Refresh-Header enthalten.');
+  }
+  assertStrictShellCsp(response);
+  assertShellReferencesOnlyVerified(await response.clone().text(), verifiedPaths);
+}
+
 /**
- * Populate one PRIVATE build cache. This intentionally fails on the first
- * missing/wrong asset; the install handler then deletes the private cache and
+ * Read one manifest entry only from the caller-selected cache and authenticate
+ * the exact bytes again. CacheStorage is origin-wide and page JavaScript can
+ * write it, so install-time verification alone is not a trust boundary.
+ */
+export async function matchVerifiedManifestAsset(
+  cache: CacheReader,
+  request: Request | string,
+  entry: PrecacheManifestEntry,
+): Promise<Response | undefined> {
+  try {
+    const path = manifestPath(entry.url);
+    const requestUrl = new URL(
+      typeof request === 'string' ? request : request.url,
+      'https://local.invalid',
+    );
+    if (requestUrl.search || requestUrl.hash || requestUrl.pathname !== path) return undefined;
+    const hit = await cache.match(request);
+    if (!hit) return undefined;
+    await assertCacheable(path, entry.revision, hit);
+    return hit;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Read the active build's shell and re-run its complete CSP/HTML/reference
+ * validation. The shell may contain a CSP-inert Cloudflare-injected inline
+ * snippet, so its own edge-rewritten bytes are structurally authenticated while
+ * every resource it can load remains bound to a SHA-256 manifest entry.
+ */
+export async function matchVerifiedShell(
+  cache: CacheReader,
+  manifest: readonly PrecacheManifestEntry[],
+): Promise<Response | undefined> {
+  try {
+    const entries = normalizeManifest(manifest);
+    if (!entries.some((entry) => entry.path === '/index.html')) return undefined;
+    const hit = await cache.match('/index.html');
+    if (!hit) return undefined;
+    await assertCacheableShell(hit, new Set(entries.map((entry) => entry.path)));
+    return hit;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Populate one versioned build cache. This intentionally fails on the first
+ * missing/wrong asset; the install handler then deletes the candidate cache and
  * rejects installation. Since callers use a versioned name, partial writes are
  * never visible to the old active worker.
  */
@@ -243,12 +313,8 @@ export async function populateBuildPrecache(
   manifest: readonly PrecacheManifestEntry[],
   fetchAsset: AssetFetcher,
 ): Promise<void> {
-  const entries = manifest.map((entry) => ({ ...entry, path: manifestPath(entry.url) }));
-  const seen = new Set<string>();
-  for (const entry of entries) {
-    if (seen.has(entry.path)) throw new Error(`Doppelter Precache-Pfad: ${entry.path}`);
-    seen.add(entry.path);
-  }
+  const entries = normalizeManifest(manifest);
+  const seen = new Set(entries.map((entry) => entry.path));
   const shellEntry = entries.find((entry) => entry.path === '/index.html');
   if (!shellEntry) throw new Error('Precache-Manifest enthält keine index.html.');
 
@@ -274,24 +340,54 @@ export async function populateBuildPrecache(
   // serves manifest-verified same-origin assets. So verify that header and the shell
   // STRUCTURALLY before caching the served shell as-is.
   const shell = await fetchAsset('/');
-  if (!shell.ok || shell.redirected || shell.type === 'error' || shell.type === 'opaque') {
-    throw new Error('Shell-Abruf fehlgeschlagen: /');
-  }
-  if (shell.headers.has('content-disposition')) {
-    throw new Error('Shell darf keinen Content-Disposition-Header enthalten.');
-  }
-  if (contentTypeEssence(shell.headers.get('content-type') ?? '') !== 'text/html') {
-    throw new Error('Shell hat unerwarteten Content-Type.');
-  }
-  // `Refresh` is a non-standard response-header equivalent of meta refresh and
-  // can navigate a standalone PWA cross-origin; CSP does not constrain top-level
-  // navigation. Never persist an edge-injected navigation instruction.
-  if (shell.headers.has('refresh')) {
-    throw new Error('Shell darf keinen Refresh-Header enthalten.');
-  }
-  assertStrictShellCsp(shell);
-  assertShellReferencesOnlyVerified(await shell.clone().text(), seen);
+  await assertCacheableShell(shell, seen);
   await cache.put('/index.html', shell);
+}
+
+/**
+ * Self-contained recovery document for a missing/corrupt active shell. It has
+ * no network permissions and uses a fresh nonce instead of unsafe-inline or DOM
+ * event attributes.
+ */
+export function navigationFallbackResponse(): Response {
+  const nonce = hex(crypto.getRandomValues(new Uint8Array(16)));
+  const csp = [
+    "default-src 'none'",
+    "base-uri 'none'",
+    "object-src 'none'",
+    "frame-ancestors 'none'",
+    "form-action 'none'",
+    `style-src 'nonce-${nonce}'`,
+    "style-src-attr 'none'",
+    `script-src 'nonce-${nonce}'`,
+    "script-src-attr 'none'",
+  ].join('; ');
+  const html =
+    '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+    '<title>SKYTALE</title>' +
+    `<style nonce="${nonce}">html,body{margin:0;height:100%;background:#0b0c0e;color:#e7e9ec;` +
+    'font:15px/1.6 -apple-system,system-ui,sans-serif;display:flex;align-items:center;justify-content:center}' +
+    'main{text-align:center;padding:24px}b{color:#12a488}button{margin-top:14px;padding:10px 18px;border:0;' +
+    'border-radius:10px;background:#12a488;color:#fff;font:inherit}</style>' +
+    '<main><p><b>SKYTALE</b></p><p id="m">Lädt…</p><button id="retry" type="button">Neu laden</button></main>' +
+    `<script nonce="${nonce}">document.getElementById("retry").addEventListener("click",function(){location.reload()});` +
+    'function stop(){var el=document.getElementById("m");if(el)el.textContent=' +
+    '"Konnte nicht laden — tippe Neu laden.";}try{var k="skytale-nav-retry";' +
+    'if(sessionStorage.getItem(k)){stop();}else{sessionStorage.setItem(k,"1");' +
+    'setTimeout(function(){location.reload()},1500);}}catch(e){stop();}</script>';
+  return new Response(html, {
+    status: 200,
+    headers: {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'no-store',
+      'content-security-policy': csp,
+      'x-content-type-options': 'nosniff',
+      'referrer-policy': 'no-referrer',
+      'x-frame-options': 'DENY',
+      'cross-origin-opener-policy': 'same-origin',
+      'cross-origin-resource-policy': 'same-origin',
+    },
+  });
 }
 
 interface ShellTag {

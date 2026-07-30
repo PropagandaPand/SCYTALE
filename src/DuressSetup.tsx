@@ -20,10 +20,14 @@ export function DuressSetup({
   mode,
   onDone,
   onClose,
+  runRuntimeOperation,
 }: {
   mode: 'set' | 'remove';
   onDone: () => void;
   onClose: () => void;
+  runRuntimeOperation: <T>(
+    operation: (signal: AbortSignal) => Promise<T>,
+  ) => Promise<T>;
 }) {
   const [real, setReal] = useState('');
   const [duress, setDuress] = useState('');
@@ -39,8 +43,8 @@ export function DuressSetup({
   }, [mode]);
 
   const title = mode === 'set' ? t('Duress-Passwort einrichten') : t('Duress-Passwort entfernen');
-  // No length/strength policy on the duress word — it is a coercion trigger, not a secret. It only
-  // has to be non-empty and match its confirmation; setDuressPassword enforces "differs from real".
+  // The duress word is a coercion trigger, not an authentication secret. It only
+  // has to be non-empty, confirmed and different from the real passphrase.
   const ready = mode === 'set' ? !!real && !!duress && !!confirm : !!real;
 
   async function save() {
@@ -51,13 +55,26 @@ export function DuressSetup({
     setBusy(true);
     setErr('');
     try {
-      if (mode === 'set') await setDuressPassword(real, duress);
-      else await removeDuressPassword(real);
+      await runRuntimeOperation(async (signal) => {
+        if (signal.aborted) {
+          const error = new Error('Duress-Änderung abgebrochen.');
+          error.name = 'AbortError';
+          throw error;
+        }
+        if (mode === 'set') await setDuressPassword(real, duress);
+        else await removeDuressPassword(real);
+        if (signal.aborted) {
+          const error = new Error('Duress-Änderung abgebrochen.');
+          error.name = 'AbortError';
+          throw error;
+        }
+      });
       setReal('');
       setDuress('');
       setConfirm('');
       onDone();
     } catch (e) {
+      if ((e as { name?: string }).name === 'AbortError') return;
       if (e instanceof WrongPassphraseError) setErr(t('Falsche Passphrase.'));
       else if (e instanceof DuressEqualsRealError) setErr(t('Das Duress-Passwort darf nicht deine echte Passphrase sein.'));
       else setErr(t('Speichern fehlgeschlagen: {msg}', { msg: (e as Error).message }));

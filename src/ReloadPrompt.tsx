@@ -1,4 +1,5 @@
 import { useRegisterSW } from 'virtual:pwa-register/react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { IconInfo } from './icons';
 import { t } from './lib/i18n';
 
@@ -13,21 +14,48 @@ import { t } from './lib/i18n';
  * build onto an iOS device without a reinstall.
  */
 export function ReloadPrompt() {
+  const mountedRef = useRef(true);
+  const [registration, setRegistration] =
+    useState<ServiceWorkerRegistration | null>(null);
+
+  useEffect(() => () => {
+    mountedRef.current = false;
+  }, []);
+
+  const onRegisteredSW = useCallback((
+    _swUrl: string,
+    next: ServiceWorkerRegistration | undefined,
+  ) => {
+    if (next && mountedRef.current) setRegistration(next);
+  }, []);
+
   const {
     needRefresh: [needRefresh, setNeedRefresh],
     updateServiceWorker,
   } = useRegisterSW({
-    onRegisteredSW(_swUrl, registration) {
-      if (!registration) return;
-      const check = () => {
-        if (document.visibilityState === 'visible') void registration.update();
-      };
-      void registration.update(); // check right away on load
-      setInterval(check, 60_000); // and every minute while open
-      document.addEventListener('visibilitychange', check);
-      window.addEventListener('focus', check);
-    },
+    onRegisteredSW,
   });
+
+  useEffect(() => {
+    if (!registration) return;
+    const check = () => {
+      if (
+        mountedRef.current &&
+        document.visibilityState === 'visible'
+      ) {
+        void registration.update();
+      }
+    };
+    void registration.update(); // check right away on load
+    const interval = window.setInterval(check, 60_000);
+    document.addEventListener('visibilitychange', check);
+    window.addEventListener('focus', check);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', check);
+      window.removeEventListener('focus', check);
+    };
+  }, [registration]);
 
   if (!needRefresh) return null;
 

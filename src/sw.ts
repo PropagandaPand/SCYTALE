@@ -21,8 +21,10 @@
 /// <reference lib="webworker" />
 import { bumpBadge } from './lib/badge';
 import {
-  findInAnyScytalePrecache,
   isScytalePrecache,
+  matchVerifiedManifestAsset,
+  matchVerifiedShell,
+  navigationFallbackResponse,
   populateBuildPrecache,
   versionedPrecacheName,
   type PrecacheManifestEntry,
@@ -46,6 +48,9 @@ const manifest = (self as unknown as { __WB_MANIFEST: PrecacheManifestEntry[] })
 
 const ASSETS = manifest.map((e) => new URL(e.url, sw.location.origin).pathname);
 const ASSET_SET = new Set(ASSETS);
+const MANIFEST_BY_PATH = new Map(
+  manifest.map((entry) => [new URL(entry.url, sw.location.origin).pathname, entry] as const),
+);
 const PRECACHE = versionedPrecacheName(__BUILD_HASH__, manifest);
 
 const fetchBuildAsset = (path: string) =>
@@ -86,8 +91,20 @@ sw.addEventListener('activate', (event) => {
     (async () => {
       const cacheName = await PRECACHE;
       // A successful install populated this exact cache. Refuse activation if it
-      // vanished rather than claiming clients with an empty/broken shell.
+      // vanished or was page-mutated while waiting rather than claiming clients
+      // with an empty/broken build.
       if (!(await caches.has(cacheName))) throw new Error('Precache fehlt bei Aktivierung.');
+      const cache = await caches.open(cacheName);
+      if (!(await matchVerifiedShell(cache, manifest))) {
+        throw new Error('Precache-Shell ist bei Aktivierung ungültig.');
+      }
+      for (const [path, entry] of MANIFEST_BY_PATH) {
+        if (path === '/index.html') continue;
+        const request = new Request(new URL(path, sw.location.origin).toString());
+        if (!(await matchVerifiedManifestAsset(cache, request, entry))) {
+          throw new Error(`Precache-Asset ist bei Aktivierung ungültig: ${path}`);
+        }
+      }
       // Only after the complete new build activates may old SKYTALE build caches go.
       for (const name of await caches.keys()) {
         if (isScytalePrecache(name) && name !== cacheName) await caches.delete(name);
@@ -106,39 +123,12 @@ function cacheUnavailable(): Response {
   });
 }
 
-// A styled, self-healing page for a genuinely MISSING SHELL (navigation with no precache hit).
-// Better than a blank white crash on old iOS (a bare 503 renders as a white unstyled page): show a
-// branded "loading" that auto-reloads ONCE per session (sessionStorage-guarded so a permanently
-// broken precache can't loop) plus a manual retry. Inline-only — the shell's own assets are exactly
-// what is missing. The app always renders dark, so match that background.
-function navFallback(): Response {
-  const html =
-    '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
-    '<title>SKYTALE</title>' +
-    '<style>html,body{margin:0;height:100%;background:#0b0c0e;color:#e7e9ec;' +
-    'font:15px/1.6 -apple-system,system-ui,sans-serif;display:flex;align-items:center;justify-content:center}' +
-    'b{color:#12a488}button{margin-top:14px;padding:10px 18px;border:0;border-radius:10px;' +
-    'background:#12a488;color:#fff;font:inherit}</style>' +
-    '<div style="text-align:center;padding:24px"><p><b>SKYTALE</b></p><p id="m">Lädt…</p>' +
-    '<button onclick="location.reload()">Neu laden</button></div>' +
-    '<script>function stop(){var el=document.getElementById("m");if(el)el.textContent=' +
-    '"Konnte nicht laden — tippe Neu laden.";}try{var k="skytale-nav-retry";' +
-    'if(sessionStorage.getItem(k)){stop();}else{sessionStorage.setItem(k,"1");' +
-    'setTimeout(function(){location.reload()},1500);}}catch(e){stop();}</script>';
-  return new Response(html, {
-    status: 200,
-    headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
-  });
-}
-
 async function cachedShell(): Promise<Response> {
   const cache = await caches.open(await PRECACHE);
-  const cached = await cache.match('/index.html');
-  if (cached) return cached;
-  const anyShell = await findInAnyScytalePrecache(
-    new Request(new URL('/index.html', sw.location.origin).toString()),
-  );
-  return anyShell ?? navFallback();
+  // CacheStorage is shared with same-origin Window contexts. Re-run the full
+  // CSP/HTML/manifest-reference validation on every navigation instead of
+  // assuming an install-time write remained untouched.
+  return (await matchVerifiedShell(cache, manifest)) ?? navigationFallbackResponse();
 }
 
 sw.addEventListener('fetch', (event) => {
@@ -159,19 +149,19 @@ sw.addEventListener('fetch', (event) => {
   if (!ASSET_SET.has(url.pathname)) {
     // Executable build resources must never fall through to the live deployment:
     // that would combine a consented shell with unconsented script/style bytes.
-    // But a CONCURRENT build's precache may legitimately hold this hashed asset during
-    // an update window (the shell served was a different build) — that is verified,
-    // content-addressed bytes from a scytale precache, never the network, so serve it
-    // before failing closed. Closes the blank-page-on-push-tap build skew.
     if (req.destination === 'script' || req.destination === 'style' || req.destination === 'worker') {
-      event.respondWith((async () => (await findInAnyScytalePrecache(req)) ?? cacheUnavailable())());
+      event.respondWith(Promise.resolve(cacheUnavailable()));
     }
     return;
   }
   event.respondWith(
     (async () => {
       const cache = await caches.open(await PRECACHE);
-      return (await cache.match(req)) ?? (await findInAnyScytalePrecache(req)) ?? cacheUnavailable();
+      const entry = MANIFEST_BY_PATH.get(url.pathname);
+      if (!entry) return cacheUnavailable();
+      // Re-hash every cached response before serving it. A page can enumerate
+      // and mutate same-origin CacheStorage, including this exact cache name.
+      return (await matchVerifiedManifestAsset(cache, req, entry)) ?? cacheUnavailable();
     })(),
   );
 });

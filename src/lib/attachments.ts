@@ -57,6 +57,7 @@ export interface RecvMarker {
   ts: number; // when the transfer started — a stale one (sender vanished) is swept
   receivedIdx: number[]; // distinct chunk indices stored so far (completion = length === total)
   receivedBytes: number; // bytes stored so far — bounded by `size` so a peer can't over-store
+  reservedBytes?: number; // plaintext + conservative per-record storage charge
   roomId: string; // quota owner; binds the transfer to the admitting contact
   automatic: boolean; // true consumes the per-contact automatic receive budget
   viewOnce?: boolean; // a view-once video/photo — the completed message self-destructs on first open
@@ -116,7 +117,8 @@ async function openUnder(keys: CryptoKey[], rec: SealedRecord, aad: Bytes): Prom
 }
 const recvAad = (id: string) => utf8.encode(`scytale:att-recv:v1:${id}`);
 
-/** A fresh random attachment id (16 bytes, hex). */
+/** A fresh storage-only attachment id derived from 16 random bytes. Transfer
+ * ids that must also be message MIDs use randomMid() at the protocol layer. */
 export function newAttachmentId(): string {
   return bytesToB64(crypto.getRandomValues(new Uint8Array(16))).replace(/[^A-Za-z0-9]/g, '').slice(0, 22);
 }

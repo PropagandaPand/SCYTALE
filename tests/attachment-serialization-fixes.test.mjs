@@ -63,12 +63,32 @@ ok('serveAttachment bricht bei Kontowechsel während der Vorbereitung ab (kein C
     msg.indexOf('name: meta.name, mime: meta.mime'));
 
 ok('receiveChunk weist eine tid ab, die eine EIGENE ausgehende attId aliast',
-  msg.includes('roomMessages.some((x) => x.mine && x.file?.attId === c.tid)'));
+  msg.includes('const aliasesExistingAttachment = Object.entries(messagesRef.current).some(') &&
+  msg.includes('message.file?.attId === c.tid') &&
+  msg.includes('(roomId !== contact.roomId || message.mine)') &&
+  msg.includes('if (aliasesExistingAttachment) return;'));
 // CRITICAL: the reject must precede EVERY destructive storage step — especially the recall-wipe —
 // so a `recall(tid)`-then-`chunk(tid)` sequence can't crypto-erase my own outbound attachment.
 ok('receiveChunk: Aliasing-Reject steht VOR dem Recall-Wipe (recall-zuerst-Angriff geschlossen)',
-  msg.indexOf('roomMessages.some((x) => x.mine && x.file?.attId === c.tid)') <
+  msg.indexOf('if (aliasesExistingAttachment) return;') <
     msg.indexOf('if (recallRegistryHas(recalledMidsRef.current, contact.roomId, false, c.tid))'));
+
+const chunkSend = msg.slice(
+  msg.indexOf('async function sendChunkedAttachment('),
+  msg.indexOf('async function sendOfferedAttachment('),
+);
+const offerSend = msg.slice(
+  msg.indexOf('async function sendOfferedAttachment('),
+  msg.indexOf('async function serveAttachment('),
+);
+ok('Chunk-Transfer nutzt dieselbe 128-bit ID für Storage, Sender-Bubble und Recall',
+  chunkSend.includes('const tid = randomMid();') &&
+  chunkSend.includes('mid: tid,') &&
+  !chunkSend.includes('mid: randomMid(),'));
+ok('Pull-Offer nutzt auf beiden Seiten tid == Message-MID (Recall trifft den Anhang)',
+  offerSend.includes('const tid = randomMid();') &&
+  offerSend.includes('mid: tid,') &&
+  !offerSend.includes('mid: randomMid(),'));
 
 console.log(`\n${pass} ok, ${fail} fail`);
 process.exit(fail ? 1 : 0);

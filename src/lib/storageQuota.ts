@@ -10,6 +10,12 @@
 export const AUTO_RECEIVE_CONTACT_CAP_BYTES = 32 * 1024 * 1024;
 export const MIN_ORIGIN_HEADROOM_BYTES = 64 * 1024 * 1024;
 export const MIN_ORIGIN_HEADROOM_FRACTION = 0.2;
+// Each encrypted IndexedDB chunk consumes substantially more than its plaintext:
+// record key/indexing, IV/tag, structured-clone and transaction metadata. Charging
+// a conservative fixed cost prevents a peer from representing thousands of tiny
+// records as a zero-byte attachment and bypassing both quotas.
+export const RECV_CHUNK_RECORD_OVERHEAD_BYTES = 4 * 1024;
+export const RECV_TRANSFER_FIXED_OVERHEAD_BYTES = 8 * 1024;
 
 export interface StorageEstimateLike {
   usage?: number;
@@ -19,6 +25,8 @@ export interface StorageEstimateLike {
 export interface RecvReservationLike {
   size: number;
   receivedBytes: number;
+  total?: number;
+  reservedBytes?: number;
   roomId?: string;
   automatic?: boolean;
 }
@@ -28,6 +36,7 @@ interface StoredMessageLike {
   file?: {
     attId?: string;
     size?: number;
+    storageBytes?: number;
     dataB64?: string;
     pull?: unknown;
   };
@@ -44,6 +53,46 @@ function saturatingAdd(a: number, b: number): number {
   return a + b;
 }
 
+/** Quota charge for one incoming chunked transfer, including record overhead. */
+export function attachmentRecvReservationBytes(
+  plaintextBytes: number,
+  chunks: number,
+): number {
+  if (
+    !validBytes(plaintextBytes) ||
+    !Number.isSafeInteger(chunks) ||
+    chunks < 1
+  ) {
+    return Number.MAX_SAFE_INTEGER;
+  }
+  const records =
+    chunks > Math.floor(
+      (Number.MAX_SAFE_INTEGER - RECV_TRANSFER_FIXED_OVERHEAD_BYTES) /
+        RECV_CHUNK_RECORD_OVERHEAD_BYTES,
+    )
+      ? Number.MAX_SAFE_INTEGER
+      : RECV_TRANSFER_FIXED_OVERHEAD_BYTES +
+        chunks * RECV_CHUNK_RECORD_OVERHEAD_BYTES;
+  return saturatingAdd(plaintextBytes, records);
+}
+
+function markerReservationBytes(marker: RecvReservationLike): number {
+  if (marker.reservedBytes !== undefined) {
+    if (
+      !validBytes(marker.reservedBytes) ||
+      marker.reservedBytes < marker.size
+    ) {
+      return Number.MAX_SAFE_INTEGER;
+    }
+    return marker.reservedBytes;
+  }
+  // Upgrade old persisted markers in-memory when their chunk count is known.
+  // Generic legacy callers without `total` retain the historical size charge.
+  return marker.total === undefined
+    ? marker.size
+    : attachmentRecvReservationBytes(marker.size, marker.total);
+}
+
 /** Bytes promised by persisted receive markers but not stored yet. */
 export function remainingRecvReservationBytes(markers: ReadonlyArray<RecvReservationLike | null>): number {
   let total = 0;
@@ -52,7 +101,11 @@ export function remainingRecvReservationBytes(markers: ReadonlyArray<RecvReserva
     if (!validBytes(marker.size) || !validBytes(marker.receivedBytes) || marker.receivedBytes > marker.size) {
       return Number.MAX_SAFE_INTEGER; // corrupt reservation state fails closed
     }
-    total = saturatingAdd(total, marker.size - marker.receivedBytes);
+    const reserved = markerReservationBytes(marker);
+    if (!validBytes(reserved) || reserved < marker.receivedBytes) {
+      return Number.MAX_SAFE_INTEGER;
+    }
+    total = saturatingAdd(total, reserved - marker.receivedBytes);
   }
   return total;
 }
@@ -75,7 +128,9 @@ export function automaticRecvReservationBytes(
     ) {
       return Number.MAX_SAFE_INTEGER;
     }
-    if (marker.automatic && marker.roomId === roomId) total = saturatingAdd(total, marker.size);
+    if (marker.automatic && marker.roomId === roomId) {
+      total = saturatingAdd(total, markerReservationBytes(marker));
+    }
   }
   return total;
 }
@@ -132,8 +187,13 @@ export function storedReceivedAttachmentBytes(messages: ReadonlyArray<StoredMess
     // A referenced attachment without trustworthy size metadata must not turn
     // the cap into a fail-open policy for legacy/corrupt records.
     if (!validBytes(file.size)) return Number.MAX_SAFE_INTEGER;
+    const charged =
+      file.storageBytes === undefined ? file.size : file.storageBytes;
+    if (!validBytes(charged) || charged < file.size) {
+      return Number.MAX_SAFE_INTEGER;
+    }
     seen.add(file.attId);
-    total = saturatingAdd(total, file.size);
+    total = saturatingAdd(total, charged);
   }
   return total;
 }

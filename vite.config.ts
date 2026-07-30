@@ -57,7 +57,7 @@ export default defineConfig({
       injectManifest: {
         // Precache the app shell so the installed PWA does NOT re-fetch JS on
         // every launch — our first line of defence against a malicious code push.
-        globPatterns: ['**/*.{js,css,html,svg,woff,woff2,png,webmanifest}'],
+        globPatterns: ['**/*.{js,css,html,svg,woff,woff2,png,webp,mp4,webmanifest}'],
         maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
         // Workbox normally emits MD5 (and may omit revisions for hashed URLs).
         // The hand-written worker verifies every fetched byte before accepting a

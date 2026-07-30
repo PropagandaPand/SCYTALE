@@ -56,6 +56,55 @@ export async function generateIdentity(): Promise<IdentityKeys> {
   return { master: masterKp, epoch, deviceCert, sign: signKp, dh: dhKp, createdAt: Date.now() };
 }
 
+/**
+ * Re-issue only the DEVICE half of a primary identity.
+ *
+ * A recovery backup deliberately preserves the stable master so contacts keep
+ * their safety-number anchor. It must never preserve the source device keys,
+ * though: restoring the same device identity alongside its Double-Ratchet
+ * snapshots would create two runtimes with identical chain state. The next
+ * send could then reuse an AEAD key/nonce pair.
+ *
+ * The caller publishes the returned device in a strictly newer, master-signed
+ * DeviceList and removes the backed-up source device from that list.
+ */
+export async function freshDeviceIdentityForRestore(source: IdentityKeys): Promise<IdentityKeys> {
+  if (!isPrimaryDevice(source) || source.master.privateKey.length !== 64) {
+    throw new Error('Nur ein Hauptgeräte-Backup kann eine frische Geräteidentität signieren.');
+  }
+  const s = await getSodium();
+  const sign = s.crypto_sign_keypair();
+  const dh = s.crypto_box_keypair();
+  const signKp = {
+    publicKey: b(sign.publicKey),
+    privateKey: b(sign.privateKey),
+  };
+  const dhKp = {
+    publicKey: b(dh.publicKey),
+    privateKey: b(dh.privateKey),
+  };
+  const deviceCert = await signDeviceCert(
+    source.master.privateKey,
+    source.epoch,
+    signKp.publicKey,
+    dhKp.publicKey,
+  );
+  return {
+    master: {
+      publicKey: b(source.master.publicKey),
+      privateKey: b(source.master.privateKey),
+    },
+    epoch: source.epoch,
+    deviceCert,
+    sign: signKp,
+    dh: dhKp,
+    createdAt: Date.now(),
+    previousMasterPub: source.previousMasterPub
+      ? b(source.previousMasterPub)
+      : undefined,
+  };
+}
+
 /** Ed25519 detached signature. */
 export async function sign(message: Bytes, privateKey: Bytes): Promise<Bytes> {
   const s = await getSodium();

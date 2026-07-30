@@ -35,6 +35,24 @@ export interface PreKeyState {
   nextOpkId: number;
 }
 
+/** Create a completely fresh prekey namespace for a fresh device identity.
+ *
+ * IDs may restart at one because prekeys are addressed together with the
+ * device identity. Recovery restore uses this instead of copying the source
+ * device's SPK/OPKs, which would otherwise keep two devices on the same X3DH
+ * private material.
+ */
+export async function createFreshPreKeyState(identity: IdentityKeys): Promise<PreKeyState> {
+  const signedPreKey = await generateSignedPreKey(identity, 1);
+  const oneTimePreKeys = await generateOneTimePreKeys(1, OPK_BATCH);
+  return {
+    signedPreKey,
+    oneTimePreKeys,
+    nextSpkId: 2,
+    nextOpkId: OPK_BATCH + 1,
+  };
+}
+
 // --- (de)serialisation via base64 JSON (plaintext only ever passed to seal) ---
 
 interface KpWire {
@@ -107,14 +125,7 @@ export async function loadOrCreatePreKeys(dek: CryptoKey, identity: IdentityKeys
     }
   }
 
-  const signedPreKey = await generateSignedPreKey(identity, 1);
-  const oneTimePreKeys = await generateOneTimePreKeys(1, OPK_BATCH);
-  const st: PreKeyState = {
-    signedPreKey,
-    oneTimePreKeys,
-    nextSpkId: 2,
-    nextOpkId: OPK_BATCH + 1,
-  };
+  const st = await createFreshPreKeyState(identity);
   await savePreKeys(dek, st);
   return st;
 }

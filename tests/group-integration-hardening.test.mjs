@@ -52,13 +52,23 @@ const addBundle = section(
   'async function addBundle(rawInput: string)',
   'useEffect(() => {',
 );
+const verifiedContactAt = addBundle.indexOf(
+  'const candidate = await makeContact(',
+);
+const existingLookupAt = addBundle.indexOf(
+  'const existing = contactsRef.current.find',
+);
 const verifiedBeforeLookup =
-  addBundle.indexOf('const contact = await makeContact(asMasterPub(id.master.publicKey), bundle)') <
-  addBundle.indexOf('const existing = contactsRef.current.find');
+  verifiedContactAt >= 0 &&
+  existingLookupAt >= 0 &&
+  verifiedContactAt < existingLookupAt;
 const promoteStart = addBundle.indexOf('existing.hidden = undefined;');
-const promoteEnd = addBundle.indexOf('return;', promoteStart);
+const promoteEnd = addBundle.indexOf('return existing;', promoteStart);
 const promotion = promoteStart >= 0 && promoteEnd > promoteStart
-  ? addBundle.slice(promoteStart, promoteEnd)
+  ? addBundle.slice(
+      promoteStart,
+      promoteEnd + 'return existing;'.length,
+    )
   : '';
 ok('Promotion nutzt erst das kryptographisch verifizierte makeContact-Ergebnis',
   addBundle.includes('const bundle = await decodeBundle(token)') &&
@@ -75,7 +85,9 @@ ok('bestehender Hidden Contact wird sichtbar und erhält das frische Bundle',
 ok('Promotion wird vor Connect dauerhaft gespeichert',
   promotion.indexOf('await saveContact(dek, existing)') >= 0 &&
   promotion.indexOf('await saveContact(dek, existing)') <
-    promotion.indexOf('await connectSend(existing)'));
+    promotion.indexOf('return existing;') &&
+  addBundle.indexOf('await connectSend(contact)') >
+    addBundle.indexOf('const contact = await enqueueInbox('));
 
 console.log('\n[DeviceList: Ack und Retry sind pro Zielgerät statt pro Person]');
 
@@ -102,7 +114,7 @@ const inboundAck = section(
 ok('Ack wird gezielt an das authentifizierte Absendergerät gefächert',
   ackSender.includes('if (toDevice)') &&
   ackSender.includes(
-    "fanoutDeliveries(id, contact, { kind: 'listack', epoch, version }, randomMid(), undefined, toDevice)",
+    "fanoutFromThisDevice(id, current, { kind: 'listack', epoch, version }, randomMid(), undefined, toDevice)",
   ));
 ok('Watermark-Lookup ist per Device-Key; Legacy-Wert gilt nur für Primary',
   ackLookup.includes('contact.peerAckedListByDevice?.[bytesToB64(deviceSignPub)]') &&
@@ -205,23 +217,41 @@ ok('aktuelle Revision verlangt Hash-Gleichheit; alte Frames bleiben reine Conten
 console.log('\n[v4 Produktionsintegration: Fail-fast, Rotation, Sync und Retry]');
 
 const preflight = section(
-  'async function preflightGroupMutation(',
+  'async function preflightGroupMutationWithinInbox(',
   'async function gcUnreferencedHiddenContacts(',
 );
 const commitMutation = section(
+  'async function commitDurableGroupMutationWithinInbox(',
   'async function commitDurableGroupMutation(',
-  'async function persistAndDispatchGroupMutation(',
 );
 ok('jede Gruppenmutation prüft alle Peer- und eigenen Geräte vor dem atomaren CAS',
   preflight.includes('assertGroupContactReady(contact') &&
   preflight.includes('for (const device of self.peerDeviceList.devices)') &&
   preflight.includes('deviceProtocolVersion(self, device.signPub) < 6') &&
-  commitMutation.indexOf('await preflightGroupMutation(group, removedMasters)') <
+  commitMutation.indexOf('await preflightGroupMutationWithinInbox(group)') <
     commitMutation.indexOf('commitGroupMutation('));
+ok('Gruppenmutation hält eine einzige Lockordnung inbox → group und Leave verschachtelt nicht',
+  source.includes('return enqueueInbox(() =>') &&
+  source.includes('commitDurableGroupMutationWithinInbox(') &&
+  commitMutation.includes('return enqueueGroupMutation(async () =>') &&
+  preflight.includes('ensureMemberContactWithinInbox(member)') &&
+  preflight.includes('ensureSelfContactWithinInbox()') &&
+  section(
+    'async function applyGroupLeave(',
+    'function openManage(',
+  ).includes('await commitDurableGroupMutationWithinInbox('));
 ok('PV6-Preflight verlangt Capability UND Ratchet/SPK-Erreichbarkeit',
   source.includes('deviceProtocolVersion(contact, device.signPub) < 6') &&
   source.includes('!!contact.sessions.get(bytesToB64(device.signPub))?.ratchet') &&
   source.includes('!!device.signedPreKey'));
+ok('ein entferntes Mitglied kann seine Entfernung nicht über die eigene DeviceList blockieren',
+  !preflight.includes('for (const master of removedMasters)') &&
+  !section(
+    'async function removeMemberFromGroup(',
+    'async function leaveGroup(',
+  ).includes('await ensureMemberContact(member)') &&
+  source.includes('The signed removal proof is a courtesy/cleanup notification') &&
+  source.includes("console.warn('[group] Entfernungsnachweis"));
 
 const groupSync = section(
   'async function applyGroupSync(',

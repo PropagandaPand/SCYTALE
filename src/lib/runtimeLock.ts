@@ -24,6 +24,7 @@ interface ExclusiveLockApi {
 export interface VaultRuntimeLockManager {
   acquire(): Promise<boolean>;
   release(): void;
+  releaseAfter(quiescence: Promise<unknown>): void;
   held(): boolean;
 }
 
@@ -98,13 +99,22 @@ export function createVaultRuntimeLockManager(
     return acquisition;
   };
 
+  const releaseAfter = (quiescence: Promise<unknown>): void => {
+    if (!releaseHold || releasePending) return;
+    releasePending = true;
+    const finish = releaseHold;
+    void Promise.resolve(quiescence)
+      .catch(() => undefined)
+      .finally(finish);
+  };
+
   return {
     acquire,
     release() {
-      if (releaseHold && !releasePending) {
-        releasePending = true;
-        releaseHold();
-      }
+      releaseAfter(Promise.resolve());
+    },
+    releaseAfter(quiescence) {
+      releaseAfter(quiescence);
     },
     held() {
       return lockHeld;
@@ -120,4 +130,7 @@ const manager = createVaultRuntimeLockManager(browserLockApi);
 
 export const acquireVaultRuntimeLock = (): Promise<boolean> => manager.acquire();
 export const releaseVaultRuntimeLock = (): void => manager.release();
+export const releaseVaultRuntimeLockAfter = (
+  quiescence: Promise<unknown>,
+): void => manager.releaseAfter(quiescence);
 export const vaultRuntimeLockHeld = (): boolean => manager.held();

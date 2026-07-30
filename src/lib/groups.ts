@@ -1312,7 +1312,7 @@ export async function loadGroups(dek: CryptoKey): Promise<Group[]> {
       // Older builds accepted arbitrary network group ids and weak roster
       // shapes. One such sealed record must not brick the entire vault after
       // upgrading; keep it untouched for recovery and skip it fail-closed.
-      console.warn(`[group] Ungültiger persistierter Gruppenstand ${id} übersprungen.`);
+      console.warn('[group] Ungültiger persistierter Gruppenstand übersprungen.');
     }
   }
   return out;

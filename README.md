@@ -39,9 +39,11 @@ KEK        --wrap / unwrap (AES-256-GCM)-------->  DEK  (non-extractable, random
 DEK        --AES-256-GCM (fresh 96-bit nonce + AAD)--> every record
 ```
 
-The DEK is a **non-extractable `CryptoKey`**, so raw key material can never be
-read out by JS/XSS. A wrong passphrase is detected by the failing GCM auth tag —
-no separate verifier, nothing to brute-force offline beyond Argon2id itself.
+The DEK is a **non-extractable `CryptoKey`**, so JavaScript cannot directly
+export its raw bytes. This is not protection against hostile same-origin code:
+an XSS in an unlocked app can use the key as a crypto oracle and read plaintext.
+A wrong passphrase is detected by the failing GCM auth tag — no separate
+verifier, nothing to brute-force offline beyond Argon2id itself.
 
 ### 2. Transport (end-to-end over the network)
 
@@ -109,8 +111,16 @@ message id are deliberately skipped; complete history transfer remains open.
 npm install        # .npmrc sets ignore-scripts (skips miniflare's sharp build)
 npm run dev        # Vite dev server (frontend only, no relay)
 npm run build && npm run cf:dev   # Worker + Durable Object locally (incl. relay)
-npm run deploy     # build + wrangler deploy
+npm run deploy     # nur sauberer, exakt gepushter Branch: Preflight + Build + Worker-Deploy
+npm run cf:lifecycle:show   # R2-Aufbewahrungsregeln read-only prüfen
+npm run cf:lifecycle:apply  # getrennte, bewusst freizugebende Lifecycle-Änderung
 ```
+
+`npm run deploy` verändert absichtlich keine R2-Lifecycle-Regeln. Die
+Aufbewahrungs- und Löschpolicy wird getrennt geprüft und angewendet, damit ein
+fehlgeschlagener Worker-Release niemals vorab die Datenlöschpolicy verändert.
+`workers_dev` bleibt für den unterstützten `scytale.illogical.workers.dev`-Origin
+aktiv.
 
 Checks:
 

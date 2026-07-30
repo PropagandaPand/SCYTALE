@@ -9,6 +9,7 @@
  */
 import { RelayActorGuard, RelayRoom, type Env } from './relay';
 import { BlobQuota } from './blob-quota';
+import { bugReportWebhookPayload, isBugReportCategory } from './bug-report';
 
 type AppEnv = Env & {
   BLOB_QUOTA: DurableObjectNamespace<BlobQuota>;
@@ -21,12 +22,18 @@ type AppEnv = Env & {
 // needs. There is no third-party analytics or other client-side destination.
 const CSP = [
   "default-src 'self'",
-  "base-uri 'self'",
+  "base-uri 'none'",
   "object-src 'none'",
   "frame-ancestors 'none'",
-  "form-action 'self'",
+  "frame-src 'none'",
+  "form-action 'none'",
   "script-src 'self' 'wasm-unsafe-eval'",
-  "style-src 'self' 'unsafe-inline'",
+  "script-src-attr 'none'",
+  // Stylesheets remain same-origin. React's audited style={} properties need
+  // inline style attributes, but injected <style> blocks do not.
+  "style-src 'self'",
+  "style-src-elem 'self'",
+  "style-src-attr 'unsafe-inline'",
   // blob: is needed for object-URL media: decrypted photos/videos are shown via
   // URL.createObjectURL (they never touch the network). Same-origin only, no host widened.
   "img-src 'self' data: blob:",
@@ -300,9 +307,10 @@ export default {
     }
 
     // Bug reports: the client POSTs a short JSON report to its OWN origin (allowed by
-    // `connect-src 'self'`), and the Worker forwards it server-side (no CSP) to an
-    // optional webhook and/or the logs. NO end-to-end content ever passes through the
-    // client here — only a description and non-sensitive diagnostics the user opted in.
+    // `connect-src 'self'`), and the Worker forwards it server-side (no CSP) to a
+    // configured delivery sink. Success means that sink returned 2xx; a log line alone
+    // never claims delivery. NO end-to-end content ever passes through the client here —
+    // only a description and non-sensitive diagnostics the user opted in.
     if (url.pathname === '/api/bug') {
       if (request.method !== 'POST') return secureResponse(new Response('Method not allowed', { status: 405 }), url);
       if (!sameOrigin(request, url)) return secureResponse(new Response('Origin nicht erlaubt.', { status: 403 }), url);
@@ -316,17 +324,22 @@ export default {
         return secureResponse(new Response('Bad request', { status: 400 }), url);
       }
       const clip = (v: unknown, n: number) => (typeof v === 'string' ? v.slice(0, n) : '');
-      const category = clip(body.category, 40);
+      if (!isBugReportCategory(body.category)) {
+        return secureResponse(new Response('Bad category', { status: 400 }), url);
+      }
+      const category = body.category;
       const message = clip(body.message, 4000);
       const diagnostics = clip(body.diagnostics, 1500);
       if (!message.trim()) return secureResponse(new Response('Empty', { status: 400 }), url);
-      const subject = `🐞 SKYTALE bug report${category ? ` [${category}]` : ''}`;
+      const subject = `🐞 SKYTALE bug report [${category}]`;
       const text = `${subject}\n\n${message}${diagnostics ? `\n\n— diagnostics —\n${diagnostics}` : ''}`;
-      console.log('bug-report', JSON.stringify({ category, len: message.length, hasDiag: !!diagnostics }));
+      let sink: 'resend' | 'webhook';
+      let sinkResponse: Response;
       try {
         if (env.RESEND_API_KEY && env.BUG_FROM && env.BUG_TO) {
           // Resend transactional email API.
-          await fetch('https://api.resend.com/emails', {
+          sink = 'resend';
+          sinkResponse = await fetch('https://api.resend.com/emails', {
             method: 'POST',
             headers: { authorization: `Bearer ${env.RESEND_API_KEY}`, 'content-type': 'application/json' },
             body: JSON.stringify({ from: env.BUG_FROM, to: [env.BUG_TO], subject, text }),
@@ -337,22 +350,43 @@ export default {
           const webhook = trustedWebhook(env.BUG_WEBHOOK_URL);
           if (!webhook) {
             return secureResponse(
-              new Response(null, { status: 204, headers: { 'cache-control': 'no-store' } }),
+              new Response('Bug report sink unavailable', {
+                status: 503,
+                headers: { 'cache-control': 'no-store', 'retry-after': '60' },
+              }),
               url,
             );
           }
           // `content` works for Discord incoming webhooks, `text` for Slack — send both.
-          await fetch(webhook, {
+          sink = 'webhook';
+          sinkResponse = await fetch(webhook, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ content: text.slice(0, 1900), text: text.slice(0, 3500) }),
+            body: JSON.stringify(bugReportWebhookPayload(text)),
             redirect: 'manual',
             signal: AbortSignal.timeout(8000),
           });
         }
       } catch {
-        /* sink down — the console.log above still captured it */
+        return secureResponse(
+          new Response('Bug report sink unavailable', {
+            status: 503,
+            headers: { 'cache-control': 'no-store', 'retry-after': '60' },
+          }),
+          url,
+        );
       }
+      if (!sinkResponse.ok) {
+        console.warn('bug-report sink rejected report', JSON.stringify({ sink, status: sinkResponse.status }));
+        return secureResponse(
+          new Response('Bug report sink unavailable', {
+            status: 503,
+            headers: { 'cache-control': 'no-store', 'retry-after': '60' },
+          }),
+          url,
+        );
+      }
+      console.log('bug-report delivered', JSON.stringify({ category, len: message.length, hasDiag: !!diagnostics, sink }));
       return secureResponse(new Response(null, { status: 204, headers: { 'cache-control': 'no-store' } }), url);
     }
 

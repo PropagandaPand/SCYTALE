@@ -20,6 +20,7 @@ export interface FileRef {
   dataB64?: string; // legacy/inline bytes (base64) — still read, and used for stickers
   attId?: string; // reference into the attachment store (src/lib/attachments.ts)
   size?: number; // plaintext byte size (for the reference case)
+  storageBytes?: number; // local quota charge incl. encrypted per-record overhead
   // A large attachment OFFERED but not yet downloaded: the recipient sees a download
   // affordance and pulls it on demand (`total` = chunk count). The pull request fans
   // out to the contact; only the offering device (which holds the file) serves it.
@@ -250,10 +251,32 @@ export async function allMessageRoomIds(): Promise<string[]> {
 const recalledKey = 'recalled-mids';
 const recalledAad = utf8.encode('scytale:recalled-mids:v1');
 const scopedRecallPrefix = 'v2:';
+export const MAX_RECALLS_PER_SCOPE = 256;
+export const MAX_RECALLED_MIDS = 4096;
+const MAX_RECALL_ROOM_ID_CHARS = 128;
+const MAX_RECALL_LOAD_ENTRIES = MAX_RECALLED_MIDS * 2;
+const MAX_RECALL_REGISTRY_KEY_CHARS =
+  scopedRecallPrefix.length + 2 + MAX_RECALL_ROOM_ID_CHARS + 1 + 32;
+
+export function isValidRecallMid(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f0-9]{32}$/.test(value);
+}
+
+function isValidRecallRoomId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= MAX_RECALL_ROOM_ID_CHARS &&
+    !value.includes(':') &&
+    !/[\u0000-\u001f\u007f]/.test(value)
+  );
+}
 
 export function recallRegistryKey(roomId: string, mine: boolean, mid: string): string {
-  // Room ids never contain ':' (the contact/group validators enforce this). MIDs
-  // may contain it for group dedup ids, so parsing consumes only the first fields.
+  if (!isValidRecallRoomId(roomId) || !isValidRecallMid(mid)) {
+    throw new Error('Ungültiger Recall-Registry-Schlüssel.');
+  }
+  // Recall is a 1:1 feature and its target is always a random 128-bit MID.
   return `${scopedRecallPrefix}${mine ? '1' : '0'}:${roomId}:${mid}`;
 }
 
@@ -273,9 +296,47 @@ function parseRecallRegistryKey(
   if (roomEnd <= roomStart || roomEnd === value.length - 1) return null;
   const roomId = value.slice(roomStart, roomEnd);
   const mid = value.slice(roomEnd + 1);
-  if (roomId.includes(':') || !mid) return null;
+  if (!isValidRecallRoomId(roomId) || !isValidRecallMid(mid)) return null;
   const mine = value[directionAt] === '1';
   return recallRegistryKey(roomId, mine, mid) === value ? { roomId, mine, mid } : null;
+}
+
+/**
+ * Keep only canonical, recent recall intents. A malicious authenticated peer
+ * can create at most one bounded scope (room + received direction), rather than
+ * growing an encrypted global record forever and forcing O(n) re-seals per
+ * frame. Iterating newest-first preserves recent out-of-order recalls.
+ */
+export function normalizeRecallRegistry(values: Iterable<string>): string[] {
+  const input = Array.from(values);
+  const keptNewestFirst: string[] = [];
+  const seen = new Set<string>();
+  const perScope = new Map<string, number>();
+  for (let i = input.length - 1; i >= 0 && keptNewestFirst.length < MAX_RECALLED_MIDS; i--) {
+    const parsed = parseRecallRegistryKey(input[i]);
+    if (!parsed) continue;
+    const canonical = recallRegistryKey(parsed.roomId, parsed.mine, parsed.mid);
+    if (seen.has(canonical)) continue;
+    const scope = `${parsed.mine ? '1' : '0'}:${parsed.roomId}`;
+    const count = perScope.get(scope) ?? 0;
+    if (count >= MAX_RECALLS_PER_SCOPE) continue;
+    seen.add(canonical);
+    perScope.set(scope, count + 1);
+    keptNewestFirst.push(canonical);
+  }
+  return keptNewestFirst.reverse();
+}
+
+export function addRecallRegistryEntry(
+  values: Iterable<string>,
+  roomId: string,
+  mine: boolean,
+  mid: string,
+): string[] {
+  return normalizeRecallRegistry([
+    ...values,
+    recallRegistryKey(roomId, mine, mid),
+  ]);
 }
 
 export function recallRegistryHas(
@@ -284,6 +345,10 @@ export function recallRegistryHas(
   mine: boolean,
   mid: string,
 ): boolean {
+  // Attachment transfer ids from older/current peers are not necessarily MIDs.
+  // They share a defensive pre-materialisation lookup with recall, where a
+  // non-MID means "cannot be recalled", not an exception that poisons delivery.
+  if (!isValidRecallRoomId(roomId) || !isValidRecallMid(mid)) return false;
   return registry.has(recallRegistryKey(roomId, mine, mid));
 }
 
@@ -305,7 +370,7 @@ export function migrateLegacyRecalledMids(
     if (typeof value !== 'string') continue;
     const parsed = parseRecallRegistryKey(value);
     if (parsed) migrated.add(recallRegistryKey(parsed.roomId, parsed.mine, parsed.mid));
-    else if (!value.startsWith(scopedRecallPrefix) && value) legacy.add(value);
+    else if (!value.startsWith(scopedRecallPrefix) && isValidRecallMid(value)) legacy.add(value);
   }
   if (legacy.size) {
     for (const [roomId, messages] of Object.entries(rooms)) {
@@ -321,7 +386,7 @@ export function migrateLegacyRecalledMids(
       }
     }
   }
-  return [...migrated].sort();
+  return normalizeRecallRegistry(migrated);
 }
 
 /** Rebind scoped recall intents when a contact's authenticated room id changes.
@@ -336,14 +401,15 @@ export function moveRecallRegistryRoom(
   const moved = new Set<string>();
   for (const value of values) {
     const parsed = parseRecallRegistryKey(value);
-    if (!parsed || parsed.roomId !== oldRoomId) {
-      moved.add(value);
+    if (!parsed) continue;
+    if (parsed.roomId !== oldRoomId) {
+      moved.add(recallRegistryKey(parsed.roomId, parsed.mine, parsed.mid));
       continue;
     }
     if (keepOld) moved.add(value);
     moved.add(recallRegistryKey(newRoomId, parsed.mine, parsed.mid));
   }
-  return [...moved].sort();
+  return normalizeRecallRegistry(moved);
 }
 
 export interface RecallApplication {
@@ -404,12 +470,20 @@ export async function loadRecalledMids(dek: CryptoKey): Promise<string[]> {
   if (!rec) return [];
   try {
     const parsed: unknown = JSON.parse(utf8.decode(await open(dek, rec, recalledAad)));
-    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (value): value is string =>
+          typeof value === 'string' &&
+          value.length <= MAX_RECALL_REGISTRY_KEY_CHARS,
+      )
+      .slice(-MAX_RECALL_LOAD_ENTRIES);
   } catch {
     return [];
   }
 }
 
 export async function saveRecalledMids(dek: CryptoKey, mids: string[]): Promise<void> {
-  await saveRecord(recalledKey, await seal(dek, utf8.encode(JSON.stringify(mids)), recalledAad));
+  const bounded = normalizeRecallRegistry(mids);
+  await saveRecord(recalledKey, await seal(dek, utf8.encode(JSON.stringify(bounded)), recalledAad));
 }

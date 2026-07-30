@@ -493,7 +493,7 @@ ok('Boot lädt und rekonstruiert Confirmed Intent strikt vor Inbox-Connect',
   boot.indexOf('loadConfirmedNewDeviceLinkIntent(dek)') <
     boot.indexOf('restoreConfirmedNewDeviceLinkSession(') &&
   boot.indexOf('restoreConfirmedNewDeviceLinkSession(') <
-    boot.indexOf('connectInbox(await inboxRoom'));
+    boot.indexOf('connectInbox(ownInbox)'));
 const confirmStart = messenger.indexOf('async function onNConfirmSas');
 const confirmEnd = messenger.indexOf('function installGrant', confirmStart);
 const confirm = messenger.slice(confirmStart, confirmEnd);
@@ -536,7 +536,8 @@ ok('bewusster N-Abbruch warnt, persistiert zuerst und ACKt kein fremdes Geschwis
   !discardSource.includes('acknowledgePendingLinkGrantRows()'));
 ok('Recovery-UI bietet nach Wiederöffnen einen ausdrücklichen endgültigen Abbruch',
   messenger.includes('Kopplungs-Recovery endgültig verwerfen') &&
-  messenger.includes('void discardConfirmedNewDeviceRecovery()') &&
+  messenger.includes('discardConfirmedNewDeviceRecovery(),') &&
+  messenger.includes('launchRuntimeOperation(() =>') &&
   messenger.includes('Diese bestätigte Recovery bleibt auch nach dem Schließen erhalten.'));
 const discardedMatchStart = messenger.indexOf('async function matchesDiscardedLinkGrant');
 const discardedMatchEnd = messenger.indexOf('// N confirmed the emoji', discardedMatchStart);
@@ -618,7 +619,8 @@ ok('P bietet bewussten Cancel+Revoke statt permanentem Delivery-Lock',
   pCancelSource.indexOf('const self = await ensureSelfContact()') <
     pCancelSource.indexOf('const cancelled = await cancelPendingLinkGrantAndRevokeDevice(') &&
   pCancelSource.includes('primaryPendingLinkTargetRef.current ?? undefined') &&
-  pCancelSource.includes('await gossipDeviceList(cancelled.newList)') &&
+  pCancelSource.includes('const authoritative = await reconcileOwnDeviceList(cancelled.newList)') &&
+  pCancelSource.includes('await gossipDeviceList(authoritative)') &&
   messenger.includes('Autorisierung abbrechen und widerrufen'));
 ok('P-Cancel signiert Revision+1 und löscht exakt den Pending-Intent im selben CAS',
   atomicCancelSource.includes('current.version + 1') &&

@@ -106,8 +106,8 @@ function randomToken(): string {
   return hex(crypto.getRandomValues(new Uint8Array(16)));
 }
 
-function requireBytes(value: Uint8Array | undefined, label: string, exact?: number): Uint8Array {
-  if (!(value instanceof Uint8Array) || (exact ? value.byteLength !== exact : value.byteLength < 16)) {
+function requireBytes(value: Uint8Array | undefined, label: string, exact: number): Uint8Array {
+  if (!(value instanceof Uint8Array) || value.byteLength !== exact) {
     throw new VaultCorruptError(label);
   }
   return value;
@@ -122,11 +122,11 @@ async function vaultHeaderWitness(header: VaultHeader): Promise<string> {
       iterations: header.argon2?.iterations,
       parallelism: header.argon2?.parallelism,
     },
-    salt: hex(requireBytes(header.salt, 'Salt')),
+    salt: hex(requireBytes(header.salt, 'Salt', 16)),
     wrapIv: hex(requireBytes(header.wrapIv, 'IV', 12)),
-    wrappedDek: hex(requireBytes(header.wrappedDek, 'Wrapped-DEK')),
+    wrappedDek: hex(requireBytes(header.wrappedDek, 'Wrapped-DEK', 48)),
     deviceIv: hex(requireBytes(header.deviceWrap?.iv, 'Device-IV', 12)),
-    deviceCiphertext: hex(requireBytes(header.deviceWrap?.ciphertext, 'Device-Wrap')),
+    deviceCiphertext: hex(requireBytes(header.deviceWrap?.ciphertext, 'Device-Wrap', 48)),
   });
   return hex(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(material))));
 }
@@ -263,6 +263,14 @@ export async function createBoundVault(passphrase: string): Promise<CryptoKey> {
 
 async function recoverBindingSuffix(header: VaultHeader): Promise<string> {
   if (!header.deviceWrap) return '';
+  if (
+    !(header.deviceWrap.iv instanceof Uint8Array) ||
+    header.deviceWrap.iv.length !== 12 ||
+    !(header.deviceWrap.ciphertext instanceof Uint8Array) ||
+    header.deviceWrap.ciphertext.length !== 48
+  ) {
+    throw new VaultCorruptError('Device-Wrap');
+  }
   const deviceKey = await getOrCreateDeviceKey(false);
   if (!deviceKey) throw new DeviceBindingMissingError();
   try {
@@ -352,6 +360,14 @@ async function unlockDecoyVault(
   let candidate = rawPassphrase;
   if (header.deviceWrap) {
     if (!deviceKey) return equalCostMiss();
+    if (
+      !(header.deviceWrap.iv instanceof Uint8Array) ||
+      header.deviceWrap.iv.length !== 12 ||
+      !(header.deviceWrap.ciphertext instanceof Uint8Array) ||
+      header.deviceWrap.ciphertext.length !== 48
+    ) {
+      return equalCostMiss();
+    }
     try {
       const secret = new Uint8Array(
         await crypto.subtle.decrypt(
@@ -600,8 +616,14 @@ export async function enableBiometricUnlock(passphrase: string): Promise<void> {
   const bindingSalt = prfBindingSaltBytes(suffix);
   const { credentialId, prfSalt } = await createBiometricCredential();
   const prfSecret = await evaluatePrf(credentialId, prfSalt);
-  const prfKek = await derivePrfKek(prfSecret, bindingSalt);
-  prfSecret.fill(0); // best-effort scrub of the raw PRF secret
+  let prfKek: CryptoKey;
+  try {
+    prfKek = await derivePrfKek(prfSecret, bindingSalt);
+  } finally {
+    // Also scrub when importKey/deriveKey rejects. A failed enrollment must not
+    // leave the authenticator's raw PRF output live until the next GC cycle.
+    prfSecret.fill(0);
+  }
 
   const extractableDek = await unwrapDekExtractable(passKek, header);
   const { wrapIv, wrappedDek } = await wrapDekUnder(prfKek, extractableDek);
@@ -624,10 +646,18 @@ export async function unlockWithBiometric(): Promise<CryptoKey> {
   // Corrupt-header pre-checks, mirroring unlockVault: a mangled prf record must read
   // as "beschädigt", not as a biometric failure or a raw WebAuthn TypeError.
   const p = header.prf;
-  if (!p.credentialId || p.credentialId.length === 0) throw new VaultCorruptError('PRF-Credential');
-  if (!p.salt || p.salt.length === 0) throw new VaultCorruptError('PRF-Salt');
-  if (!p.wrapIv || p.wrapIv.length !== 12) throw new VaultCorruptError('PRF-IV');
-  if (!p.wrappedDek || p.wrappedDek.length < 16) throw new VaultCorruptError('PRF-Wrapped-DEK');
+  if (
+    !(p.credentialId instanceof Uint8Array) ||
+    p.credentialId.length === 0 ||
+    p.credentialId.length > 1024
+  ) throw new VaultCorruptError('PRF-Credential');
+  if (!(p.salt instanceof Uint8Array) || p.salt.length !== 32) throw new VaultCorruptError('PRF-Salt');
+  if (!(p.wrapIv instanceof Uint8Array) || p.wrapIv.length !== 12) {
+    throw new VaultCorruptError('PRF-IV');
+  }
+  if (!(p.wrappedDek instanceof Uint8Array) || p.wrappedDek.length !== 48) {
+    throw new VaultCorruptError('PRF-Wrapped-DEK');
+  }
 
   // Recover the same device-bound salt enrollment used (needs THIS device's key —
   // throws DeviceBindingMissingError if it's gone, exactly like the passphrase path).
@@ -635,8 +665,12 @@ export async function unlockWithBiometric(): Promise<CryptoKey> {
   const bindingSalt = prfBindingSaltBytes(suffix);
 
   const prfSecret = await evaluatePrf(p.credentialId, p.salt);
-  const prfKek = await derivePrfKek(prfSecret, bindingSalt);
-  prfSecret.fill(0);
+  let prfKek: CryptoKey;
+  try {
+    prfKek = await derivePrfKek(prfSecret, bindingSalt);
+  } finally {
+    prfSecret.fill(0);
+  }
   try {
     const dek = await unwrapDekWithPrf(prfKek, p);
     await clearFailures(); // a legitimate unlock — reset any passphrase-fail cooldown
@@ -762,9 +796,10 @@ export async function setDuressPassword(realPassphrase: string, duressPassphrase
   // session has the decoy as its live active database and must never replace it
   // underneath the mounted account UI.
   if (currentDbName() !== REAL_DB) throw new Error('Duress kann nur im echten Konto geändert werden.');
-  // No length/strength policy on the duress word by design: it is a coercion TRIGGER that must be
-  // easy to type under stress, not a secret protecting real data (the decoy it opens is a facade).
-  // It only has to be non-empty (UI button-gated) and differ from the real passphrase (below).
+  // The duress word is an emergency TRIGGER, not an authentication secret. It
+  // must be fast and reliable to type under coercion, so there is deliberately
+  // no length/strength policy. The cryptographic inequality check below is the
+  // only required constraint.
   await withDuressMutationLock(async () => {
     if (promoteMarkerPresent()) {
       throw new Error('Duress kann während einer laufenden Decoy-Promotion nicht geändert werden.');

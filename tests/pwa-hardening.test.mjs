@@ -41,6 +41,14 @@ ok('Hide/Freeze invalidiert auch laufende Argon2-/WebAuthn-Ergebnisse',
   appSource.includes('lifecycleEpochRef.current !== expectedLifecycleEpoch'));
 ok('BFCache-Rückkehr räumt den Curtain über pageshow kontrolliert auf',
   appSource.includes("window.addEventListener('pageshow', onPageShow)"));
+// Regression: a promoted decoy whose source-DB deletion stayed blocked keeps the promote marker.
+// The resume-time duress lockdown MUST be gated on an OPEN vault (dekRef), or the LOCK SCREEN reloads
+// on every pageshow — an endless loop that never lets the valid decoy be reopened. See App.tsx.
+ok('Resume-Lockdown feuert nur bei offenem Tresor (kein Reload-Loop auf dem Sperrbildschirm)',
+  /const onResume = \(\) => \{[\s\S]*?dekRef\.current && promoteMarkerPresent\(\)[\s\S]*?lockdown\(\)/.test(appSource));
+// NEGATIVE CONTROL: the unguarded form (marker alone triggers lockdown) is exactly the loop bug.
+ok('Negativkontrolle: ungated promoteMarkerPresent()->lockdown im Resume-Handler wäre der Loop-Bug',
+  !/const onResume = \(\) => \{\s*if \(promoteMarkerPresent\(\)\) lockdown\(\);\s*\};/.test(appSource));
 ok('Curtain ist blickdicht und liegt über allen App-Overlays',
   /\.privacy-curtain\s*\{[\s\S]*?z-index:\s*10000[\s\S]*?background:\s*#0b0c0e/.test(cssSource));
 

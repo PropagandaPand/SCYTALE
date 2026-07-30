@@ -93,6 +93,10 @@ export function App() {
   // Invalidates an in-flight Argon2/WebAuthn result across hide/freeze/resume.
   const lifecycleEpochRef = useRef(0);
   const duressReloadingRef = useRef(false);
+  // Live mirror of `dek` for the duress-lockdown listeners (a ref reads the current value; a closure
+  // over state would go stale). Used to gate the resume-time lockdown: only an OPEN vault has
+  // in-memory keys worth protecting. See the lockdown effect.
+  const dekRef = useRef<CryptoKey | null>(null);
 
   function say(msg: string, kind: StatusKind = '') {
     setStatus(msg);
@@ -411,6 +415,11 @@ export function App() {
     if (vaultRuntimeLockHeld()) releaseVaultRuntimeLock();
   }, [phase, dek]);
 
+  // Keep dekRef in step with the open key for the lockdown listeners below.
+  useEffect(() => {
+    dekRef.current = dek;
+  }, [dek]);
+
   // A duress promotion in any sibling tab must immediately hide this tab's real
   // account and discard all in-memory keys, even while this tab owns the runtime
   // lock. BroadcastChannel is the primary path; storage events cover browsers
@@ -450,7 +459,12 @@ export function App() {
       }
     };
     const onResume = () => {
-      if (promoteMarkerPresent()) lockdown();
+      // Only an OPEN vault has in-memory keys a foreign duress promotion must strand. When this tab
+      // is locked (lock screen), there is nothing to hide AND boot already finishes the promotion via
+      // completeDecoyPromotion(); locking down here would just reload. Without this gate a promotion
+      // whose source-DB deletion stayed blocked (so the marker persists) makes the LOCK SCREEN reload
+      // on every pageshow — an endless loop that never lets the (valid, promoted) decoy be reopened.
+      if (dekRef.current && promoteMarkerPresent()) lockdown();
     };
     const channel =
       typeof BroadcastChannel !== 'undefined'

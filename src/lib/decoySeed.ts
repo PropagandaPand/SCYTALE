@@ -22,7 +22,10 @@ import { getLang } from './i18n';
 import { computeMasterRoomId, type Contact } from './session';
 import { sealContactRecord, sealContactIndexRecord } from './store';
 import { sealRoomRecords, type ChatMessage } from './messages';
-import { DECOY_CONTENT, type DecoyContactSeed } from './decoyContent';
+// Type-only import (erased at build) — the ~100-per-language content pool is pulled in via a dynamic
+// import() inside buildDecoySeedRecords so it lands in its OWN chunk and never bloats the app-start
+// bundle; it is only ever needed while ARMING a duress word.
+import { type DecoyContactSeed } from './decoyContent';
 
 // loadOrCreateIdentity reads this exact slot/AAD on first open. Provisioning the
 // identity together with the seed lets every fake contact use the same canonical
@@ -42,15 +45,42 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
+// Each arming shows a fresh, non-deterministic handful of chats drawn from the large pool, so two
+// armings never look identical and the decoy carries no fixed, recognisable fingerprint.
+const DECOY_MIN_CHATS = 7;
+const DECOY_MAX_CHATS = 15;
+
+/** Uniform random integer in [min, max]. */
+function randomIntInclusive(min: number, max: number): number {
+  return min + Math.floor(Math.random() * (max - min + 1));
+}
+
+/** Fisher–Yates: `count` distinct entries chosen uniformly at random (does not mutate `items`). */
+function sample<T>(items: readonly T[], count: number): T[] {
+  const a = items.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a.slice(0, Math.min(count, a.length));
+}
+
 /**
- * Build the sealed IndexedDB records that seed a fresh decoy with fake contacts + chats. Returns
- * `[recordKey, SealedRecord]` pairs for the 'records' store; the caller (createDecoyVaultInDb) writes
- * them into 'scytale-decoy' in the same provisioning transaction. Best-effort: with no content pool
- * for the language (and no en fallback) it returns [] and the decoy is simply armed empty.
+ * Build the sealed IndexedDB records that seed a fresh decoy with fake contacts + chats. A random
+ * 7–15 conversations are drawn from the ~100-entry pool for the current app language, so each arming
+ * looks different. Returns `[recordKey, SealedRecord]` pairs for the 'records' store; the caller
+ * (createDecoyVaultInDb) writes them into 'scytale-decoy' in the same provisioning transaction.
+ * Best-effort: with no content pool at all it returns [] and the decoy is simply armed empty.
  */
 export async function buildDecoySeedRecords(decoyDek: CryptoKey): Promise<Array<[string, SealedRecord]>> {
-  const pool: DecoyContactSeed[] = DECOY_CONTENT[getLang()] ?? DECOY_CONTENT.en ?? [];
-  if (pool.length === 0) return [];
+  // Dynamic import: keeps the large content module in its own lazily-loaded chunk (see import note).
+  const { DECOY_CONTENT } = await import('./decoyContent');
+  // Always the currently set app language; fall back to en, then to any available pool.
+  const fullPool: DecoyContactSeed[] =
+    DECOY_CONTENT[getLang()] ?? DECOY_CONTENT.en ?? Object.values(DECOY_CONTENT)[0] ?? [];
+  if (fullPool.length === 0) return [];
+  // Draw a fresh random 7–15 of the ~100-entry pool for this arming (clamped to the pool size).
+  const pool = sample(fullPool, randomIntInclusive(DECOY_MIN_CHATS, DECOY_MAX_CHATS));
 
   const out: Array<[string, SealedRecord]> = [];
   const ids: string[] = [];

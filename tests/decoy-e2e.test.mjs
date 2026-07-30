@@ -125,10 +125,12 @@ await aok('promovierter Decoy-Datensatz ist mit dem zurückgegebenen DEK lesbar'
 // open — that the auto-seed survives the migration into the canonical DB and is readable by the exact
 // call the app makes on boot (loadContacts(dek), Messenger.tsx). The render then shows every contact
 // with `!hidden` (visibleContacts filter), so assert the seed contacts are visible-shaped, not empty.
-await aok('Duress-Unlock öffnet ein BEFÜLLTES Decoy-Postfach (Seed überlebt die Promotion)', async () => {
+await aok('Duress-Unlock öffnet ein BEFÜLLTES Decoy-Postfach (7–15 Seed-Chats überleben die Promotion)', async () => {
   const decoyContacts = await S.loadContacts(promotedDek);
   return (
-    decoyContacts.length === 5 &&
+    decoyContacts.length >= 7 &&
+    decoyContacts.length <= 15 &&
+    new Set(decoyContacts.map((c) => c.roomId)).size === decoyContacts.length &&
     decoyContacts.every(
       (c) => c.localOnly === true && c.hidden !== true && typeof c.peerName === 'string' && c.peerName.length > 0,
     )

@@ -66,10 +66,11 @@ const records = await S.withVaultDb('scytale-decoy', async (db) => {
 });
 
 ok(
-  'Seed enthält Identität, Index und je Kontakt Contact/Room-Key/History',
-  records.size === 17 &&
-    records.has('identity') &&
-    records.has('contact-index'),
+  'Seed enthält Identität + Kontaktindex; Recordzahl im 7–15-Fenster (2 + 3×Kontakt)',
+  records.has('identity') &&
+    records.has('contact-index') &&
+    records.size >= 2 + 3 * 7 &&
+    records.size <= 2 + 3 * 15,
 );
 
 const identityPlain = await S.open(
@@ -97,8 +98,11 @@ const indexPlain = await S.open(
 );
 const roomIds = JSON.parse(dec.decode(indexPlain));
 ok(
-  'deutscher Seed enthält fünf eindeutige Unterhaltungen',
-  roomIds.length === 5 && new Set(roomIds).size === 5,
+  'deutscher Seed wählt 7–15 eindeutige Unterhaltungen aus dem Pool',
+  roomIds.length >= 7 &&
+    roomIds.length <= 15 &&
+    new Set(roomIds).size === roomIds.length &&
+    records.size === 2 + 3 * roomIds.length,
 );
 
 const contacts = [];
@@ -134,8 +138,8 @@ for (const roomId of roomIds) {
 
 ok(
   'alle Kontakt- und Verlaufsdatensätze sind mit ihren Produktions-AADs lesbar',
-  contacts.length === 5 &&
-    histories.length === 5 &&
+  contacts.length === roomIds.length &&
+    histories.length === roomIds.length &&
     histories.every((messages) => messages.length > 0),
 );
 
@@ -188,10 +192,12 @@ ok(
   ),
 );
 
+const dePoolNames = new Set(S.DECOY_CONTENT.de.map((entry) => entry.name));
 ok(
-  'Lokalisierung des direkt erzeugten Seeds folgt der gewählten App-Sprache',
-  contacts.map((contact) => contact.peerName).join('|') ===
-    'Mama|Lukas|Sarah B.|Handwerker Meier|Jonas',
+  'gewählte Kontakte stammen aus dem deutschen Pool (Lokalisierung folgt App-Sprache) und sind eindeutig',
+  S.DECOY_CONTENT.de.length >= 90 &&
+    contacts.every((contact) => dePoolNames.has(contact.peerName)) &&
+    new Set(contacts.map((contact) => contact.peerName)).size === contacts.length,
 );
 
 const allMessages = histories.flat();

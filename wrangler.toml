@@ -51,6 +51,10 @@ class_name = "RelayActorGuard"
 name = "CONTACT_CODES"
 class_name = "ContactCode"
 
+[[durable_objects.bindings]]
+name = "OFFICIAL_ACCOUNTS"
+class_name = "OfficialAccountDirectory"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RelayRoom"]
@@ -66,6 +70,10 @@ new_sqlite_classes = ["RelayActorGuard"]
 [[migrations]]
 tag = "v4"
 new_sqlite_classes = ["ContactCode"]
+
+[[migrations]]
+tag = "v5"
+new_sqlite_classes = ["OfficialAccountDirectory"]
 
 # R2 object storage for LARGE attachments (videos) that don't fit the relay mailbox.
 # The client encrypts the file CLIENT-SIDE under a random per-file key before upload, so
@@ -104,6 +112,18 @@ simple = { limit = 10, period = 60 }
 name = "CONTACT_RESOLVE_RATE"
 namespace_id = "290005"
 simple = { limit = 60, period = 60 }
+
+# Public official-account reads and rare offline-root-authorised publishes have
+# independent actor buckets so neither can starve ordinary contact-code usage.
+[[ratelimits]]
+name = "OFFICIAL_ACCOUNT_READ_RATE"
+namespace_id = "290006"
+simple = { limit = 60, period = 60 }
+
+[[ratelimits]]
+name = "OFFICIAL_ACCOUNT_PUBLISH_RATE"
+namespace_id = "290007"
+simple = { limit = 10, period = 60 }
 
 [observability]
 enabled = true

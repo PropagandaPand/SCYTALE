@@ -11,12 +11,26 @@ import { RelayActorGuard, RelayRoom, type Env } from './relay';
 import { BlobQuota } from './blob-quota';
 import { bugReportWebhookPayload, isBugReportCategory } from './bug-report';
 import { ContactCode } from './contact-code';
+import {
+  OfficialAccountDirectory,
+  OfficialAccountDocumentError,
+  type OfficialAccountDocumentFailure,
+  verifyOfficialAccountDocument,
+} from './official-account';
+import {
+  OFFICIAL_ACCOUNT_ALIAS,
+  OFFICIAL_ACCOUNT_MAX_DOCUMENT_BYTES,
+  OFFICIAL_ACCOUNT_ROUTE_ALIAS,
+} from '../src/lib/officialAccountManifest';
 
 type AppEnv = Env & {
   BLOB_QUOTA: DurableObjectNamespace<BlobQuota>;
   CONTACT_CODES: DurableObjectNamespace<ContactCode>;
   CONTACT_CREATE_RATE: RateLimit;
   CONTACT_RESOLVE_RATE: RateLimit;
+  OFFICIAL_ACCOUNTS: DurableObjectNamespace<OfficialAccountDirectory>;
+  OFFICIAL_ACCOUNT_READ_RATE: RateLimit;
+  OFFICIAL_ACCOUNT_PUBLISH_RATE: RateLimit;
 };
 
 // Content-Security-Policy: lock active content and direct network destinations
@@ -66,6 +80,7 @@ const ROOM_RE = /^[a-f0-9]{64}$/;
 const CONTACT_LOCATOR_RE = /^[A-Za-z0-9_-]{43}$/;
 const CONTACT_PAYLOAD_RE = /^[A-Za-z0-9_-]{427}$/;
 const B64URL_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+const OFFICIAL_ACCOUNT_PATH = `/api/official-accounts/${OFFICIAL_ACCOUNT_ROUTE_ALIAS}`;
 // Both origins are intentionally supported production entry points. The
 // workers.dev hostname must remain available for already-installed PWAs and is
 // held to the same HTTPS/header policy as the custom domain.
@@ -288,6 +303,23 @@ function jsonResponse(value: unknown, url: URL, status = 200): Response {
   );
 }
 
+function officialAccountFailureResponse(
+  reason: OfficialAccountDocumentFailure,
+  url: URL,
+): Response {
+  const status =
+    reason === 'unconfigured'
+      ? 503
+      : reason === 'signature'
+        ? 403
+        : reason === 'not_current'
+          ? 409
+          : 400;
+  const headers: HeadersInit = { 'cache-control': 'no-store' };
+  if (status === 503) headers['retry-after'] = '300';
+  return secureResponse(new Response('Official account document rejected', { status, headers }), url);
+}
+
 export default {
   async fetch(request: Request, env: AppEnv): Promise<Response> {
     const url = new URL(request.url);
@@ -330,6 +362,109 @@ export default {
       // that did not pass through this Worker and therefore lack this header.
       relayHeaders.set('x-scytale-relay-actor', actor);
       return stub.fetch(new Request(request, { headers: relayHeaders }));
+    }
+
+    // Permanent, human-readable address for the root-signed public support
+    // identity. The alias is fixed rather than user-controlled, so arbitrary
+    // requests cannot allocate an unbounded number of Durable Objects.
+    if (url.pathname === OFFICIAL_ACCOUNT_PATH) {
+      if (url.search) {
+        return secureResponse(new Response('Bad request', {
+          status: 400,
+          headers: { 'cache-control': 'no-store' },
+        }), url);
+      }
+      if (request.method !== 'GET' && request.method !== 'PUT') {
+        return secureResponse(new Response('Method not allowed', {
+          status: 405,
+          headers: { allow: 'GET, PUT', 'cache-control': 'no-store' },
+        }), url);
+      }
+      // Browser callers are same-origin only. A missing Origin remains valid for
+      // the offline publication CLI; its root signature is the authorisation.
+      const origin = request.headers.get('origin');
+      if (origin && !sameOrigin(request, url)) {
+        return secureResponse(new Response('Origin nicht erlaubt.', {
+          status: 403,
+          headers: { 'cache-control': 'no-store' },
+        }), url);
+      }
+
+      const actor = await actorHash(request);
+      const limiter = request.method === 'GET'
+        ? env.OFFICIAL_ACCOUNT_READ_RATE
+        : env.OFFICIAL_ACCOUNT_PUBLISH_RATE;
+      if (!(await allowRate(limiter, `actor:${actor}`))) {
+        return secureResponse(rateLimited(), url);
+      }
+
+      if (request.method === 'GET') {
+        let record;
+        try {
+          record = await env.OFFICIAL_ACCOUNTS.getByName(OFFICIAL_ACCOUNT_ALIAS).resolve();
+        } catch {
+          return secureResponse(new Response('Official account directory unavailable', {
+            status: 503,
+            headers: { 'cache-control': 'no-store', 'retry-after': '5' },
+          }), url);
+        }
+        if (!record) {
+          return secureResponse(new Response('Not found', {
+            status: 404,
+            headers: { 'cache-control': 'no-store' },
+          }), url);
+        }
+        return secureResponse(new Response(record.document, {
+          status: 200,
+          headers: {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store',
+          },
+        }), url);
+      }
+
+      let body: unknown;
+      try {
+        body = await readJsonLimited(request, OFFICIAL_ACCOUNT_MAX_DOCUMENT_BYTES);
+      } catch {
+        return secureResponse(new Response('Bad request', {
+          status: 400,
+          headers: { 'cache-control': 'no-store' },
+        }), url);
+      }
+
+      // Reject invalid signatures in the stateless Worker before they can make
+      // the single official-alias object a hot spot. The DO repeats the check.
+      let verified;
+      try {
+        verified = await verifyOfficialAccountDocument(body);
+      } catch (error) {
+        const reason = error instanceof OfficialAccountDocumentError
+          ? error.reason
+          : 'format';
+        return officialAccountFailureResponse(reason, url);
+      }
+
+      let result;
+      try {
+        result = await env.OFFICIAL_ACCOUNTS
+          .getByName(OFFICIAL_ACCOUNT_ALIAS)
+          .publish(verified.document);
+      } catch {
+        return secureResponse(new Response('Official account directory unavailable', {
+          status: 503,
+          headers: { 'cache-control': 'no-store', 'retry-after': '5' },
+        }), url);
+      }
+      if (!result.ok) return officialAccountFailureResponse(result.reason, url);
+      if (result.kind === 'stale' || result.kind === 'conflict') {
+        return jsonResponse({ status: result.kind, sequence: result.sequence }, url, 409);
+      }
+      return jsonResponse(
+        { status: result.kind, sequence: result.sequence },
+        url,
+        result.kind === 'created' ? 201 : 200,
+      );
     }
 
     // Short remote contact codes. Unlike the self-contained in-person QR, the
@@ -819,4 +954,4 @@ export default {
   },
 } satisfies ExportedHandler<AppEnv>;
 
-export { BlobQuota, ContactCode, RelayActorGuard, RelayRoom };
+export { BlobQuota, ContactCode, OfficialAccountDirectory, RelayActorGuard, RelayRoom };

@@ -80,6 +80,7 @@ import { loadRetiredMasters } from './denylist';
 import { loadOrCreateOwnDeviceList } from './devices';
 import { loadDeviceNames, type DeviceNames } from './devicenames';
 import { loadPendingGroupMutationSnapshots } from './groupMutations';
+import { OFFICIAL_ACCOUNT_TRUST_RECORD_KEY } from './officialAccountStore';
 import {
   fromGroupRemovalTombstoneWire,
   groupRemovalTombstoneRecordKey,
@@ -559,6 +560,14 @@ async function stageMetadata(
   }
 
   const { identity, prekeys, deviceList } = restoredCrypto;
+  // This root-signed public trust record is deliberately NOT supplied by the
+  // backup. Preserve the current device's monotone rollback floor across the
+  // restore transaction so an old backup cannot resurrect an older, still-
+  // time-valid ADMIN manifest after a revocation. It is already sealed under
+  // this target vault's DEK; beginAccountRestore fences concurrent writers.
+  const retainedOfficialAccountTrust = await loadRecord(
+    OFFICIAL_ACCOUNT_TRUST_RECORD_KEY,
+  );
   boundedArray(deviceList.devices, 'Geräte', 1000);
 
   const importedDeviceNames = blob.deviceNames ?? {};
@@ -683,6 +692,13 @@ async function stageMetadata(
     aad.deviceNames,
   );
   await putStaged(stageId, 'profile', dek, utf8.encode(JSON.stringify(blob.profile)), aad.profile);
+  if (retainedOfficialAccountTrust) {
+    await stageRestoreRecord(
+      stageId,
+      OFFICIAL_ACCOUNT_TRUST_RECORD_KEY,
+      retainedOfficialAccountTrust,
+    );
+  }
 
   for (const contact of contacts) {
     throwIfBackupAborted(signal);

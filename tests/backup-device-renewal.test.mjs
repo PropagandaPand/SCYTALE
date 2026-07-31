@@ -364,6 +364,14 @@ const primaryFile = new Blob([JSON.stringify({
   iv: await S.b64encode(primaryIv),
   ct: await S.b64encode(primaryCiphertext),
 })]);
+const retainedOfficialFloor = {
+  iv: crypto.getRandomValues(new Uint8Array(12)),
+  ct: crypto.getRandomValues(new Uint8Array(80)),
+};
+await S.saveRecord(
+  S.OFFICIAL_ACCOUNT_TRUST_RECORD_KEY,
+  retainedOfficialFloor,
+);
 const importedAttachments = await S.importBackup(
   targetDek,
   exportPassphrase,
@@ -382,6 +390,9 @@ const installedList = await S.loadOrCreateOwnDeviceList(
 const installedContacts = await S.loadContacts(targetDek);
 const installedNames = await S.loadDeviceNames(targetDek);
 const installedNameKey = await S.b64encode(installedIdentity.sign.publicKey);
+const installedOfficialFloor = await S.loadRecord(
+  S.OFFICIAL_ACCOUNT_TRUST_RECORD_KEY,
+);
 
 ok('vollständiger Import installiert frische Identity/Prekeys statt Snapshot-Klon',
   importedAttachments === 0 &&
@@ -392,6 +403,10 @@ ok('vollständiger Import installiert frische Identity/Prekeys statt Snapshot-Kl
       sourcePrekeys.signedPreKey.keyPair.privateKey,
     ) &&
     same(installedIdentity.master.publicKey, source.master.publicKey));
+ok('vollständiger Restore erhält den lokalen Official-Account-Rollback-Floor bytegenau',
+  installedOfficialFloor !== undefined &&
+    same(installedOfficialFloor.iv, retainedOfficialFloor.iv) &&
+    same(installedOfficialFloor.ct, retainedOfficialFloor.ct));
 ok('installierte Liste enthält nur das frische Restore-Device und ist V+1',
   installedList !== null &&
     installedList.version === sourceList.version + 1 &&

@@ -4,6 +4,11 @@ dist/
 .dev.vars
 *.local
 .DS_Store
+
+# Offline official-account root keys must never enter source control. The
+# provisioning CLI also refuses to create/read them anywhere inside this repo.
+**/skytale-admin-root*.json
+**/official-admin-root*.json
 __pycache__/
 
 # Local-only German copy of SECURITY.md (English is the committed source of truth)

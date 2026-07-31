@@ -244,6 +244,44 @@ export {
   openContactInvite,
 } from '../src/lib/contactCode';
 export {
+  OFFICIAL_ACCOUNT_ALIAS,
+  OFFICIAL_ACCOUNT_BADGE,
+  OFFICIAL_ACCOUNT_DISPLAY_NAME,
+  OFFICIAL_ACCOUNT_MAX_DOCUMENT_BYTES,
+  OFFICIAL_ACCOUNT_MANIFEST_SCHEMA,
+  OFFICIAL_ACCOUNT_ROLE,
+  OFFICIAL_ACCOUNT_ROOT_KEY_ID,
+  OfficialAccountManifestError,
+  assertCurrentOfficialAccountManifest,
+  assertTimelyOfficialAccountManifest,
+  base64urlDecode,
+  base64urlEncode,
+  canonicalOfficialAccountManifestJson,
+  officialAccountManifestDigest,
+  officialAccountSigningBytes,
+  parseOfficialAccountManifest,
+  unsignedOfficialAccountManifest,
+  verifyOfficialAccountManifestSignature,
+} from '../src/lib/officialAccountManifest';
+export {
+  OfficialAccountError,
+  canonicalOfficialAccountDocument,
+  extractOfficialAccountAlias,
+  isOfficialAdminContact,
+  isOfficialAdminMaster,
+  isRevokedOfficialAdminContact,
+  isRevokedOfficialAdminMaster,
+  officialAccountConfigured,
+  resolveOfficialAccount,
+  verifyOfficialAccountDocument,
+} from '../src/lib/officialAccount';
+export {
+  OFFICIAL_ACCOUNT_TRUST_RECORD_KEY,
+  OfficialAccountTrustCorruptError,
+  loadOfficialAccountTrust,
+  saveOfficialAccountTrust,
+} from '../src/lib/officialAccountStore';
+export {
   BUG_REPORT_CATEGORIES,
   isBugReportCategory,
   bugReportWebhookPayload,

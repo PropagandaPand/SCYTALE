@@ -16,6 +16,7 @@
   --theirs: #1c2026;
   --theirs-ink: #eceef1;
   --verified: #12a488;
+  --official-admin: #ff6b63;
   --connecting: #e0a53a;
   --danger: #e5695f;
   --qr-bg: #f7f7f4;
@@ -46,6 +47,7 @@
   --theirs-ink: #17150f;
   --connecting: #b7791f;
   --danger: #c4483d;
+  --official-admin: #b42318;
   --qr-bg: #ffffff;
   --qr-ink: #141519;
 }
@@ -722,6 +724,30 @@ html.privacy-curtain-on .privacy-curtain {
   color: var(--verified);
   display: flex;
 }
+.official-admin-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 18px;
+  padding: 2px 6px;
+  border: 1px solid color-mix(in srgb, var(--official-admin) 55%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--official-admin) 13%, var(--surface));
+  color: var(--official-admin);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.045em;
+  white-space: nowrap;
+}
+.official-admin-badge.revoked {
+  border-color: color-mix(in srgb, var(--danger) 72%, var(--border));
+  background: color-mix(in srgb, var(--danger) 20%, var(--surface));
+  color: var(--danger);
+  letter-spacing: 0.025em;
+}
 .conv-ts {
   margin-left: auto;
   font-family: var(--font-mono);
@@ -862,6 +888,22 @@ html.privacy-curtain-on .privacy-curtain {
   opacity: 0.4;
   font-size: 0.72em;
 }
+.chat-peer .n.static {
+  cursor: default;
+}
+.chat-trust-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  padding-top: 1px;
+}
+.chat-trust-row .official-admin-badge {
+  min-height: 16px;
+  padding: 1px 5px;
+  font-size: 8.5px;
+}
 .verify-line {
   display: inline-flex;
   align-items: center;
@@ -873,6 +915,10 @@ html.privacy-curtain-on .privacy-curtain {
   font-family: var(--font-mono);
   font-weight: 500;
   font-size: 10.5px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .rename-row {
   flex: 1;
@@ -1809,7 +1855,20 @@ html.privacy-curtain-on .privacy-curtain {
   font-size: 21px;
   font-weight: 700;
   text-align: center;
+}
+.contact-name-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
   margin-top: 4px;
+}
+.contact-name-row .official-admin-badge {
+  min-height: 20px;
+  padding-inline: 7px;
+  font-size: 10px;
 }
 .contact-verify-chip {
   display: inline-flex;
@@ -1821,6 +1880,101 @@ html.privacy-curtain-on .privacy-curtain {
   font-weight: 600;
   cursor: pointer;
   padding: 4px 8px;
+}
+.contact-verify-chip.revoked {
+  color: var(--danger);
+  cursor: default;
+}
+
+.official-account-note {
+  width: 100%;
+  margin-top: 12px;
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 13px 14px;
+  border: 1px solid color-mix(in srgb, var(--official-admin) 42%, var(--border));
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--official-admin) 9%, var(--surface));
+  color: var(--official-admin);
+  text-align: left;
+}
+.official-account-note > svg {
+  flex: none;
+  margin-top: 1px;
+}
+.official-account-note > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.official-account-note b {
+  font-size: 13px;
+  line-height: 1.35;
+}
+.official-account-note span {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.official-revoked-warning {
+  flex: none;
+  width: calc(100% - 24px);
+  margin: 8px 12px 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px 10px;
+  align-items: start;
+  padding: 11px 12px;
+  border: 1px solid color-mix(in srgb, var(--danger) 68%, var(--border));
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--danger) 13%, var(--surface));
+  color: var(--danger);
+  text-align: left;
+}
+.contact-body > .official-revoked-warning {
+  width: 100%;
+  margin: 12px 0 0;
+}
+.official-revoked-warning > svg {
+  flex: none;
+  margin-top: 1px;
+}
+.official-revoked-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.official-revoked-copy b {
+  font-size: 13px;
+  line-height: 1.3;
+}
+.official-revoked-copy span {
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.official-revoked-warning .btn {
+  grid-column: 2;
+  width: 100%;
+  min-height: 36px;
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+  color: var(--danger);
+}
+
+.member-row:disabled,
+.fwd-row:disabled {
+  cursor: not-allowed;
+}
+.member-row:disabled .conv-name,
+.fwd-row:disabled .fwd-name {
+  color: var(--muted);
+}
+.member-row:disabled .check {
+  opacity: 0.45;
 }
 
 /* Persistent notice for a rejected retired-identity attempt. Deliberately a

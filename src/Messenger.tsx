@@ -229,6 +229,28 @@ import {
   resolveContactInvite,
   type ContactInviteDraft,
 } from './lib/contactCode';
+import {
+  OfficialAccountError,
+  extractOfficialAccountAlias,
+  isOfficialAdminContact,
+  isOfficialAdminMaster,
+  isRevokedOfficialAdminContact,
+  isRevokedOfficialAdminMaster,
+  officialAccountConfigured,
+  resolveOfficialAccount,
+  type TrustedOfficialAccountDocument,
+} from './lib/officialAccount';
+import {
+  loadOfficialAccountTrust,
+  saveOfficialAccountTrust,
+} from './lib/officialAccountStore';
+import {
+  OFFICIAL_ACCOUNT_ALIAS,
+  OFFICIAL_ACCOUNT_BADGE,
+  OFFICIAL_ACCOUNT_CLOCK_SKEW_MS,
+  OFFICIAL_ACCOUNT_DISPLAY_NAME,
+  base64urlEncode,
+} from './lib/officialAccountManifest';
 import { bytesToB64, b64ToBytes } from './lib/bytes';
 import { compressImage } from './lib/imagecompress';
 import { Identicon } from './Identicon';
@@ -314,6 +336,9 @@ const GROUP_TRANSITION_MAX_IDS = 8;
 const GROUP_TRANSITION_MAX_PER_GROUP = 12;
 const GROUP_TRANSITION_MAX_BYTES = 2 * 1024 * 1024;
 const GROUP_TRANSITION_TTL_MS = 2 * 60_000;
+// Avoid the browser's signed 32-bit timeout edge for long-lived manifests.
+const OFFICIAL_TRUST_TIMER_STEP_MS = 24 * 60 * 60_000;
+const OFFICIAL_TRUST_REFRESH_INTERVAL_MS = 15 * 60_000;
 
 function pickAudioMime(): string {
   const cands = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
@@ -528,9 +553,58 @@ function bigEmojiLevel(text: string | undefined): 0 | 1 | 2 {
   }
   return n === 1 ? 1 : 2;
 }
-const displayName = (c: Contact) =>
+const ordinaryDisplayName = (c: Contact) =>
   c.nickname?.trim() || c.peerName?.trim() || shortFp(c.peerFingerprint);
 const avatarSrc = (b64: string) => `data:image/jpeg;base64,${b64}`;
+
+function OfficialAdminBadge() {
+  const label = t('Offizieller SKYTALE-Administrator');
+  return (
+    <span className="official-admin-badge" aria-label={label} title={label}>
+      <IconShield size={12} filled />
+      <span>{OFFICIAL_ACCOUNT_BADGE}</span>
+    </span>
+  );
+}
+
+function RevokedOfficialAdminBadge() {
+  const label = t('Widerrufener ehemaliger SKYTALE-Administrator');
+  return (
+    <span
+      className="official-admin-badge revoked"
+      aria-label={label}
+      title={label}
+    >
+      <IconShield size={12} filled />
+      <span>{t('ADMIN WIDERRUFEN')}</span>
+    </span>
+  );
+}
+
+function OfficialAccountRevokedWarning({
+  group = false,
+  onRecover,
+}: {
+  group?: boolean;
+  onRecover: () => void;
+}) {
+  return (
+    <div className="official-revoked-warning" role="alert">
+      <IconShield size={20} filled />
+      <div className="official-revoked-copy">
+        <b>{t('Früherer SKYTALE-Administrator widerrufen')}</b>
+        <span>
+          {group
+            ? t('Diese Gruppe enthält den widerrufenen früheren SKYTALE-Administrator. Senden ist blockiert, damit keine neuen Nachrichten an diesen Schlüssel gelangen.')
+            : t('SKYTALE hat diesen früheren Admin-Schlüssel kryptografisch widerrufen. Senden ist blockiert. Verbinde dich ausschließlich über SKYTALE-SUPPORT neu.')}
+        </span>
+      </div>
+      <button className="btn btn-outline sm" onClick={onRecover}>
+        {t('Über SKYTALE-SUPPORT neu verbinden')}
+      </button>
+    </div>
+  );
+}
 
 function extractToken(input: string): string {
   const m = input.match(/[#?&]add=([^&\s]+)/);
@@ -566,6 +640,12 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   const lookupRef = useRef<PreKeyLookup | null>(null);
   const relaysRef = useRef<Map<string, RelayClient>>(new Map());
   const contactsRef = useRef<Contact[]>([]);
+  // Public, root-signed directory state. It is intentionally kept separate from
+  // Contact: neither a profile, a backup nor a peer-controlled field may mint an
+  // ADMIN badge. Every stored document is re-verified before reaching this ref.
+  const officialAccountTrustRef = useRef<TrustedOfficialAccountDocument | null>(null);
+  const officialTrustExpiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const officialTrustRefreshRunningRef = useRef(false);
   const messagesRef = useRef<Record<string, ChatMessage[]>>({});
   const unreadRef = useRef<Record<string, number>>({});
   // Scoped (roomId, mine, mid) recall keys — persisted, so a recalled message can't
@@ -734,7 +814,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       setError(
         t('Vorgang fehlgeschlagen: {msg}', {
           msg:
-            error instanceof ContactCodeError
+            error instanceof ContactCodeError || error instanceof OfficialAccountError
               ? t(error.message)
               : error instanceof Error
                 ? error.message
@@ -745,6 +825,106 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   }
 
   const [, bump] = useReducer((x: number) => x + 1, 0);
+  function trustedOfficialAccountFor(
+    contact: Contact,
+  ): TrustedOfficialAccountDocument | null {
+    const trusted = officialAccountTrustRef.current;
+    return isOfficialAdminContact(contact, trusted) ? trusted : null;
+  }
+
+  /** A root-signed revocation remains a warning even after its short directory
+   * lease expires. `current` controls positive ADMIN authority; it must never
+   * erase negative knowledge that this exact former master was revoked. */
+  function revokedOfficialAccountForMaster(
+    masterPub: Uint8Array,
+  ): TrustedOfficialAccountDocument | null {
+    const trusted = officialAccountTrustRef.current;
+    return isRevokedOfficialAdminMaster(masterPub, trusted) ? trusted : null;
+  }
+
+  function revokedOfficialAccountFor(
+    contact: Contact,
+  ): TrustedOfficialAccountDocument | null {
+    const trusted = officialAccountTrustRef.current;
+    return isRevokedOfficialAdminContact(contact, trusted) ? trusted : null;
+  }
+
+  function officialAccountNameLocked(contact: Contact): boolean {
+    return !!(
+      trustedOfficialAccountFor(contact) ||
+      revokedOfficialAccountFor(contact)
+    );
+  }
+
+  function assertNormalSendAllowed(contact: Contact): void {
+    if (!revokedOfficialAccountFor(contact)) return;
+    throw new OfficialAccountError(
+      'revoked',
+      t('Senden blockiert: Dieser frühere Admin-Schlüssel wurde widerrufen. Verbinde dich über SKYTALE-SUPPORT neu.'),
+    );
+  }
+
+  function groupHasRevokedOfficialMember(group: Group): boolean {
+    return group.members.some((member) =>
+      !!revokedOfficialAccountForMaster(memberMasterPub(member)),
+    );
+  }
+
+  function displayName(contact: Contact): string {
+    return officialAccountNameLocked(contact)
+      ? OFFICIAL_ACCOUNT_DISPLAY_NAME
+      : ordinaryDisplayName(contact);
+  }
+
+  function installOfficialAccountTrust(
+    trusted: TrustedOfficialAccountDocument,
+  ): void {
+    officialAccountTrustRef.current = trusted;
+    scheduleOfficialTrustExpiryRerender(trusted);
+    const active = contactsRef.current.find(
+      (contact) => contact.roomId === activeRoomRef.current,
+    );
+    if (active && officialAccountNameLocked(active)) {
+      setRenaming(false);
+    }
+    // A valid revoked document deliberately removes the badge immediately.
+    bump();
+  }
+
+  /** Expiry is part of badge authorization, not merely cache freshness. Wake the
+   * UI at the skew-adjusted boundary even if a long-running unlocked tab has no
+   * successful network refresh or unrelated React state update. */
+  function scheduleOfficialTrustExpiryRerender(
+    trusted: TrustedOfficialAccountDocument,
+  ): void {
+    if (officialTrustExpiryTimerRef.current !== null) {
+      clearTimeout(officialTrustExpiryTimerRef.current);
+      officialTrustExpiryTimerRef.current = null;
+    }
+    if (trusted.current !== true || trusted.manifest.status !== 'active') return;
+    const expiresAt =
+      trusted.manifest.notAfter + OFFICIAL_ACCOUNT_CLOCK_SKEW_MS;
+    const check = () => {
+      if (
+        !lifecycleActiveRef.current ||
+        officialAccountTrustRef.current !== trusted
+      ) {
+        return;
+      }
+      const remaining = expiresAt - Date.now();
+      if (remaining <= 0) {
+        officialTrustExpiryTimerRef.current = null;
+        bump();
+        return;
+      }
+      officialTrustExpiryTimerRef.current = setTimeout(
+        check,
+        Math.min(remaining, OFFICIAL_TRUST_TIMER_STEP_MS),
+      );
+    };
+    check();
+  }
+
   const [fingerprint, setFingerprint] = useState('');
   const [shareBundleToken, setShareBundleToken] = useState('');
   const [qrDataUrl, setQrDataUrl] = useState('');
@@ -943,6 +1123,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     exemptOperation?: TrackedRuntimeOperation,
   ): Promise<void> {
     lifecycleActiveRef.current = false;
+    if (officialTrustExpiryTimerRef.current !== null) {
+      clearTimeout(officialTrustExpiryTimerRef.current);
+      officialTrustExpiryTimerRef.current = null;
+    }
     // A locked/unmounted messenger must never leave a live microphone behind.
     // Detach recorder callbacks before stop so `onstop` cannot launch a late
     // finishRecording writer after this generation has been invalidated.
@@ -1793,6 +1977,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     if (!m.mid || !m.mine || m.recalled) return;
     const contact = contactsRef.current.find((c) => c.roomId === roomId);
     if (!contact) return; // group message: not supported yet
+    if (revokedOfficialAccountFor(contact)) return; // no recall frame to a revoked admin key
     await retractMessage(roomId, m.mid, true);
     await fanoutSend(contact, { kind: 'recall', targetMid: m.mid }, randomMid());
     void syncToOwnDevices(contact.peerMasterPub, 'sent', m.mid, m.ts, { kind: 'recall', targetMid: m.mid });
@@ -2062,6 +2247,67 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     });
     inboxQueueRef.current = run.catch(() => undefined);
     return run;
+  }
+
+  /** Adopt an official manifest's public directory only through the normal
+   * master-signature/retired-master/rollback gate. A newer gossiped list already
+   * on the Contact always wins over the directory snapshot. */
+  async function adoptOfficialDeviceList(
+    trusted: TrustedOfficialAccountDocument,
+    contact: Contact,
+  ): Promise<boolean> {
+    const list = trusted.deviceList;
+    if (
+      trusted.manifest.status !== 'active' ||
+      !list ||
+      !isOfficialAdminContact(contact, trusted) ||
+      (contact.peerDeviceList &&
+        !isNewerDeviceList(list, contact.peerDeviceList))
+    ) {
+      return false;
+    }
+    return applyDeviceListUpdate(contact, list, retiredMastersRef.current);
+  }
+
+  /** Refresh is deliberately best-effort and silent. Only a fully verified,
+   * durably stored document reaches the UI; network/format failures retain the
+   * last good cache. A valid newer revocation is stored and removes the badge. */
+  async function refreshOfficialAccountTrust(signal: AbortSignal): Promise<void> {
+    if (
+      !officialAccountConfigured() ||
+      officialTrustRefreshRunningRef.current
+    ) return;
+    officialTrustRefreshRunningRef.current = true;
+    try {
+      const current = officialAccountTrustRef.current;
+      const candidate = await resolveOfficialAccount(OFFICIAL_ACCOUNT_ALIAS, {
+        signal,
+        floor: current
+          ? { sequence: current.sequence, digest: current.digest }
+          : null,
+      });
+      if (signal.aborted) throw new MessengerInactiveError();
+      await enqueueInbox(async () => {
+        const trusted = await saveOfficialAccountTrust(dek, candidate);
+        installOfficialAccountTrust(trusted);
+        if (trusted.manifest.status !== 'active') return;
+        const contact = contactsRef.current.find((entry) =>
+          isOfficialAdminContact(entry, trusted),
+        );
+        if (
+          contact &&
+          (await adoptOfficialDeviceList(trusted, contact))
+        ) {
+          await saveContact(dek, contact);
+        }
+      });
+    } catch {
+      if (signal.aborted) throw new MessengerInactiveError();
+      // Keep the last root-verified cache. Background availability must not
+      // turn a trusted local identity marker into a flickering network badge.
+    } finally {
+      officialTrustRefreshRunningRef.current = false;
+    }
   }
 
   /** Resolve a Contact again only after a queued task owns the mutation barrier.
@@ -2580,6 +2826,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   // BEFORE anything hits the wire, on the send serialization chain (Invariant I/II
   // per session). Returns the per-device delivery rows for the local bubble.
   async function fanoutSend(contact: Contact, content: MessageContent, mid: string, minPv = 0): Promise<DeviceDelivery[]> {
+    // A revoked former-admin key must receive NOTHING new — content, replies,
+    // recalls, attachment requests or offers all route through here. This is the
+    // outbound choke point for every content kind, not just "normal" messages.
+    assertNormalSendAllowed(contact);
     const id = identityRef.current;
     if (!id) return [];
     const { deliveries, unreachable } = await enqueueInbox(async () => {
@@ -2614,7 +2864,8 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     only?: Bytes,
   ): Promise<void> {
     const id = identityRef.current;
-    if (!id) return;
+    // Silent gossip (device lists, acks) must not leak to a revoked admin key.
+    if (!id || revokedOfficialAccountFor(contact)) return;
     const { deliveries, unreachable } = await enqueueInbox(async () => {
       const current = requireCurrentContact(contact);
       const result = await fanoutFromThisDevice(
@@ -2649,6 +2900,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     mime: string,
     viewOnce = false,
   ): Promise<boolean> {
+    assertNormalSendAllowed(contact);
     const id = identityRef.current;
     if (!id) return false;
     // One 128-bit id is both the transfer/storage id and the visible message
@@ -2711,6 +2963,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     name: string,
     mime: string,
   ): Promise<boolean> {
+    assertNormalSendAllowed(contact);
     const id = identityRef.current;
     if (!id) return false;
     // Capable if ANY authorised device handles offers (not just the primary), and the
@@ -2748,6 +3001,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     const servedOrigin = currentDbName();
     const id = identityRef.current;
     if (!id || !/^[A-Za-z0-9]{1,40}$/.test(tid)) return;
+    if (revokedOfficialAccountFor(contact)) return; // no chunk streaming to a revoked admin key
     const arr = messagesRef.current[contact.roomId] ?? (await loadMessages(dek, contact.roomId));
     if (!arr.some((m) => m.mine && m.file?.attId === tid)) return; // not something I offered here
     // Anti-amplification: a ~30 B attreq triggers up to a 25 MB stream, so rate-limit
@@ -2798,6 +3052,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     if (downloadingRef.current.has(tid)) return; // already pulling (also guards a double-tap)
     const contact = contactsRef.current.find((c) => c.roomId === roomId);
     if (!contact) return;
+    if (revokedOfficialAccountFor(contact)) return; // no attreq to a revoked admin key
     downloadingRef.current.add(tid);
     bump();
 
@@ -3336,6 +3591,8 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     const list = ownListRef.current;
     if (!id || !list) return;
     if (contact.localOnly || contact.staleIdentity) return;
+    // Never gossip our device list (topology) to a revoked former-admin key.
+    if (revokedOfficialAccountFor(contact)) return;
     const targets =
       contact.peerDeviceList?.devices.map((device) => device.signPub) ??
       [contact.peerSignPub];
@@ -4859,16 +5116,75 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     const id = identityRef.current;
     if (!id) return;
     if (rawInput.length > MAX_CONTACT_INPUT_CHARS) {
-      setError(t('Kontaktcode oder Link ist zu lang.'));
+      setError(t('Kontaktcode, Alias oder Link ist zu lang.'));
       return;
     }
     try {
-      const shortCode = extractContactCode(rawInput);
+      // The permanent, root-signed support alias is deliberately recognised
+      // before ordinary SK1 rendezvous codes or raw bundles. Scanner, clipboard
+      // and manual input all call this one function and therefore get identical
+      // verification and rollback behaviour.
+      const officialAlias = extractOfficialAccountAlias(rawInput);
+      const resolvedOfficial = officialAlias
+        ? await resolveOfficialAccount(officialAlias, {
+            signal,
+            floor: officialAccountTrustRef.current
+              ? {
+                  sequence: officialAccountTrustRef.current.sequence,
+                  digest: officialAccountTrustRef.current.digest,
+                }
+              : null,
+          })
+        : null;
+      const trustedOfficial = resolvedOfficial
+        ? await enqueueInbox(async () => {
+            const stored = await saveOfficialAccountTrust(
+              dek,
+              resolvedOfficial,
+            );
+            installOfficialAccountTrust(stored);
+            return stored;
+          })
+        : null;
+      if (
+        trustedOfficial &&
+        trustedOfficial.manifest.status !== 'active'
+      ) {
+        throw new OfficialAccountError(
+          'revoked',
+          'Der offizielle Admin-Account wurde widerrufen.',
+        );
+      }
+      // saveOfficialAccountTrust is a monotone cross-tab CAS and may return a
+      // newer existing winner instead of the just-fetched candidate. Never let
+      // an expired winner authorise Contact/session mutation merely because it
+      // still carries a once-valid public bundle.
+      if (
+        trustedOfficial &&
+        (!trustedOfficial.bundle ||
+          !isOfficialAdminMaster(
+            trustedOfficial.masterPub,
+            trustedOfficial,
+          ))
+      ) {
+        throw new OfficialAccountError(
+          'not-current',
+          'Die gespeicherte Admin-Beschreibung ist abgelaufen. Bitte später erneut versuchen.',
+        );
+      }
+
+      const shortCode = officialAlias ? null : extractContactCode(rawInput);
       const token = shortCode
         ? (await resolveContactInvite(shortCode, signal)).bundle
-        : extractToken(rawInput);
-      if (!token) return;
-      const bundle = await decodeBundle(token);
+        : officialAlias
+          ? ''
+          : extractToken(rawInput);
+      if (!trustedOfficial && !token) return;
+      const decodeOrdinaryBundle = async () => {
+        const bundle = await decodeBundle(token);
+        return bundle;
+      };
+      const bundle = trustedOfficial?.bundle ?? (await decodeOrdinaryBundle());
       // Adding your OWN code would pass every check and silently create a "chat
       // with yourself". Compare MASTERS, not device keys: under master-based
       // rooms an own SECOND device (same master, different dh) must also be
@@ -4886,6 +5202,41 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           (entry) => entry.roomId === candidate.roomId,
         );
         if (existing) {
+          if (trustedOfficial) {
+            if (!bytesEqual(existing.peerMasterPub, bundle.masterPub)) {
+              throw new OfficialAccountError(
+                'signature',
+                'Der offizielle Alias passt nicht zum gepinnten Kontakt.',
+              );
+            }
+            existing.hidden = undefined;
+            // A peer-gossiped directory may be ahead of the root manifest. Keep
+            // it and its sessions; adopt the bootstrap bundle only if it is not
+            // behind that local cryptographic state.
+            const list = existing.peerDeviceList;
+            const bundleMayAdvance =
+              bundle.epoch >= existing.peerEpoch &&
+              (!list ||
+                bundle.epoch > list.epoch ||
+                (bundle.epoch === list.epoch &&
+                  deviceInList(list, bundle.identitySignPub)));
+            if (bundleMayAdvance) {
+              existing.bundle = bundle;
+              existing.peerEpoch = Math.max(existing.peerEpoch, bundle.epoch);
+              existing.peerSignPub = bundle.identitySignPub;
+              existing.peerDhPub = bundle.identityDhPub;
+              if (list && bundle.epoch > list.epoch) {
+                existing.peerDeviceList = undefined;
+                existing.sessions = new Map();
+              }
+            }
+            await adoptOfficialDeviceList(
+              trustedOfficial,
+              existing,
+            );
+            await saveContact(dek, existing);
+            return existing;
+          }
           if (
             !bytesEqual(existing.peerMasterPub, bundle.masterPub) ||
             bundle.epoch < existing.peerEpoch
@@ -4917,6 +5268,18 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           await saveContact(dek, existing);
           return existing;
         }
+        if (
+          trustedOfficial?.deviceList &&
+          !(await adoptOfficialDeviceList(
+            trustedOfficial,
+            candidate,
+          ))
+        ) {
+          throw new OfficialAccountError(
+            'signature',
+            'Die offizielle Geräteliste konnte nicht sicher übernommen werden.',
+          );
+        }
         contactsRef.current = [...contactsRef.current, candidate];
         // Do NOT clobber an existing log: under master-based rooms my other
         // device may already have self-synced history into this exact room.
@@ -4934,7 +5297,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       bump();
     } catch (e) {
       if (signal?.aborted) throw new MessengerInactiveError();
-      if (e instanceof ContactCodeError) {
+      if (e instanceof ContactCodeError || e instanceof OfficialAccountError) {
         setError(t(e.message));
       } else {
         setError(t('Ungültiges Bundle: {msg}', { msg: (e as Error).message }));
@@ -5034,6 +5397,21 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
 
       retiredMastersRef.current = await loadRetiredMasters(dek);
       assertMessengerActive();
+      // Re-open and fully verify the signed cache on every boot. An unconfigured
+      // release stays silent and fail-closed; it never attempts a directory fetch
+      // merely because an old local record happens to exist.
+      if (officialAccountConfigured()) {
+        try {
+          const cachedOfficial = await loadOfficialAccountTrust(dek);
+          assertMessengerActive();
+          if (cachedOfficial) installOfficialAccountTrust(cachedOfficial);
+        } catch {
+          officialAccountTrustRef.current = null;
+          // A corrupt or no-longer-release-valid cache never renders. A valid
+          // record below the release floor is exposed as null and can be replaced
+          // by the current signed directory stand during the refresh below.
+        }
+      }
       // Erst-Sync state: which snapshots this device already imported, and whether
       // it is still waiting for one (a linked device keeps asking across reloads).
       bootstrapAppliedRef.current = await loadBootstrapApplied(dek);
@@ -5055,6 +5433,22 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       }
       contactsRef.current = await loadContacts(dek);
       assertMessengerActive();
+      const cachedOfficial = officialAccountTrustRef.current;
+      if (cachedOfficial?.manifest.status === 'active') {
+        const officialContact = contactsRef.current.find((contact) =>
+          isOfficialAdminContact(contact, cachedOfficial),
+        );
+        if (
+          officialContact &&
+          (await adoptOfficialDeviceList(
+            cachedOfficial,
+            officialContact,
+          ))
+        ) {
+          await saveContact(dek, officialContact);
+          assertMessengerActive();
+        }
+      }
       // Crash reconciliation for device linking: installLinkedIdentity commits
       // the new identity/list atomically before the old contacts can be marked.
       // previousMasterPub is the durable witness that this identity swap happened.
@@ -5235,6 +5629,11 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         await addBundle(decodeURIComponent(hashMatch[1]));
         assertMessengerActive();
       }
+      if (officialAccountConfigured()) {
+        launchRuntimeOperation((signal) =>
+          refreshOfficialAccountTrust(signal),
+        );
+      }
     })();
     bootTaskRef.current = bootTask;
     void bootTask.catch((e) => {
@@ -5262,19 +5661,47 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         !runtimeSuspendedRef.current &&
         document.visibilityState === 'visible'
       ) {
+        const officialTrust = officialAccountTrustRef.current;
+        if (officialTrust) scheduleOfficialTrustExpiryRerender(officialTrust);
+        if (officialAccountConfigured()) {
+          launchRuntimeOperation((signal) =>
+            refreshOfficialAccountTrust(signal),
+          );
+        }
         for (const r of relaysRef.current.values()) r.reconnect();
         void schedulePendingGroupMutationRetry();
       }
     };
     document.addEventListener('visibilitychange', onForeground);
     window.addEventListener('pageshow', onForeground);
+    // Revocations and device rotations must reach an already-open PWA without a
+    // manual reload. Foreground transitions refresh immediately; this bounded
+    // poll covers a tab that remains continuously visible. Calls coalesce above.
+    const officialTrustRefreshInterval = window.setInterval(() => {
+      if (
+        officialAccountConfigured() &&
+        lifecycleActiveRef.current &&
+        !runtimeSuspendedRef.current &&
+        document.visibilityState === 'visible'
+      ) {
+        launchRuntimeOperation((signal) =>
+          refreshOfficialAccountTrust(signal),
+        );
+      }
+    }, OFFICIAL_TRUST_REFRESH_INTERVAL_MS);
 
     return () => {
       // Invalidate first: a promise that resumes while sockets are being closed
       // cannot enqueue work, update state, or create a replacement relay.
       lifecycleActiveRef.current = false;
+      if (officialTrustExpiryTimerRef.current !== null) {
+        clearTimeout(officialTrustExpiryTimerRef.current);
+        officialTrustExpiryTimerRef.current = null;
+      }
       document.removeEventListener('visibilitychange', onForeground);
       window.removeEventListener('pageshow', onForeground);
+      window.clearInterval(officialTrustRefreshInterval);
+      officialTrustRefreshRunningRef.current = false;
       groupsBootReadyRef.current = false;
       for (const r of relaysRef.current.values()) r.close();
       relaysRef.current.clear();
@@ -5289,6 +5716,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       prekeysRef.current = null;
       lookupRef.current = null;
       ownListRef.current = null;
+      officialAccountTrustRef.current = null;
       contactsRef.current = [];
       groupsRef.current = [];
     };
@@ -6136,6 +6564,12 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     const members: GroupMember[] = [];
     for (const contact of contactsRef.current) {
       if (!groupSel.has(contact.roomId)) continue;
+      if (revokedOfficialAccountFor(contact)) {
+        setError(
+          t('Der widerrufene frühere Admin kann keiner Gruppe hinzugefügt werden. Verbinde dich über SKYTALE-SUPPORT neu.'),
+        );
+        return;
+      }
       const hasReachableList = contact.peerDeviceList?.devices.some(
         (device) => !!device.signedPreKey,
       );
@@ -6196,6 +6630,12 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     const id = identityRef.current;
     let group = groupsRef.current.find((candidate) => candidate.id === activeGroup);
     if (!id || !group) return;
+    if (groupHasRevokedOfficialMember(group)) {
+      setError(
+        t('Gruppennachricht blockiert: Entferne den widerrufenen früheren Admin oder verbinde dich über SKYTALE-SUPPORT neu.'),
+      );
+      return;
+    }
     const logicalMid = localMsg.mid ?? randomMid();
     try {
       // State-before-content is an owner responsibility. A non-owner may resume
@@ -7063,6 +7503,12 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     const additions: GroupMember[] = [];
     for (const c of contactsRef.current) {
       if (!roomIds.includes(c.roomId)) continue;
+      if (revokedOfficialAccountFor(c)) {
+        setError(
+          t('Der widerrufene frühere Admin kann keiner Gruppe hinzugefügt werden. Verbinde dich über SKYTALE-SUPPORT neu.'),
+        );
+        return;
+      }
       if (
         !c.bundle &&
         !c.peerDeviceList?.devices.some((device) => !!device.signedPreKey)
@@ -7302,6 +7748,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
 
   function startRename() {
     const c = contactsRef.current.find((x) => x.roomId === activeRoom);
+    if (!c || officialAccountNameLocked(c)) return;
     setRenameInput(c?.nickname ?? '');
     setRenaming(true);
   }
@@ -7313,7 +7760,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     setRenaming(false);
     await enqueueInbox(async () => {
       const c = contactsRef.current.find((x) => x.roomId === roomId);
-      if (!c) return;
+      if (!c || officialAccountNameLocked(c)) return;
       c.nickname = name || undefined;
       await saveContact(dek, c);
     });
@@ -7526,6 +7973,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
    *  copy in the same pass), then hand the recipient a tiny E2E descriptor (key + R2 id).
    *  Not self-synced to my own devices in v1 (would race the delete-after-download). */
   async function sendViaR2(contact: Contact, file: File, name: string, mime: string, viewOnce = false): Promise<void> {
+    assertNormalSendAllowed(contact);
     // The R2 descriptor is a byte-19 frame a pv<4 device can't parse. Check up front that
     // some device can receive it, so we don't waste a (possibly ~1 GB) upload on an
     // undeliverable send — and the ciphertext never lingers orphaned in R2.
@@ -7763,7 +8211,13 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   async function ensureProfileSent(contact: Contact) {
     const id = identityRef.current;
     const p = myProfileRef.current;
-    if (!id || !hasSession(contact) || profileSentRef.current.has(contact.roomId)) return;
+    if (
+      !id ||
+      !hasSession(contact) ||
+      profileSentRef.current.has(contact.roomId) ||
+      // Never push our profile (name + avatar) to a revoked former-admin key.
+      revokedOfficialAccountFor(contact)
+    ) return;
     if (!p.name && !p.avatarB64) return;
     try {
       const envelope = await encryptAndPersist(contact, (current) =>
@@ -7836,6 +8290,54 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     await saveProfile(dek, myProfileRef.current);
     await broadcastProfile();
     setView('list');
+  }
+
+  /** Public activation input for the offline root-signing ceremony. This action is
+   * rendered only when the currently loaded own master is already the root-signed
+   * ADMIN identity. It exports no private key and currentBundle carries no OPK. */
+  async function exportOfficialAdminDescriptor(
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const identity = identityRef.current;
+    const prekeys = prekeysRef.current;
+    const deviceList = ownListRef.current;
+    const trusted = officialAccountTrustRef.current;
+    if (
+      !identity ||
+      !prekeys ||
+      !deviceList ||
+      !isOfficialAdminMaster(identity.master.publicKey, trusted)
+    ) {
+      throw new OfficialAccountError(
+        'configuration',
+        'Der öffentliche Admin-Deskriptor ist für dieses Konto nicht verfügbar.',
+      );
+    }
+    const descriptor = {
+      v: 1,
+      bundle: await encodeBundle(currentBundle(identity, prekeys)),
+      deviceList: base64urlEncode(await encodeDeviceList(deviceList)),
+    } as const;
+    if (
+      signal?.aborted ||
+      !lifecycleActiveRef.current ||
+      runtimeSuspendedRef.current
+    ) {
+      throw new MessengerInactiveError();
+    }
+    const url = URL.createObjectURL(
+      new Blob([JSON.stringify(descriptor, null, 2) + '\n'], {
+        type: 'application/json',
+      }),
+    );
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'skytale-admin-descriptor.json';
+    anchor.rel = 'noopener';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
   /** Install a new self-contained bundle for QR/backcompat and invalidate only
@@ -8068,6 +8570,12 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     const roomId = activeRoom;
     const current = contactsRef.current.find((x) => x.roomId === roomId);
     if (!roomId || !current?.pendingMaster) return;
+    if (revokedOfficialAccountFor(current)) {
+      setError(
+        t('Diese Identität darf nicht manuell ersetzt werden. Verbinde dich ausschließlich über SKYTALE-SUPPORT neu.'),
+      );
+      return;
+    }
     if (masterReferencedByLiveGroup(current.peerMasterPub)) {
       setError(
         t('Entferne den Kontakt zuerst aus allen Gruppen; erst danach kann seine neue Identität übernommen werden.'),
@@ -8079,6 +8587,12 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     const r = await enqueueInbox(async () => {
       const c = contactsRef.current.find((entry) => entry.roomId === roomId);
       if (!c?.pendingMaster) return null;
+      if (revokedOfficialAccountFor(c)) {
+        setError(
+          t('Diese Identität darf nicht manuell ersetzt werden. Verbinde dich ausschließlich über SKYTALE-SUPPORT neu.'),
+        );
+        return null;
+      }
       // The roster may have changed while the confirmation dialog was open.
       if (masterReferencedByLiveGroup(c.peerMasterPub)) {
         setError(
@@ -8112,9 +8626,22 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     const roomId = activeRoom;
     const id = identityRef.current;
     if (!roomId || !id) return;
+    const current = contactsRef.current.find((entry) => entry.roomId === roomId);
+    if (current && revokedOfficialAccountFor(current)) {
+      setError(
+        t('Diese Identität darf nicht manuell ersetzt werden. Verbinde dich ausschließlich über SKYTALE-SUPPORT neu.'),
+      );
+      return;
+    }
     const r = await enqueueInbox(async () => {
       const c = contactsRef.current.find((entry) => entry.roomId === roomId);
       if (!c) return null;
+      if (revokedOfficialAccountFor(c)) {
+        setError(
+          t('Diese Identität darf nicht manuell ersetzt werden. Verbinde dich ausschließlich über SKYTALE-SUPPORT neu.'),
+        );
+        return null;
+      }
       const changed = await reconnectContact(
         c,
         asMasterPub(id.master.publicKey),
@@ -8287,26 +8814,33 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         <div className="fwd-list">
           {contactsRef.current
             .filter((c) => !c.hidden && !c.staleIdentity)
-            .map((c) => (
-              <button
-                key={c.roomId}
-                className="fwd-row"
-                onClick={() =>
-                  launchRuntimeOperation(() => forwardTo(c, forwardMsg))
-                }
-              >
-                <div className="avatar-wrap">
-                  {c.peerAvatarB64 ? (
-                    <img className="avatar-img" src={avatarSrc(c.peerAvatarB64)} alt="" />
-                  ) : (
-                    <div className="avatar">
-                      <Identicon seed={c.roomId} />
-                    </div>
-                  )}
-                </div>
-                <span className="fwd-name">{displayName(c)}</span>
-              </button>
-            ))}
+            .map((c) => {
+              const officialAdmin = !!trustedOfficialAccountFor(c);
+              const revokedOfficialAdmin = !!revokedOfficialAccountFor(c);
+              return (
+                <button
+                  key={c.roomId}
+                  className="fwd-row"
+                  disabled={revokedOfficialAdmin}
+                  onClick={() =>
+                    launchRuntimeOperation(() => forwardTo(c, forwardMsg))
+                  }
+                >
+                  <div className="avatar-wrap">
+                    {c.peerAvatarB64 ? (
+                      <img className="avatar-img" src={avatarSrc(c.peerAvatarB64)} alt="" />
+                    ) : (
+                      <div className="avatar">
+                        <Identicon seed={c.roomId} />
+                      </div>
+                    )}
+                  </div>
+                  <span className="fwd-name">{displayName(c)}</span>
+                  {officialAdmin && <OfficialAdminBadge />}
+                  {revokedOfficialAdmin && <RevokedOfficialAdminBadge />}
+                </button>
+              );
+            })}
         </div>
       </div>
     </div>
@@ -8707,7 +9241,9 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       const name =
         item.kind === 'group'
           ? item.group.name
-          : `${displayName(item.contact)} ${item.contact.peerName ?? ''}`;
+          : officialAccountNameLocked(item.contact)
+            ? `${displayName(item.contact)} ${OFFICIAL_ACCOUNT_ALIAS}`
+            : `${displayName(item.contact)} ${item.contact.peerName ?? ''}`;
       const preview = item.last ? lastPreview(item.last) : '';
       return `${name} ${preview}`.toLocaleLowerCase().includes(query);
     })
@@ -8833,6 +9369,8 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
               );
             }
             const selected = conversationContextOpen && activeRoom === item.contact.roomId;
+            const officialAdmin = !!trustedOfficialAccountFor(item.contact);
+            const revokedOfficialAdmin = !!revokedOfficialAccountFor(item.contact);
             return (
               <button
                 key={item.contact.roomId}
@@ -8853,8 +9391,14 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                 <div className="conv-main">
                   <div className="conv-line1">
                     <span className="conv-name">{displayName(item.contact)}</span>
-                    {item.contact.verified && (
-                      <span className="verified-badge">
+                    {officialAdmin && <OfficialAdminBadge />}
+                    {revokedOfficialAdmin && <RevokedOfficialAdminBadge />}
+                    {item.contact.verified && !revokedOfficialAdmin && (
+                      <span
+                        className="verified-badge"
+                        aria-label={t('Safety Number manuell verifiziert')}
+                        title={t('Safety Number manuell verifiziert')}
+                      >
                         <IconShield size={14} filled />
                       </span>
                     )}
@@ -8905,6 +9449,8 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     const start = Math.max(0, msgs.length - windowN);
     const shown = start > 0 ? msgs.slice(start) : msgs;
     const verified = !!activeContact.verified;
+    const officialAdmin = !!trustedOfficialAccountFor(activeContact);
+    const revokedOfficialAdmin = !!revokedOfficialAccountFor(activeContact);
     return renderMessengerShell(
       <div
         className="chat"
@@ -8930,7 +9476,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
               </div>
             )}
           </button>
-          {renaming ? (
+          {renaming && !officialAdmin && !revokedOfficialAdmin ? (
             <div className="rename-row">
               <input
                 autoFocus
@@ -8954,22 +9500,34 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
             </div>
           ) : (
             <div className="chat-peer">
-              <button className="n" onClick={startRename} title={t('Umbenennen')}>
-                {displayName(activeContact)} <span className="pencil">✎</span>
-              </button>
-              <button
-                className="verify-line"
-                style={{ color: verified ? 'var(--verified)' : 'var(--muted)' }}
-                onClick={() =>
-                  launchRuntimeOperation(() => openVerify())
-                }
-              >
-                <IconLock size={10} />
-                {verified ? t('verifiziert') : t('nicht verifiziert · antippen')}
-              </button>
+              {officialAdmin || revokedOfficialAdmin ? (
+                <div className="n static">{displayName(activeContact)}</div>
+              ) : (
+                <button className="n" onClick={startRename} title={t('Umbenennen')}>
+                  {displayName(activeContact)} <span className="pencil">✎</span>
+                </button>
+              )}
+              <div className="chat-trust-row">
+                {officialAdmin && <OfficialAdminBadge />}
+                {revokedOfficialAdmin && <RevokedOfficialAdminBadge />}
+                {!revokedOfficialAdmin && (
+                  <button
+                    className="verify-line"
+                    style={{ color: verified ? 'var(--verified)' : 'var(--muted)' }}
+                    onClick={() =>
+                      launchRuntimeOperation(() => openVerify())
+                    }
+                  >
+                    <IconLock size={10} />
+                    {verified ? t('verifiziert') : t('nicht verifiziert · antippen')}
+                  </button>
+                )}
+              </div>
             </div>
           )}
-          <span className={`sdot ${st(activeContact.roomId)}`} style={{ position: 'static', border: 0, width: 9, height: 9 }} />
+          {!revokedOfficialAdmin && (
+            <span className={`sdot ${st(activeContact.roomId)}`} style={{ position: 'static', border: 0, width: 9, height: 9 }} />
+          )}
           <button className="chat-menu-btn" onClick={() => setChatMenu((v) => !v)} aria-label={t('Menü')}>
             <IconDots />
           </button>
@@ -9003,6 +9561,16 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
             </div>
           )}
         </div>
+
+        {revokedOfficialAdmin && (
+          <OfficialAccountRevokedWarning
+            onRecover={() =>
+              launchRuntimeOperation((signal) =>
+                addBundle(OFFICIAL_ACCOUNT_ALIAS, signal),
+              )
+            }
+          />
+        )}
 
         <div id="msgs" className="msgs">
           <div className="msgs-inner">
@@ -9122,7 +9690,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
 
         {stickerCropEl}
         {stickerPanelEl}
-        {composerEl}
+        {!revokedOfficialAdmin && composerEl}
         {msgMenuEl}
         {forwardEl}
         {lightbox}
@@ -9140,6 +9708,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     const msgs = messages[activeGroupData.id] ?? [];
     const start = Math.max(0, msgs.length - windowN);
     const shown = start > 0 ? msgs.slice(start) : msgs;
+    const revokedOfficialMember = groupHasRevokedOfficialMember(activeGroupData);
     return renderMessengerShell(
       <div
         className="chat"
@@ -9204,6 +9773,16 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
             </div>
           )}
         </div>
+        {revokedOfficialMember && (
+          <OfficialAccountRevokedWarning
+            group
+            onRecover={() =>
+              launchRuntimeOperation((signal) =>
+                addBundle(OFFICIAL_ACCOUNT_ALIAS, signal),
+              )
+            }
+          />
+        )}
         <div id="msgs" className="msgs">
           <div className="msgs-inner">
           <div className="enc-pill">
@@ -9262,7 +9841,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         {error && <div className="err-note">{error}</div>}
         {stickerCropEl}
         {stickerPanelEl}
-        {composerEl}
+        {!revokedOfficialMember && composerEl}
         {msgMenuEl}
         {forwardEl}
       </div>
@@ -9368,10 +9947,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
             <button className="btn btn-outline scan-btn" style={{ marginTop: 10 }} onClick={() => setScanning(true)}>
               <IconCamera /> {t('QR-Code scannen')}
             </button>
-            <div className="or-tiny">{t('oder Code / Link manuell einfügen')}</div>
+            <div className="or-tiny">{t('oder Code / Alias / Link manuell einfügen')}</div>
             <textarea
               className="paste-box"
-              placeholder={t('Kontaktcode, Link oder Bundle-Token einfügen')}
+              placeholder={t('Kontaktcode, Alias, Link oder Bundle-Token einfügen')}
               value={addInput}
               maxLength={MAX_CONTACT_INPUT_CHARS}
               onChange={(e) => setAddInput(e.target.value)}
@@ -9469,6 +10048,9 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     const c = activeContact;
     const verified = !!c.verified;
     const hasAvatar = !!c.peerAvatarB64;
+    const officialAdmin = !!trustedOfficialAccountFor(c);
+    const revokedOfficialAdmin = !!revokedOfficialAccountFor(c);
+    const officialIdentity = officialAdmin || revokedOfficialAdmin;
     return renderMessengerShell(
       <div className="subview">
         <div className="subhead">
@@ -9492,19 +10074,52 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
             )}
           </button>
 
-          <div className="contact-name">{displayName(c)}</div>
-          <button
-            className="contact-verify-chip"
-            style={{ color: verified ? 'var(--verified)' : 'var(--muted)' }}
-            onClick={() =>
-              launchRuntimeOperation(() => openVerify())
-            }
-          >
-            <IconLock size={12} />
-            {verified ? t('verifiziert') : t('nicht verifiziert · zum Prüfen antippen')}
-          </button>
+          <div className="contact-name-row">
+            <div className="contact-name">{displayName(c)}</div>
+            {officialAdmin && <OfficialAdminBadge />}
+            {revokedOfficialAdmin && <RevokedOfficialAdminBadge />}
+          </div>
+          {revokedOfficialAdmin ? (
+            <div className="contact-verify-chip revoked">
+              <IconShield size={12} filled />
+              {t('Admin-Schlüssel widerrufen')}
+            </div>
+          ) : (
+            <button
+              className="contact-verify-chip"
+              style={{ color: verified ? 'var(--verified)' : 'var(--muted)' }}
+              onClick={() =>
+                launchRuntimeOperation(() => openVerify())
+              }
+            >
+              <IconLock size={12} />
+              {verified ? t('verifiziert') : t('nicht verifiziert · zum Prüfen antippen')}
+            </button>
+          )}
 
-          {!verified && c.verifiedSuggestion && !c.verifiedSuggestionDismissed && (
+          {officialAdmin && (
+            <div className="official-account-note">
+              <IconShield size={19} filled />
+              <div>
+                <b>{t('Kryptografisch bestätigter SKYTALE-Administrator')}</b>
+                <span>
+                  {t('Dieses ADMIN-Kennzeichen wurde mit dem in dieser SKYTALE-Version eingebauten Vertrauensschlüssel geprüft.')}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {revokedOfficialAdmin && (
+            <OfficialAccountRevokedWarning
+              onRecover={() =>
+                launchRuntimeOperation((signal) =>
+                  addBundle(OFFICIAL_ACCOUNT_ALIAS, signal),
+                )
+              }
+            />
+          )}
+
+          {!revokedOfficialAdmin && !verified && c.verifiedSuggestion && !c.verifiedSuggestionDismissed && (
             <div className="contact-warn">
               <div className="cw-text">
                 <b>{t('Auf deinem anderen Gerät bestätigt')}</b>
@@ -9554,7 +10169,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
             </div>
           )}
 
-          {c.pendingMaster && (
+          {!revokedOfficialAdmin && c.pendingMaster && (
             <div className="contact-warn door">
               <div className="cw-text">
                 <b>{t('Neue Identität behauptet')}</b>
@@ -9573,7 +10188,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
             </div>
           )}
 
-          {c.staleIdentity && (
+          {!revokedOfficialAdmin && c.staleIdentity && (
             <div className="contact-warn door">
               <div className="cw-text">
                 <b>{t('Verbindung veraltet')}</b>
@@ -9595,44 +10210,59 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           )}
 
           <div className="contact-fields">
-            {renaming ? (
-              <div className="contact-field">
-                <span className="cf-label">{t('Dein Name für den Kontakt')}</span>
-                <div className="rename-row">
-                  <input
-                    autoFocus
-                    value={renameInput}
-                    placeholder={t('Nickname…')}
-                    onChange={(e) => setRenameInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        launchRuntimeOperation(() => saveNickname());
-                      }
-                    }}
-                  />
-                  <button
-                    className="btn btn-primary"
-                    onClick={() =>
-                      launchRuntimeOperation(() => saveNickname())
-                    }
-                  >
-                    ✓
-                  </button>
+            {officialIdentity ? (
+              <>
+                <div className="contact-field">
+                  <span className="cf-label">{t('Offizielle Adresse')}</span>
+                  <span className="cf-value mono">{OFFICIAL_ACCOUNT_ALIAS}</span>
                 </div>
-              </div>
+                <div className="contact-field">
+                  <span className="cf-label">{t('Offizieller Kontoname')}</span>
+                  <span className="cf-value">{OFFICIAL_ACCOUNT_DISPLAY_NAME}</span>
+                </div>
+              </>
             ) : (
-              <button className="contact-field tappable" onClick={startRename}>
-                <span className="cf-label">
-                  {t('Dein Name für den Kontakt')} <span className="pencil">✎</span>
-                </span>
-                <span className="cf-value">{c.nickname?.trim() || <em>{t('nicht gesetzt')}</em>}</span>
-              </button>
-            )}
+              <>
+                {renaming ? (
+                  <div className="contact-field">
+                    <span className="cf-label">{t('Dein Name für den Kontakt')}</span>
+                    <div className="rename-row">
+                      <input
+                        autoFocus
+                        value={renameInput}
+                        placeholder={t('Nickname…')}
+                        onChange={(e) => setRenameInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            launchRuntimeOperation(() => saveNickname());
+                          }
+                        }}
+                      />
+                      <button
+                        className="btn btn-primary"
+                        onClick={() =>
+                          launchRuntimeOperation(() => saveNickname())
+                        }
+                      >
+                        ✓
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button className="contact-field tappable" onClick={startRename}>
+                    <span className="cf-label">
+                      {t('Dein Name für den Kontakt')} <span className="pencil">✎</span>
+                    </span>
+                    <span className="cf-value">{c.nickname?.trim() || <em>{t('nicht gesetzt')}</em>}</span>
+                  </button>
+                )}
 
-            <div className="contact-field">
-              <span className="cf-label">{t('Name, den die Person selbst gesetzt hat')}</span>
-              <span className="cf-value">{c.peerName?.trim() || <em>{t('keiner')}</em>}</span>
-            </div>
+                <div className="contact-field">
+                  <span className="cf-label">{t('Name, den die Person selbst gesetzt hat')}</span>
+                  <span className="cf-value">{c.peerName?.trim() || <em>{t('keiner')}</em>}</span>
+                </div>
+              </>
+            )}
 
             <div className="contact-field">
               <span className="cf-label">{t('Sicherheitsnummer (Fingerprint)')}</span>
@@ -9963,6 +10593,32 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
               <span className="setting-go"><IconChevron /></span>
             </button>
 
+            {identityRef.current &&
+              isOfficialAdminMaster(
+                identityRef.current.master.publicKey,
+                officialAccountTrustRef.current,
+              ) && (
+                <button
+                  className="setting-row"
+                  onClick={() =>
+                    launchRuntimeOperation((signal) =>
+                      exportOfficialAdminDescriptor(signal),
+                    )
+                  }
+                >
+                  <span className="setting-ic"><IconShield size={15} filled /></span>
+                  <span className="setting-tx">
+                    <span className="setting-title">
+                      {t('Öffentlichen Admin-Deskriptor exportieren')}
+                    </span>
+                    <span className="setting-sub">
+                      {t('Nur öffentliche Schlüssel für die Offline-Signatur')}
+                    </span>
+                  </span>
+                  <span className="setting-go"><IconChevron /></span>
+                </button>
+              )}
+
             <div className="settings-sec">{t('Allgemein')}</div>
             {pushSupported() && (
               <button
@@ -10178,10 +10834,13 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
             <div className="card pad16">
               {selectable.map((c) => {
                 const on = groupSel.has(c.roomId);
+                const officialAdmin = !!trustedOfficialAccountFor(c);
+                const revokedOfficialAdmin = !!revokedOfficialAccountFor(c);
                 return (
                   <button
                     key={c.roomId}
                     className={`member-row${on ? ' on' : ''}`}
+                    disabled={revokedOfficialAdmin}
                     onClick={() => {
                       const s = new Set(groupSel);
                       if (on) s.delete(c.roomId);
@@ -10197,6 +10856,8 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                       </div>
                     )}
                     <span className="conv-name">{displayName(c)}</span>
+                    {officialAdmin && <OfficialAdminBadge />}
+                    {revokedOfficialAdmin && <RevokedOfficialAdminBadge />}
                     <span className={`check${on ? ' on' : ''}`}>{on ? '✓' : ''}</span>
                   </button>
                 );
@@ -10289,29 +10950,46 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
               )}
               <span className="conv-name">{t('Du')}</span>
             </div>
-            {g.members.map((m, i) => (
-              <div key={i} className="member-row">
-                <div className="avatar sm">
-                  <Identicon seed={hexOf(m.dhPub)} />
+            {g.members.map((m, i) => {
+              const masterPub = memberMasterPub(m);
+              const officialAdmin = isOfficialAdminMaster(
+                masterPub,
+                officialAccountTrustRef.current,
+              );
+              const revokedOfficialAdmin = isRevokedOfficialAdminMaster(
+                masterPub,
+                officialAccountTrustRef.current,
+              );
+              const memberName =
+                officialAdmin || revokedOfficialAdmin
+                  ? OFFICIAL_ACCOUNT_DISPLAY_NAME
+                  : m.name || '…';
+              return (
+                <div key={i} className="member-row">
+                  <div className="avatar sm">
+                    <Identicon seed={hexOf(m.dhPub)} />
+                  </div>
+                  <span className="conv-name">{memberName}</span>
+                  {officialAdmin && <OfficialAdminBadge />}
+                  {revokedOfficialAdmin && <RevokedOfficialAdminBadge />}
+                  {canManage && (
+                    <button
+                      className="icon-mini danger"
+                      aria-label={t('Entfernen')}
+                      onClick={() => {
+                        if (confirm(t('{name} entfernen?', { name: memberName }))) {
+                          launchRuntimeOperation(() =>
+                            removeMemberFromGroup(g, m),
+                          );
+                        }
+                      }}
+                    >
+                      <IconTrash size={15} />
+                    </button>
+                  )}
                 </div>
-                <span className="conv-name">{m.name || '…'}</span>
-                {canManage && (
-                  <button
-                    className="icon-mini danger"
-                    aria-label={t('Entfernen')}
-                    onClick={() => {
-                      if (confirm(t('{name} entfernen?', { name: m.name || t('Mitglied') }))) {
-                        launchRuntimeOperation(() =>
-                          removeMemberFromGroup(g, m),
-                        );
-                      }
-                    }}
-                  >
-                    <IconTrash size={15} />
-                  </button>
-                )}
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           {addable.length > 0 && (
@@ -10322,10 +11000,13 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
               <div className="card pad16">
                 {addable.map((c) => {
                   const on = groupSel.has(c.roomId);
+                  const officialAdmin = !!trustedOfficialAccountFor(c);
+                  const revokedOfficialAdmin = !!revokedOfficialAccountFor(c);
                   return (
                     <button
                       key={c.roomId}
                       className={`member-row${on ? ' on' : ''}`}
+                      disabled={revokedOfficialAdmin}
                       onClick={() => {
                         const s = new Set(groupSel);
                         if (on) s.delete(c.roomId);
@@ -10341,6 +11022,8 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
                         </div>
                       )}
                       <span className="conv-name">{displayName(c)}</span>
+                      {officialAdmin && <OfficialAdminBadge />}
+                      {revokedOfficialAdmin && <RevokedOfficialAdminBadge />}
                       <span className={`check${on ? ' on' : ''}`}>{on ? '✓' : ''}</span>
                     </button>
                   );

@@ -13,6 +13,7 @@
     "cf:dev": "wrangler dev",
     "cf:lifecycle:apply": "wrangler r2 bucket lifecycle set skytale-blobs --file ./r2-lifecycle.json --force",
     "cf:lifecycle:show": "wrangler r2 bucket lifecycle list skytale-blobs",
+    "official-admin": "node scripts/official-admin.mjs",
     "check": "tsc --noEmit",
     "test": "node tests/run.mjs"
   },

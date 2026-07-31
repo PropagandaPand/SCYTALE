@@ -1456,7 +1456,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     return run;
   }
 
-  async function originCanReserve(requestedBytes: number): Promise<boolean> {
+  async function originCanReserve(requestedBytes: number, smallWrite = false): Promise<boolean> {
     if (!navigator.storage?.estimate) return false;
     let estimate: StorageEstimate | null;
     let markerIds: string[];
@@ -1482,7 +1482,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       persistedReservations > Number.MAX_SAFE_INTEGER - volatileReservations
         ? Number.MAX_SAFE_INTEGER
         : persistedReservations + volatileReservations;
-    return hasOriginStorageHeadroom(estimate, requestedBytes, reserved);
+    return hasOriginStorageHeadroom(estimate, requestedBytes, reserved, smallWrite);
   }
 
   function markRecvDropped(tid: string): void {
@@ -1525,25 +1525,25 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       messagesRef.current[roomId] = await loadMessages(dek, roomId);
     }
     return withStorageGate(async () => {
-      // A small inline attachment is already in RAM; the low-headroom gate would
-      // only drop it into a dead end. Store it unless the write itself reports
-      // storage-full. Larger inline payloads keep the per-contact + headroom gate.
-      if (data.length > ALWAYS_RECEIVE_INLINE_BYTES) {
-        const markerIds = await allRecvMarkerIds();
-        const activeMarkers = await Promise.all(
-          markerIds.map((id) => getRecvMarker(dek, id).catch(() => null)),
-        );
-        if (
-          !mayAutoReceiveAttachment(
-            messagesRef.current[roomId] ?? [],
-            data.length,
-            AUTO_RECEIVE_CONTACT_CAP_BYTES,
-            automaticRecvReservationBytes(activeMarkers, roomId),
-          ) ||
-          !(await originCanReserve(data.length))
-        ) {
-          return null;
-        }
+      // The per-contact cap always applies (a peer must not fill the device with
+      // small files). A small inline payload is already in RAM, so it only needs a
+      // relaxed device-headroom floor instead of the large auto-download reserve —
+      // that reserve used to dead-end a ~1 KB file when the device was low on space.
+      const smallWrite = data.length <= ALWAYS_RECEIVE_INLINE_BYTES;
+      const markerIds = await allRecvMarkerIds();
+      const activeMarkers = await Promise.all(
+        markerIds.map((id) => getRecvMarker(dek, id).catch(() => null)),
+      );
+      if (
+        !mayAutoReceiveAttachment(
+          messagesRef.current[roomId] ?? [],
+          data.length,
+          AUTO_RECEIVE_CONTACT_CAP_BYTES,
+          automaticRecvReservationBytes(activeMarkers, roomId),
+        ) ||
+        !(await originCanReserve(data.length, smallWrite))
+      ) {
+        return null;
       }
       try {
         return await fileRefFor(name, mime, data, viewOnce);

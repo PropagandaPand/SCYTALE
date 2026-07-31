@@ -162,18 +162,26 @@ const messengerSource = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'Messenger.tsx'),
   'utf8',
 );
-const inboundStart = messengerSource.indexOf('async function inboundFileRefFor');
-const inboundSource = messengerSource.slice(inboundStart, messengerSource.indexOf('function quoteFrom'));
-const sizeGate = inboundSource.indexOf('data.length > ALWAYS_RECEIVE_INLINE_BYTES');
-ok('kleiner Inline-Anhang wird nie am Headroom-Gate abgelehnt (Sackgasse behoben)',
+const inboundSource = messengerSource.slice(
+  messengerSource.indexOf('async function inboundFileRefFor'),
+  messengerSource.indexOf('function quoteFrom'),
+);
+const lowFree = { usage: 100 * MiB, quota: 110 * MiB };   // 10 MiB frei
+const nearlyFull = { usage: 109 * MiB, quota: 110 * MiB }; // 1 MiB frei
+ok('kleiner Inline-Write braucht nur das kleine Headroom-Floor, ein großer das volle',
   S.ALWAYS_RECEIVE_INLINE_BYTES > 0 &&
   S.ALWAYS_RECEIVE_INLINE_BYTES < S.AUTO_RECEIVE_CONTACT_CAP_BYTES &&
-  sizeGate >= 0 &&
-  // die Quota-/Headroom-Gates stehen INNERHALB der Größen-Schranke, greifen also nur für größere Payloads
-  inboundSource.indexOf('mayAutoReceiveAttachment') > sizeGate &&
-  inboundSource.indexOf('originCanReserve') > sizeGate);
-ok('Negativkontrolle: der echte Storage-Full-Schutz beim Schreiben bleibt für ALLE Größen',
-  inboundSource.indexOf('isStorageFull(error)') > sizeGate);
+  S.hasOriginStorageHeadroom(lowFree, 1024, 0, true) === true &&
+  // Negativkontrolle: ohne smallWrite lehnt dasselbe knappe Estimate ab
+  S.hasOriginStorageHeadroom(lowFree, 1024, 0, false) === false &&
+  // Negativkontrolle: auch ein kleiner Write scheitert, wenn wirklich (fast) voll
+  S.hasOriginStorageHeadroom(nearlyFull, 1024, 0, true) === false);
+ok('Inline-Empfang wendet den Per-Kontakt-Cap IMMER an und markiert nur kleine Writes',
+  inboundSource.includes('mayAutoReceiveAttachment(') &&
+  inboundSource.includes('data.length <= ALWAYS_RECEIVE_INLINE_BYTES') &&
+  inboundSource.includes('originCanReserve(data.length, smallWrite)') &&
+  // Negativkontrolle: der Cap steht NICHT hinter einer Größen-Bedingung (immer aktiv)
+  !inboundSource.includes('if (data.length > ALWAYS_RECEIVE_INLINE_BYTES)'));
 
 console.log(`\n${pass} ok, ${fail} fail`);
 process.exit(fail ? 1 : 0);

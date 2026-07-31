@@ -8,11 +8,14 @@
  */
 
 export const AUTO_RECEIVE_CONTACT_CAP_BYTES = 32 * 1024 * 1024;
-// A small inline attachment is already fully in RAM when it arrives; declining it
-// merely drops useful data without protecting the origin headroom. Files at or
-// below this size are always stored (only a real storage-full write failure can
-// stop them), so a tiny file never dead-ends on the low-headroom gate.
+// A small inline attachment is already fully in RAM when it arrives. Declining it
+// on the large auto-download headroom floor only drops useful data, so a write at
+// or below this size clears storage against a small floor instead. The per-contact
+// cap still applies, so this is not a fill-the-device vector.
 export const ALWAYS_RECEIVE_INLINE_BYTES = 256 * 1024;
+// The relaxed headroom a small inline write must still leave free, so the app
+// itself stays functional even though the large auto-download reserve is skipped.
+export const SMALL_WRITE_HEADROOM_BYTES = 2 * 1024 * 1024;
 export const MIN_ORIGIN_HEADROOM_BYTES = 64 * 1024 * 1024;
 export const MIN_ORIGIN_HEADROOM_FRACTION = 0.2;
 // Each encrypted IndexedDB chunk consumes substantially more than its plaintext:
@@ -149,6 +152,7 @@ export function hasOriginStorageHeadroom(
   estimate: StorageEstimateLike | null | undefined,
   requestedBytes: number,
   reservedBytes = 0,
+  smallWrite = false,
 ): boolean {
   const usage = estimate?.usage;
   const quota = estimate?.quota;
@@ -165,7 +169,9 @@ export function hasOriginStorageHeadroom(
   ) {
     return false;
   }
-  const headroom = Math.max(MIN_ORIGIN_HEADROOM_BYTES, quota * MIN_ORIGIN_HEADROOM_FRACTION);
+  const headroom = smallWrite
+    ? SMALL_WRITE_HEADROOM_BYTES
+    : Math.max(MIN_ORIGIN_HEADROOM_BYTES, quota * MIN_ORIGIN_HEADROOM_FRACTION);
   const required = requestedBytes + reservedBytes + headroom;
   return Number.isFinite(required) && required <= quota - usage;
 }

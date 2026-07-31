@@ -220,6 +220,15 @@ import {
 } from './lib/messages';
 import { RelayClient, type RelayStatus } from './lib/relay';
 import { makeQr } from './lib/qr';
+import {
+  ContactCodeError,
+  MAX_CONTACT_INPUT_CHARS,
+  createContactInvite,
+  extractContactCode,
+  publishContactInvite,
+  resolveContactInvite,
+  type ContactInviteDraft,
+} from './lib/contactCode';
 import { bytesToB64, b64ToBytes } from './lib/bytes';
 import { compressImage } from './lib/imagecompress';
 import { Identicon } from './Identicon';
@@ -650,6 +659,17 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   const activeRoomRef = useRef<string | null>(null);
   const activeGroupRef = useRef<string | null>(null);
   const initedRef = useRef(false);
+  const shareBundleTokenRef = useRef('');
+  const contactInviteRef = useRef<{
+    bundle: string;
+    draft: ContactInviteDraft;
+    expiresAt?: number;
+  } | null>(null);
+  const contactInvitePublishRef = useRef<Promise<{
+    bundle: string;
+    draft: ContactInviteDraft;
+    expiresAt: number;
+  }> | null>(null);
 
   function assertMessengerActive(): void {
     if (!lifecycleActiveRef.current) throw new MessengerInactiveError();
@@ -713,7 +733,12 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       }
       setError(
         t('Vorgang fehlgeschlagen: {msg}', {
-          msg: error instanceof Error ? error.message : String(error),
+          msg:
+            error instanceof ContactCodeError
+              ? t(error.message)
+              : error instanceof Error
+                ? error.message
+                : String(error),
         }),
       );
     });
@@ -721,8 +746,13 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
 
   const [, bump] = useReducer((x: number) => x + 1, 0);
   const [fingerprint, setFingerprint] = useState('');
-  const [shareLink, setShareLink] = useState('');
+  const [shareBundleToken, setShareBundleToken] = useState('');
   const [qrDataUrl, setQrDataUrl] = useState('');
+  const [contactCode, setContactCode] = useState('');
+  const [contactCodeExpiresAt, setContactCodeExpiresAt] = useState(0);
+  const [contactCodeStatus, setContactCodeStatus] = useState<
+    'idle' | 'publishing' | 'ready' | 'failed'
+  >('idle');
   const [view, setView] = useState<View>('list');
   const [conversationQuery, setConversationQuery] = useState('');
   const [activeRoom, setActiveRoom] = useState<string | null>(null);
@@ -1179,6 +1209,14 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   useEffect(() => {
     viewRef.current = view;
   }, [view]);
+  useEffect(() => {
+    if (view !== 'add' || !shareBundleToken) return;
+    launchRuntimeOperation((signal) => ensureContactInvite(signal));
+    // The bundle changes only after a real identity transition. Publishing is
+    // deliberately lazy: merely unlocking SKYTALE reveals no contact metadata
+    // to the rendezvous service.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, shareBundleToken]);
   useEffect(() => {
     activeGroupRef.current = activeGroup;
   }, [activeGroup]);
@@ -4000,9 +4038,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       if (pre) {
         void encodeBundle(currentBundle(linked, pre))
           .then((token) => {
-            const link = `${location.origin}/#add=${token}`;
-            setShareLink(link);
-            return makeQr(link);
+            return makeQr(updateShareBundle(token));
           })
           .then(setQrDataUrl)
           .catch(() => undefined);
@@ -4798,19 +4834,27 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     }
   }
 
-  async function addBundle(rawInput: string) {
+  async function addBundle(rawInput: string, signal?: AbortSignal) {
     setError('');
     const id = identityRef.current;
-    const token = extractToken(rawInput);
-    if (!id || !token) return;
+    if (!id) return;
+    if (rawInput.length > MAX_CONTACT_INPUT_CHARS) {
+      setError(t('Kontaktcode oder Link ist zu lang.'));
+      return;
+    }
     try {
+      const shortCode = extractContactCode(rawInput);
+      const token = shortCode
+        ? (await resolveContactInvite(shortCode, signal)).bundle
+        : extractToken(rawInput);
+      if (!token) return;
       const bundle = await decodeBundle(token);
       // Adding your OWN code would pass every check and silently create a "chat
       // with yourself". Compare MASTERS, not device keys: under master-based
       // rooms an own SECOND device (same master, different dh) must also be
       // caught, and it would slip a dhPub-only guard.
       if (bytesEqual(bundle.masterPub, id.master.publicKey)) {
-        setError('Das ist dein eigener Verbindungscode.');
+        setError(t('Das ist dein eigener Verbindungscode.'));
         return;
       }
       const contact = await enqueueInbox(async () => {
@@ -4869,7 +4913,12 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       openChat(contact.roomId);
       bump();
     } catch (e) {
-      setError(t('Ungültiges Bundle: {msg}', { msg: (e as Error).message }));
+      if (signal?.aborted) throw new MessengerInactiveError();
+      if (e instanceof ContactCodeError) {
+        setError(t(e.message));
+      } else {
+        setError(t('Ungültiges Bundle: {msg}', { msg: (e as Error).message }));
+      }
     }
   }
 
@@ -4955,9 +5004,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
 
       const token = await encodeBundle(currentBundle(id, pre));
       assertMessengerActive();
-      const link = `${location.origin}/#add=${token}`;
-      setShareLink(link);
-      makeQr(link)
+      makeQr(updateShareBundle(token))
         .then((qr) => {
           if (lifecycleActiveRef.current && !runtimeSuspendedRef.current) {
             setQrDataUrl(qr);
@@ -7771,9 +7818,105 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     setView('list');
   }
 
-  async function copyLink() {
+  /** Install a new self-contained bundle for QR/backcompat and invalidate only
+   * the in-memory remote invite. Already shared remote codes keep their fixed
+   * 24-hour server TTL, but can never be mistaken for the new identity. */
+  function updateShareBundle(token: string): string {
+    const link = `${location.origin}/#add=${token}`;
+    shareBundleTokenRef.current = token;
+    contactInviteRef.current = null;
+    contactInvitePublishRef.current = null;
+    setShareBundleToken(token);
+    setContactCode('');
+    setContactCodeExpiresAt(0);
+    setContactCodeStatus('idle');
+    return link;
+  }
+
+  async function ensureContactInvite(signal?: AbortSignal): Promise<void> {
+    const bundle = shareBundleTokenRef.current;
+    if (!bundle) {
+      throw new ContactCodeError('unavailable', 'Kurzcode ist noch nicht verfügbar.');
+    }
+    let cached = contactInviteRef.current;
+    if (cached?.bundle === bundle && cached.draft.expiresAt <= Date.now()) {
+      contactInviteRef.current = null;
+      cached = null;
+    }
+    if (
+      cached?.bundle === bundle &&
+      cached.expiresAt !== undefined &&
+      cached.expiresAt > Date.now()
+    ) {
+      setContactCode(cached.draft.code);
+      setContactCodeExpiresAt(cached.expiresAt);
+      setContactCodeStatus('ready');
+      setError('');
+      return;
+    }
+    if (cached?.bundle === bundle && cached.expiresAt !== undefined) {
+      // Expired means a genuinely fresh salt/code, not a silent extension of a
+      // previously shared capability.
+      contactInviteRef.current = null;
+    }
+
+    const alreadyPublishing = contactInvitePublishRef.current;
+    if (alreadyPublishing) {
+      const result = await alreadyPublishing;
+      if (result.bundle !== shareBundleTokenRef.current) throw new MessengerInactiveError();
+      setContactCode(result.draft.code);
+      setContactCodeExpiresAt(result.expiresAt);
+      setContactCodeStatus('ready');
+      setError('');
+      return;
+    }
+
+    setContactCodeStatus('publishing');
+    let pending!: Promise<{
+      bundle: string;
+      draft: ContactInviteDraft;
+      expiresAt: number;
+    }>;
+    pending = (async () => {
+      let draft =
+        contactInviteRef.current?.bundle === bundle
+          ? contactInviteRef.current.draft
+          : undefined;
+      if (!draft) draft = await createContactInvite(bundle);
+      if (signal?.aborted || shareBundleTokenRef.current !== bundle) {
+        throw new MessengerInactiveError();
+      }
+      contactInviteRef.current = { bundle, draft };
+      const expiresAt = await publishContactInvite(draft, signal);
+      return { bundle, draft, expiresAt };
+    })();
+    contactInvitePublishRef.current = pending;
     try {
-      await navigator.clipboard.writeText(shareLink);
+      const result = await pending;
+      if (shareBundleTokenRef.current !== bundle) throw new MessengerInactiveError();
+      contactInviteRef.current = result;
+      setContactCode(result.draft.code);
+      setContactCodeExpiresAt(result.expiresAt);
+      setContactCodeStatus('ready');
+      setError('');
+    } catch (error) {
+      if (shareBundleTokenRef.current === bundle && lifecycleActiveRef.current) {
+        setContactCode('');
+        setContactCodeExpiresAt(0);
+        setContactCodeStatus('failed');
+      }
+      throw error;
+    } finally {
+      if (contactInvitePublishRef.current === pending) {
+        contactInvitePublishRef.current = null;
+      }
+    }
+  }
+
+  async function copyContactCode() {
+    if (contactCodeStatus !== 'ready' || !contactCode) return;
+    try {
+      await navigator.clipboard.writeText(contactCode);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
     } catch {
@@ -7781,17 +7924,16 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     }
   }
 
-  // The share text carries the link (which contains add=<token>). extractToken
-  // finds the token even amid the surrounding instructions, so the SAME string
-  // works whether the recipient taps the link (Android link-capture) or, on iOS
-  // where a link only ever opens Safari, pastes it via "Aus Zwischenablage".
+  // Deliberately NO URL: external HTTPS links often open a browser instead of an
+  // installed PWA (especially on iOS). The complete message can be pasted into
+  // SKYTALE; extractContactCode finds and validates the embedded SK1 code.
   function contactShareText(): string {
     return (
       t('Verbinde dich mit mir auf SKYTALE 🔐') +
       '\n\n' +
-      shareLink +
+      contactCode +
       '\n\n' +
-      t('Falls sich nur der Browser öffnet: In SKYTALE auf „Verbinden“ → „Aus Zwischenablage verbinden“.')
+      `SKYTALE → ${t('Verbinden')} → ${t('Aus Zwischenablage verbinden')}`
     );
   }
 
@@ -7800,6 +7942,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   // the same text. A cancelled share sheet throws AbortError — swallowed, it is
   // not an error the user needs to see.
   async function shareContactCode() {
+    if (contactCodeStatus !== 'ready' || !contactCode) return;
     const text = contactShareText();
     try {
       if (typeof navigator !== 'undefined' && navigator.share) {
@@ -7820,7 +7963,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   // and may prompt on iOS — both fine. addBundle runs the SAME cert-verifying
   // path as the QR scan and the manual box, so pasting is not a weaker channel;
   // the bundle is public keys and the MitM backstop is the safety-number compare.
-  async function pasteAndAdd() {
+  async function pasteAndAdd(signal?: AbortSignal) {
     setError('');
     try {
       if (!navigator.clipboard?.readText) {
@@ -7832,8 +7975,9 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         setError(t('Zwischenablage ist leer — kopiere zuerst den Verbindungscode deines Kontakts.'));
         return;
       }
-      await addBundle(text);
+      await addBundle(text, signal);
     } catch {
+      if (signal?.aborted) throw new MessengerInactiveError();
       setError(t('Zugriff auf die Zwischenablage nicht möglich — füge den Code stattdessen unten ins Feld ein.'));
     }
   }
@@ -9107,6 +9251,22 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
 
   // ── Share / Add ───────────────────────────────────────────────────
   if (view === 'add') {
+    const contactCodeReady = contactCodeStatus === 'ready' && !!contactCode;
+    const contactCodeLabel =
+      contactCodeStatus === 'publishing' || contactCodeStatus === 'idle'
+        ? t('Kurzcode wird erstellt…')
+        : contactCodeStatus === 'failed'
+          ? t('Kurzcode momentan nicht verfügbar — QR-Code funktioniert weiterhin.')
+          : contactCode;
+    const contactCodeExpiry =
+      contactCodeReady && contactCodeExpiresAt > 0
+        ? t('Gültig bis {date}', {
+            date: new Intl.DateTimeFormat(getLang(), {
+              dateStyle: 'medium',
+              timeStyle: 'short',
+            }).format(contactCodeExpiresAt),
+          })
+        : '';
     return renderMessengerShell(
       <div className="subview">
         <div className="subhead">
@@ -9128,14 +9288,42 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
             <p className="share-hint">
               {tb('**Persönlich:** Code antippen für Vollbild, der andere scannt ihn.')}
               <br />
-              {tb('**Aus der Ferne:** teilen — der Kontakt fügt dich per „Aus Zwischenablage verbinden“ hinzu.')}
+              {tb('**Aus der Ferne:** kurzen Code teilen — er öffnet keinen Browser.')}
             </p>
-            <div className="link-box">{shareLink}</div>
+            <div
+              className={`link-box contact-code-box${contactCodeReady ? ' ready' : ''}`}
+              aria-live="polite"
+            >
+              {contactCodeLabel}
+            </div>
+            <div className="contact-code-expiry" aria-hidden={!contactCodeExpiry}>
+              {contactCodeExpiry || '\u00a0'}
+            </div>
             <div className="share-actions">
-              <button className="btn btn-primary" onClick={() => void shareContactCode()}>
-                {shared ? t('Kopiert ✓') : t('Code teilen')}
+              <button
+                className="btn btn-primary"
+                disabled={contactCodeStatus === 'publishing' || contactCodeStatus === 'idle'}
+                onClick={() => {
+                  if (contactCodeStatus === 'failed') {
+                    launchRuntimeOperation((signal) => ensureContactInvite(signal));
+                  } else {
+                    void shareContactCode();
+                  }
+                }}
+              >
+                {contactCodeStatus === 'failed'
+                  ? t('Erneut versuchen')
+                  : contactCodeStatus === 'publishing' || contactCodeStatus === 'idle'
+                    ? t('Wird erstellt…')
+                    : shared
+                      ? t('Kopiert ✓')
+                      : t('Code teilen')}
               </button>
-              <button className="btn btn-outline" onClick={() => void copyLink()}>
+              <button
+                className="btn btn-outline"
+                disabled={!contactCodeReady}
+                onClick={() => void copyContactCode()}
+              >
                 {copied ? t('Kopiert ✓') : t('Kopieren')}
               </button>
             </div>
@@ -9152,7 +9340,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
             <button
               className="btn btn-primary"
               onClick={() =>
-                launchRuntimeOperation(() => pasteAndAdd())
+                launchRuntimeOperation((signal) => pasteAndAdd(signal))
               }
             >
               {t('Aus Zwischenablage verbinden')}
@@ -9160,17 +9348,18 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
             <button className="btn btn-outline scan-btn" style={{ marginTop: 10 }} onClick={() => setScanning(true)}>
               <IconCamera /> {t('QR-Code scannen')}
             </button>
-            <div className="or-tiny">{t('oder Link / Token manuell einfügen')}</div>
+            <div className="or-tiny">{t('oder Code / Link manuell einfügen')}</div>
             <textarea
               className="paste-box"
-              placeholder={t('Link oder Bundle-Token einfügen')}
+              placeholder={t('Kontaktcode, Link oder Bundle-Token einfügen')}
               value={addInput}
+              maxLength={MAX_CONTACT_INPUT_CHARS}
               onChange={(e) => setAddInput(e.target.value)}
             />
             <button
               className="btn btn-ghost"
               onClick={() =>
-                launchRuntimeOperation(() => addBundle(addInput))
+                launchRuntimeOperation((signal) => addBundle(addInput, signal))
               }
             >
               {t('Hinzufügen')}
@@ -9183,7 +9372,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
             <QrScanner
               onResult={(text) => {
                 setScanning(false);
-                launchRuntimeOperation(() => addBundle(text));
+                launchRuntimeOperation((signal) => addBundle(text, signal));
               }}
               onClose={() => setScanning(false)}
             />

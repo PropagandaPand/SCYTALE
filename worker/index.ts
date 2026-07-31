@@ -10,9 +10,13 @@
 import { RelayActorGuard, RelayRoom, type Env } from './relay';
 import { BlobQuota } from './blob-quota';
 import { bugReportWebhookPayload, isBugReportCategory } from './bug-report';
+import { ContactCode } from './contact-code';
 
 type AppEnv = Env & {
   BLOB_QUOTA: DurableObjectNamespace<BlobQuota>;
+  CONTACT_CODES: DurableObjectNamespace<ContactCode>;
+  CONTACT_CREATE_RATE: RateLimit;
+  CONTACT_RESOLVE_RATE: RateLimit;
 };
 
 // Content-Security-Policy: lock active content and direct network destinations
@@ -53,11 +57,15 @@ const MAX_PART = 32 * 1024 * 1024; // a single multipart part
 const MAX_PARTS = 256;
 const BUG_BODY_MAX = 8 * 1024;
 const COMPLETE_BODY_MAX = 64 * 1024;
+const CONTACT_CODE_BODY_MAX = 512;
 const UPLOAD_ID_MAX = 512;
 const ETAG_RE = /^[A-Za-z0-9"_-]{1,256}$/;
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
 const OBJECT_KEY_RE = /^[a-f0-9]{32}$/;
 const ROOM_RE = /^[a-f0-9]{64}$/;
+const CONTACT_LOCATOR_RE = /^[A-Za-z0-9_-]{43}$/;
+const CONTACT_PAYLOAD_RE = /^[A-Za-z0-9_-]{427}$/;
+const B64URL_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
 // Both origins are intentionally supported production entry points. The
 // workers.dev hostname must remain available for already-installed PWAs and is
 // held to the same HTTPS/header policy as the custom domain.
@@ -201,6 +209,24 @@ async function allowRate(limiter: RateLimit, key: string): Promise<boolean> {
   return (await limiter.limit({ key })).success;
 }
 
+/** A canonical unpadded 32-byte base64url locator. */
+function validContactLocator(value: unknown): value is string {
+  if (typeof value !== 'string' || !CONTACT_LOCATOR_RE.test(value)) return false;
+  return (B64URL_ALPHABET.indexOf(value[value.length - 1]) & 0x03) === 0;
+}
+
+/** Opaque client ciphertext. Its contents remain deliberately unknowable here. */
+function validContactPayload(value: unknown): value is string {
+  if (typeof value !== 'string' || !CONTACT_PAYLOAD_RE.test(value)) return false;
+  const remainder = value.length % 4;
+  if (remainder === 1) return false;
+  const last = B64URL_ALPHABET.indexOf(value[value.length - 1]);
+  return !(
+    (remainder === 2 && (last & 0x0f) !== 0) ||
+    (remainder === 3 && (last & 0x03) !== 0)
+  );
+}
+
 /**
  * A Durable Object RPC response can be lost after its transaction committed.
  * Retry the exact idempotent receipt before treating the result as ambiguous.
@@ -304,6 +330,103 @@ export default {
       // that did not pass through this Worker and therefore lack this header.
       relayHeaders.set('x-scytale-relay-actor', actor);
       return stub.fetch(new Request(request, { headers: relayHeaders }));
+    }
+
+    // Short remote contact codes. Unlike the self-contained in-person QR, the
+    // human code resolves an opaque client-encrypted public bundle. Both
+    // operations are POST-only so neither code nor locator enters URLs,
+    // navigation history, referrers or invocation logs.
+    if (
+      url.pathname === '/api/contact-code/create' ||
+      url.pathname === '/api/contact-code/resolve'
+    ) {
+      if (request.method !== 'POST') {
+        return secureResponse(
+          new Response('Method not allowed', {
+            status: 405,
+            headers: { allow: 'POST', 'cache-control': 'no-store' },
+          }),
+          url,
+        );
+      }
+      if (!sameOrigin(request, url)) {
+        return secureResponse(new Response('Origin nicht erlaubt.', {
+          status: 403,
+          headers: { 'cache-control': 'no-store' },
+        }), url);
+      }
+
+      const actor = await actorHash(request);
+      const create = url.pathname === '/api/contact-code/create';
+      if (!(await allowRate(create ? env.CONTACT_CREATE_RATE : env.CONTACT_RESOLVE_RATE, `actor:${actor}`))) {
+        return secureResponse(rateLimited(), url);
+      }
+
+      let body: unknown;
+      try {
+        body = await readJsonLimited(request, CONTACT_CODE_BODY_MAX);
+      } catch {
+        return secureResponse(new Response('Bad request', {
+          status: 400,
+          headers: { 'cache-control': 'no-store' },
+        }), url);
+      }
+      const allowedKeys = create ? ['locator', 'payload'] : ['locator'];
+      if (
+        !isPlainRecord(body) ||
+        Object.keys(body).length !== allowedKeys.length ||
+        Object.keys(body).some((key) => !allowedKeys.includes(key)) ||
+        !validContactLocator(body.locator) ||
+        (create && !validContactPayload(body.payload))
+      ) {
+        return secureResponse(new Response('Bad request', {
+          status: 400,
+          headers: { 'cache-control': 'no-store' },
+        }), url);
+      }
+      const locator = body.locator as string;
+      // A second independent bucket bounds hammering one known locator across
+      // many clients while the actor bucket bounds broad random spraying.
+      if (!(await allowRate(create ? env.CONTACT_CREATE_RATE : env.CONTACT_RESOLVE_RATE, `locator:${locator}`))) {
+        return secureResponse(rateLimited(), url);
+      }
+
+      const stub = env.CONTACT_CODES.getByName(locator);
+      if (create) {
+        let result;
+        try {
+          result = await stub.publish(body.payload as string);
+        } catch {
+          return secureResponse(new Response('Contact code unavailable', {
+            status: 503,
+            headers: { 'cache-control': 'no-store', 'retry-after': '5' },
+          }), url);
+        }
+        if (!result.ok) {
+          return secureResponse(new Response(result.conflict ? 'Conflict' : 'Bad request', {
+            status: result.conflict ? 409 : 400,
+            headers: { 'cache-control': 'no-store' },
+          }), url);
+        }
+        return jsonResponse({ expiresAt: result.expiresAt }, url, result.created ? 201 : 200);
+      }
+
+      let record;
+      try {
+        record = await stub.resolve();
+      } catch {
+        return secureResponse(new Response('Contact code unavailable', {
+          status: 503,
+          headers: { 'cache-control': 'no-store', 'retry-after': '5' },
+        }), url);
+      }
+      if (!record) {
+        return secureResponse(new Response('Not found', {
+          status: 404,
+          headers: { 'cache-control': 'no-store' },
+        }), url);
+      }
+      return jsonResponse(record, url);
     }
 
     // Bug reports: the client POSTs a short JSON report to its OWN origin (allowed by
@@ -696,4 +819,4 @@ export default {
   },
 } satisfies ExportedHandler<AppEnv>;
 
-export { BlobQuota, RelayActorGuard, RelayRoom };
+export { BlobQuota, ContactCode, RelayActorGuard, RelayRoom };

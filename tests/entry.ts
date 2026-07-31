@@ -236,6 +236,13 @@ export {
 } from '../src/lib/storageQuota';
 export { createKeyedSerialQueue } from '../src/lib/keyedQueue';
 export {
+  createContactInvite,
+  decodeContactCode,
+  publishContactInvite,
+  resolveContactInvite,
+  openContactInvite,
+} from '../src/lib/contactCode';
+export {
   BUG_REPORT_CATEGORIES,
   isBugReportCategory,
   bugReportWebhookPayload,

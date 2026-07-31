@@ -552,6 +552,17 @@ both arrive.
   the device with **one** content-free push, not one per message — so a rapid burst can't fan out into a push storm.
 - **One-way onboarding**: passing the code suffices; the other writes first and the contact forms automatically
   from the prekey header.
+- **Two deliberately separate contact-share paths.** The nearby QR remains a self-contained `#add` bundle and
+  needs no rendezvous lookup; previously shared links remain importable. Remote sharing uses a 128-bit
+  checksummed `SK1-…` capability instead of a URL. The client derives a one-way locator and AES-GCM key from
+  that capability, and the Worker stores only the locator plus opaque ciphertext. The absolute 24-hour deadline
+  is covered by both the code commitment and AEAD, so a resolver cannot extend it or replay the record after
+  expiry. Create/resolve use fixed same-origin POST endpoints, exact-size bodies and separate short-window edge
+  limits. The network operator still sees request IP/timing. Expiry is containment, not global device
+  revocation: a brand-new peer has no independently fresh DeviceList floor. That remains part of the documented
+  Key-Transparency limitation. The rendezvous can withhold records, and a distributed botnet can still allocate
+  bounded 24-hour records despite the per-actor/per-locator limits; eliminating that anonymously would require
+  an additional proof/challenge or a global admission policy.
 - Only **ciphertext** ever transits.
 
 ---

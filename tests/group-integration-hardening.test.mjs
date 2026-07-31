@@ -49,7 +49,7 @@ ok('Drop-Pfad rendert oder persistiert keinen unsichtbaren 1:1-Inhalt',
 console.log('\n[Hidden → Visible: gescannter Code promotet und erhält nutzbares Bundle]');
 
 const addBundle = section(
-  'async function addBundle(rawInput: string)',
+  'async function addBundle(rawInput: string, signal?: AbortSignal)',
   'useEffect(() => {',
 );
 const verifiedContactAt = addBundle.indexOf(

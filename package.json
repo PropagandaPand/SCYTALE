@@ -1,12 +1,12 @@
 {
   "name": "skytale",
-  "version": "0.36.6",
+  "version": "0.36.7",
   "description": "Ende-zu-Ende verschlüsselter Messenger als PWA — gegen Massenüberwachung.",
   "type": "module",
   "private": true,
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && vite build && node scripts/validate-shell.mjs",
     "preview": "vite preview",
     "deploy": "npm run deploy:preflight && npm run build && npm run deploy:preflight && wrangler deploy",
     "deploy:preflight": "node ./scripts/deploy-preflight.mjs",

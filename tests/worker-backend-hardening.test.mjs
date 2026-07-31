@@ -136,6 +136,14 @@ ok('deploy checks a clean published commit before and after the build',
   deploy.match(/deploy:preflight/g)?.length === 2 &&
   deploy.indexOf('deploy:preflight') < deploy.indexOf('npm run build') &&
   deploy.lastIndexOf('deploy:preflight') < deploy.indexOf('wrangler deploy'));
+// The build MUST run the SW-install shell validator (assertShellReferencesOnlyVerified over the
+// emitted dist/index.html). Wired into `build`, not just the git preflight, because the Cloudflare
+// deploy runs `npm run build` — a shell the validator rejects (HTML comment, inline <style>, a
+// viewport that no longer matches the pin, …) makes the new SW's install throw, so it never activates
+// and every client is stuck with no update. This guard already regressed twice; keep it fail-closed.
+ok('build runs the SW-install shell validator so a rejected shell can never deploy',
+  pkg.scripts.build.includes('node scripts/validate-shell.mjs') &&
+  deploy.includes('npm run build'));
 ok('preflight verifies worktree, attached upstream and current remote SHA',
   deployPreflight.includes("'status', '--porcelain=v1', '--untracked-files=all'") &&
   deployPreflight.includes("'symbolic-ref', '--quiet', '--short', 'HEAD'") &&

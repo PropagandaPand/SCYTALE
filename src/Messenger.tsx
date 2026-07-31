@@ -266,6 +266,7 @@ import { applyBadge } from './lib/badge';
 import { biometricAvailable, biometricEnrolled, disableBiometricUnlock, duressEnabled, openDecoyForPopulate, WrongPassphraseError } from './lib/vaultService';
 import { DuressSetup } from './DuressSetup';
 import {
+  ALWAYS_RECEIVE_INLINE_BYTES,
   AUTO_RECEIVE_CONTACT_CAP_BYTES,
   attachmentRecvReservationBytes,
   automaticRecvReservationBytes,
@@ -1524,20 +1525,25 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       messagesRef.current[roomId] = await loadMessages(dek, roomId);
     }
     return withStorageGate(async () => {
-      const markerIds = await allRecvMarkerIds();
-      const activeMarkers = await Promise.all(
-        markerIds.map((id) => getRecvMarker(dek, id).catch(() => null)),
-      );
-      if (
-        !mayAutoReceiveAttachment(
-          messagesRef.current[roomId] ?? [],
-          data.length,
-          AUTO_RECEIVE_CONTACT_CAP_BYTES,
-          automaticRecvReservationBytes(activeMarkers, roomId),
-        ) ||
-        !(await originCanReserve(data.length))
-      ) {
-        return null;
+      // A small inline attachment is already in RAM; the low-headroom gate would
+      // only drop it into a dead end. Store it unless the write itself reports
+      // storage-full. Larger inline payloads keep the per-contact + headroom gate.
+      if (data.length > ALWAYS_RECEIVE_INLINE_BYTES) {
+        const markerIds = await allRecvMarkerIds();
+        const activeMarkers = await Promise.all(
+          markerIds.map((id) => getRecvMarker(dek, id).catch(() => null)),
+        );
+        if (
+          !mayAutoReceiveAttachment(
+            messagesRef.current[roomId] ?? [],
+            data.length,
+            AUTO_RECEIVE_CONTACT_CAP_BYTES,
+            automaticRecvReservationBytes(activeMarkers, roomId),
+          ) ||
+          !(await originCanReserve(data.length))
+        ) {
+          return null;
+        }
       }
       try {
         return await fileRefFor(name, mime, data, viewOnce);

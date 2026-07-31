@@ -223,6 +223,7 @@ export {
   versionedPrecacheName,
 } from '../src/lib/swPrecache';
 export {
+  ALWAYS_RECEIVE_INLINE_BYTES,
   AUTO_RECEIVE_CONTACT_CAP_BYTES,
   MIN_ORIGIN_HEADROOM_BYTES,
   MIN_ORIGIN_HEADROOM_FRACTION,

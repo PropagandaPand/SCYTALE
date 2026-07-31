@@ -158,5 +158,22 @@ ok('Push-Rotation respektiert den persistenten Disable-Marker',
   changeSource.indexOf('control.match(disabledKey)') >= 0 &&
   changeSource.indexOf('pushManager.subscribe') > changeSource.indexOf('control.match(disabledKey)'));
 
+const messengerSource = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'Messenger.tsx'),
+  'utf8',
+);
+const inboundStart = messengerSource.indexOf('async function inboundFileRefFor');
+const inboundSource = messengerSource.slice(inboundStart, messengerSource.indexOf('function quoteFrom'));
+const sizeGate = inboundSource.indexOf('data.length > ALWAYS_RECEIVE_INLINE_BYTES');
+ok('kleiner Inline-Anhang wird nie am Headroom-Gate abgelehnt (Sackgasse behoben)',
+  S.ALWAYS_RECEIVE_INLINE_BYTES > 0 &&
+  S.ALWAYS_RECEIVE_INLINE_BYTES < S.AUTO_RECEIVE_CONTACT_CAP_BYTES &&
+  sizeGate >= 0 &&
+  // die Quota-/Headroom-Gates stehen INNERHALB der Größen-Schranke, greifen also nur für größere Payloads
+  inboundSource.indexOf('mayAutoReceiveAttachment') > sizeGate &&
+  inboundSource.indexOf('originCanReserve') > sizeGate);
+ok('Negativkontrolle: der echte Storage-Full-Schutz beim Schreiben bleibt für ALLE Größen',
+  inboundSource.indexOf('isStorageFull(error)') > sizeGate);
+
 console.log(`\n${pass} ok, ${fail} fail`);
 process.exit(fail ? 1 : 0);

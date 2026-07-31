@@ -8,6 +8,11 @@
  */
 
 export const AUTO_RECEIVE_CONTACT_CAP_BYTES = 32 * 1024 * 1024;
+// A small inline attachment is already fully in RAM when it arrives; declining it
+// merely drops useful data without protecting the origin headroom. Files at or
+// below this size are always stored (only a real storage-full write failure can
+// stop them), so a tiny file never dead-ends on the low-headroom gate.
+export const ALWAYS_RECEIVE_INLINE_BYTES = 256 * 1024;
 export const MIN_ORIGIN_HEADROOM_BYTES = 64 * 1024 * 1024;
 export const MIN_ORIGIN_HEADROOM_FRACTION = 0.2;
 // Each encrypted IndexedDB chunk consumes substantially more than its plaintext:

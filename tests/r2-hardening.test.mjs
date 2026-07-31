@@ -138,5 +138,19 @@ ok('zu kurzes Bearer-Token wird verworfen', (() => {
   }
 })());
 
+const messengerSource = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'Messenger.tsx'),
+  'utf8',
+);
+const sendMedia = messengerSource.slice(
+  messengerSource.indexOf('async function sendMedia('),
+  messengerSource.indexOf('async function sendViaR2('),
+);
+ok('jeder Anhang über der Auto-Push-Cap geht über R2 (offline abholbar), nicht Sender-gestreamt',
+  sendMedia.includes('const r2Threshold = AUTOPUSH_CAP;') &&
+  sendMedia.includes('await sendViaR2(') &&
+  // Negativkontrolle: die R2-Schwelle ist NICHT mehr an MAX_BIG_ATTACH gekoppelt (die alte Offer/Pull-Stufe)
+  !/r2Threshold = viewOnce \? AUTOPUSH_CAP : MAX_BIG_ATTACH/.test(sendMedia));
+
 console.log(`\n${pass} ok, ${fail} fail`);
 process.exit(fail ? 1 : 0);

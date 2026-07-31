@@ -7904,9 +7904,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   }
 
   /** Actually send a picked photo/video/file. `viewOnce` (1:1 only) flags the recipient's
-   *  copy as self-destructing; the sender always keeps a normal copy. Routes by size:
-   *  inline (byte-18 for view-once), auto-push chunks (≤2 MB, view-once supported), or an
-   *  offer (larger — view-once not supported there, guarded below). */
+   *  copy as self-destructing; the sender always keeps a normal copy. Routes by size so
+   *  EVERY attachment is retrievable while the sender is offline: inline (≤600 KB, in the
+   *  relay message), auto-push chunks (≤2 MB, to the mailbox), or R2 (larger, up to ~1 GB).
+   *  The old sender-streamed offer/pull tier (needed the sender online) is no longer used. */
   async function sendMedia(src: { file: File | null; data: Uint8Array<ArrayBuffer> | null; size: number }, name: string, mime: string, viewOnce: boolean): Promise<void> {
     try {
       const size = src.size;
@@ -7914,19 +7915,27 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       // file is never in memory. Needs the raw File; only the mailbox path uses byte arrays.
       // For VIEW-ONCE, the threshold drops to the auto-push cap so a view-once video of any
       // size self-destructs via R2 — whose delete-after-download matches the one-view idea.
-      const r2Threshold = viewOnce ? AUTOPUSH_CAP : MAX_BIG_ATTACH;
+      // Every attachment must be retrievable while the sender is offline. Anything
+      // above the auto-push mailbox cap therefore goes to R2 (a tiny descriptor rides
+      // the relay message; the ciphertext waits in R2 until fetched) instead of the
+      // old sender-streamed offer/pull, which required the sender to stay online.
+      const r2Threshold = AUTOPUSH_CAP;
       if (size > r2Threshold) {
         if (size > CLIENT_MAX_BLOB) {
           setError(t('Datei zu groß — maximal ~1 GB.'));
           return;
         }
-        if (activeGroup || !src.file) {
+        if (activeGroup) {
           setError(t('Große Dateien gehen nur in Einzelchats.'));
           return;
         }
         const contact = contactsRef.current.find((c) => c.roomId === activeRoom);
         if (!contact) return;
-        await sendViaR2(contact, src.file, name, mime, viewOnce);
+        // R2 streams from a File; wrap raw bytes (e.g. a large compressed image) if
+        // that is all we have, so a 1:1 byte payload above the cap still goes offline.
+        const file = src.file ?? (src.data ? new File([src.data], name, { type: mime }) : null);
+        if (!file) return;
+        await sendViaR2(contact, file, name, mime, viewOnce);
         return;
       }
       // Small enough for the relay mailbox — get the bytes (buffer the File only now, small).

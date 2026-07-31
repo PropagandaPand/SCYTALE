@@ -988,6 +988,15 @@ html.privacy-curtain-on .privacy-curtain {
      entrance finishes and override the drag-to-reply transform we set inline. */
   animation: msg-in 0.2s var(--ease-out);
 }
+/* Desktop (mouse): the bubble pointer isn't used for long-press/swipe, so allow
+   native selection of part of a message for copying. Touch keeps hold-to-menu. */
+@media (hover: hover) and (pointer: fine) {
+  .bubble {
+    -webkit-user-select: text;
+    user-select: text;
+    cursor: auto;
+  }
+}
 .bubble.mine {
   align-self: flex-end;
   background: var(--mine);

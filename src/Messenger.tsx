@@ -971,6 +971,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   const [recording, setRecording] = useState(false);
   const [recSeconds, setRecSeconds] = useState(0);
   const [myAvatarB64, setMyAvatarB64] = useState('');
+  const [myName, setMyName] = useState('');
   const [profileName, setProfileName] = useState('');
   const [activeGroup, setActiveGroup] = useState<string | null>(null);
   const [groupNameInput, setGroupNameInput] = useState('');
@@ -1634,6 +1635,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     if (m.file?.attId) await secureWipeAttachment(m.file.attId);
   }
   function onBubblePointerDown(e: React.PointerEvent<HTMLDivElement>, m: ChatMessage) {
+    // Desktop mouse: no long-press / swipe. Leave the pointer to native text
+    // selection so a portion of a message can be selected and copied; copy and
+    // reply come from the right-click menu (onContextMenu) instead.
+    if (e.pointerType === 'mouse') return;
     if (!m.mid) return; // nothing to link a reply to
     // Don't touch transition/transform yet — wait until the drag commits to the
     // horizontal axis, so a tap or a vertical scroll leaves the bubble untouched.
@@ -3676,6 +3681,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
           myProfileRef.current = next;
           setProfileName(next.name ?? '');
           setMyAvatarB64(next.avatarB64 ?? '');
+          setMyName(next.name ?? '');
         }
       } else if (p.t === 'groups') {
         for (const invite of p.groups) {
@@ -5383,6 +5389,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
       setDeviceNames(deviceNames);
       setStickers(storedStickers);
       setMyAvatarB64(prof.avatarB64 ?? '');
+      setMyName(prof.name ?? '');
       setProfileName(prof.name ?? '');
 
       const token = await encodeBundle(currentBundle(id, pre));
@@ -8287,6 +8294,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
 
   async function saveProfileMeta() {
     myProfileRef.current = { ...myProfileRef.current, name: profileName.trim() || undefined };
+    setMyName(profileName.trim());
     await saveProfile(dek, myProfileRef.current);
     await broadcastProfile();
     setView('list');
@@ -9268,7 +9276,7 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
             )}
             <div>
               <div className="t">
-                SKYTALE <span className="ver">v{__APP_VERSION__}</span>
+                {myName.trim() || t('Dein Profil')} <span className="ver">v{__APP_VERSION__}</span>
               </div>
               <div className="fp">{shortFp(fingerprint)}</div>
             </div>
@@ -9589,7 +9597,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
               onPointerMove={onBubblePointerMove}
               onPointerUp={() => endBubbleSwipe(m)}
               onPointerCancel={() => endBubbleSwipe(m)}
-              onContextMenu={(e) => e.preventDefault()}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                if (m.mid && !m.recalled) openMsgMenu(m, e.clientX, e.clientY);
+              }}
             >
               {m.recalled ? (
                 <span className="recalled">{t('Nachricht zurückgerufen')}</span>
@@ -9800,7 +9811,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
               onPointerMove={onBubblePointerMove}
               onPointerUp={() => endBubbleSwipe(m)}
               onPointerCancel={() => endBubbleSwipe(m)}
-              onContextMenu={(e) => e.preventDefault()}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                if (m.mid && !m.recalled) openMsgMenu(m, e.clientX, e.clientY);
+              }}
             >
               {!m.mine && m.sender && <div className="bubble-sender">{m.sender}</div>}
               {m.recalled ? (

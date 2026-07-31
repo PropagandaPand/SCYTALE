@@ -10,11 +10,14 @@ export const OFFICIAL_ACCOUNT_BADGE = 'ADMIN';
 
 export const OFFICIAL_ACCOUNT_MANIFEST_SCHEMA = 1;
 export const OFFICIAL_ACCOUNT_CLOCK_SKEW_MS = 10 * 60 * 1000;
-// A fresh installation has no local sequence floor. Keeping root-authorised
-// documents short-lived bounds how long a fully compromised directory could
-// replay an archived, pre-revocation document to that new client. The permanent
-// user-facing alias does not change when this operator-only lease is renewed.
-export const OFFICIAL_ACCOUNT_MAX_LIFETIME_MS = 45 * 24 * 60 * 60 * 1000;
+// A fresh installation has no local sequence floor, so a manifest's notAfter
+// bounds how long a fully compromised directory could replay an archived,
+// pre-revocation document to that new client. The DURABLE revocation lever,
+// however, is the release floor (OFFICIAL_ACCOUNT_MIN_SEQUENCE), raised in a
+// release — not this timer. The operator therefore deliberately runs a very long
+// lease so a renewal only happens on a real change (new device, key rotation),
+// never merely on a schedule.
+export const OFFICIAL_ACCOUNT_MAX_LIFETIME_MS = 187 * 365 * 24 * 60 * 60 * 1000; // ~187 Jahre
 export const OFFICIAL_ACCOUNT_MAX_DEVICE_LIST_BYTES = 64 * 1024;
 export const OFFICIAL_ACCOUNT_MAX_DOCUMENT_BYTES = 96 * 1024;
 // Every manifest carries the full set of root-revoked historical masters. A

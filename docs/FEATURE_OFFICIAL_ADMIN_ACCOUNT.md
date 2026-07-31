@@ -371,11 +371,13 @@ bewusste, offline ausgeführte Zeremonie des Projektinhabers.
    bewussten Offline-Zeremonie bleibt der eingecheckte Public-Key-Wert leer und
    Client wie Worker verhalten sich fail-closed. Der Private Key darf weder auf
    einem normalen Entwicklungsrechner noch auf einem Online-Publish-Host liegen.
-2. **Dauerhafter Code, kurze signierte Lease:** `SKYTALE-SUPPORT` ändert sich nie
-   und läuft als Nutzeradresse nicht ab. Das dahinterliegende root-signierte
-   Manifest gilt standardmäßig 30 und technisch höchstens 45 Tage. Diese
-   operatorseitige Erneuerung begrenzt den Replay-Zeitraum für frische Clients;
-   Nutzer müssen weder neue Codes lernen noch etwas bestätigen.
+2. **Dauerhafter Code, sehr lange signierte Lease:** `SKYTALE-SUPPORT` ändert sich
+   nie und läuft als Nutzeradresse nicht ab. Das dahinterliegende root-signierte
+   Manifest läuft bewusst mit einer sehr langen Lease (Obergrenze ~187 Jahre),
+   damit der Operator nur bei einer echten Änderung (neues Gerät, Key-Rotation)
+   neu signiert und nicht nach der Uhr. Der Replay-Schutz für frische Clients ruht
+   damit auf dem Release-Floor (§14.3), nicht auf diesem Timer; Nutzer müssen weder
+   neue Codes lernen noch etwas bestätigen.
 3. **DeviceList:** Sequenz 1 darf zur Bootstrap-Aktivierung nur das OPK-freie
    Bundle enthalten. Sobald der Admin-Client den eigenen root-signierten Master
    erkennt, steht im Profil der public-only Deskriptor-Export bereit. Sequenz 2
@@ -586,7 +588,9 @@ von mehreren gültig signierten Dokumenten das neueste ist.
 
 Mitigationen dieses Branches:
 
-- Standardlease 30, absolute Obergrenze 45 Tage statt 365/400 Tage;
+- die Lease-Obergrenze ist bewusst auf ~187 Jahre gesetzt und daher KEINE
+  praktische Replay-Zeitschranke mehr — der Schutz frischer Clients ruht damit
+  allein auf dem Release-Floor (nächster Punkt);
 - lokaler monotoner Floor mit Same-sequence-Equivocation-Schutz;
 - Release-Floor, der im Notfall sofort angehoben wird;
 - Foreground-Refresh und 15-Minuten-Poll für bereits laufende Clients;

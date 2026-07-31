@@ -211,11 +211,11 @@ try {
     '--private-key', rootPath,
     '--bundle', bundle,
     '--sequence', '2',
-    '--valid-days', '46',
+    '--valid-days', '68256',
     '--output', join(temp, 'too-long.json'),
   ], `${rootPassphrase}\n`);
-  ok('CLI begrenzt das Replay-Fenster für Frischinstallationen auf 45 Tage',
-    excessiveLifetime.status !== 0 && /höchstens 45/.test(excessiveLifetime.stderr));
+  ok('CLI begrenzt die Lease-Laufzeit auf die konfigurierte Obergrenze (~187 Jahre)',
+    excessiveLifetime.status !== 0 && /höchstens 68255/.test(excessiveLifetime.stderr));
 
   const worktreeFields = execFileSync(
     'git', ['-C', repository, 'worktree', 'list', '--porcelain', '-z'], { encoding: 'utf8' },

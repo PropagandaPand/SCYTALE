@@ -18,8 +18,8 @@ ok('inbox work is rejected both when queued and when its turn begins',
   source.includes('inboxQueueRef.current.catch(() => undefined).then(async () => {\n      assertMessengerActive();'));
 
 ok('every relay constructor path has an active-generation fence',
-  /!lifecycleActiveRef\.current \|\|\s*runtimeSuspendedRef\.current \|\|\s*!id \|\|\s*relaysRef\.current\.has\(room\)/.test(source) &&
-  /!lifecycleActiveRef\.current \|\|\s*runtimeSuspendedRef\.current \|\|\s*contact\.localOnly/.test(source) &&
+  /!lifecycleActiveRef\.current \|\|\s*runtimeSuspendedRef\.current \|\|\s*!id\s*\) return;/.test(source) &&
+  /!lifecycleActiveRef\.current \|\|\s*runtimeSuspendedRef\.current \|\|\s*!id \|\|\s*contact\.localOnly/.test(source) &&
   /!lifecycleActiveRef\.current \|\|\s*runtimeSuspendedRef\.current \|\|\s*relaysRef\.current\.has\(room\)/.test(source) &&
   source.includes('async function sendToInbox(recipientSignPub: Bytes, sealed: Bytes): Promise<void> {\n    assertRuntimeAvailable();'));
 

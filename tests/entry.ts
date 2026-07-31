@@ -82,7 +82,7 @@ export {
 } from '../src/lib/messages';
 export { loadContacts } from '../src/lib/store';
 export { DECOY_CONTENT } from '../src/lib/decoyContent';
-export { RelayClient } from '../src/lib/relay';
+export { prepareOwnerRelaySlot, RelayClient } from '../src/lib/relay';
 export {
   withVaultDb,
   switchVaultDb,

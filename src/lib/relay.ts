@@ -38,6 +38,29 @@ export interface RelayOptions {
   auth?: { signPub: Bytes; sign: (nonce: Bytes) => Promise<Bytes> };
 }
 
+/**
+ * Reserve a relay room for its authenticated owner before constructing that
+ * owner's client. A sender-only socket may already occupy the room (notably the
+ * hidden self-contact during boot); it must never shadow owner authentication.
+ * Returns false only when `owner` already owns the exact slot.
+ */
+export function prepareOwnerRelaySlot<T extends { close(): void }>(
+  room: string,
+  relays: Map<string, T>,
+  sendRooms: Map<string, string>,
+  owner: T | null,
+): boolean {
+  const existing = relays.get(room);
+  if (existing === owner) return false;
+  if (!existing) return true;
+  existing.close();
+  relays.delete(room);
+  for (const [contactRoom, relayRoom] of sendRooms) {
+    if (relayRoom === room) sendRooms.delete(contactRoom);
+  }
+  return true;
+}
+
 export class RelayClient {
   private ws: WebSocket | null = null;
   private closedByUs = false;

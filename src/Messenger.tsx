@@ -218,7 +218,7 @@ import {
   type FileRef,
   type Quote,
 } from './lib/messages';
-import { RelayClient, type RelayStatus } from './lib/relay';
+import { prepareOwnerRelaySlot, RelayClient, type RelayStatus } from './lib/relay';
 import { makeQr } from './lib/qr';
 import {
   ContactCodeError,
@@ -2164,9 +2164,18 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     if (
       !lifecycleActiveRef.current ||
       runtimeSuspendedRef.current ||
-      !id ||
-      relaysRef.current.has(room)
+      !id
     ) return;
+    // The owner role always wins its own inbox. During boot the hidden
+    // self-contact used to create a sender-only client for this exact room;
+    // the generic has(room) guard then prevented owner authentication, so the
+    // relay durably queued messages that this device never drained.
+    if (!prepareOwnerRelaySlot(
+      room,
+      relaysRef.current,
+      sendRoomRef.current,
+      inboxClientRef.current,
+    )) return;
     const client = new RelayClient(room, {
       onCipher: (bytes, ackId) => {
         if (!lifecycleActiveRef.current || runtimeSuspendedRef.current) return;
@@ -2188,11 +2197,22 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
 
   // A send channel to a contact's inbox. Status = reachability dot for them.
   async function connectSend(contact: Contact) {
+    const id = identityRef.current;
     if (
       !lifecycleActiveRef.current ||
       runtimeSuspendedRef.current ||
+      !id ||
       contact.localOnly
     ) return;
+    // The hidden self-contact is a fan-out model for OTHER own devices, not a
+    // reason to open an unauthenticated sender socket to this device's inbox.
+    // Compare the device key (not `hidden` or the master): hidden group contacts
+    // remain sendable, and even a hostile foreign-master bundle cannot reserve
+    // our owner-inbox slot by reusing our public signing key.
+    if (bytesEqual(contact.peerSignPub, id.sign.publicKey)) {
+      sendRoomRef.current.delete(contact.roomId);
+      return;
+    }
     const room = await inboxRoom(contact.peerSignPub);
     if (!lifecycleActiveRef.current || runtimeSuspendedRef.current) return;
     sendRoomRef.current.set(contact.roomId, room);

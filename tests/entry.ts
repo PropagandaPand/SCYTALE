@@ -214,6 +214,7 @@ export {
 } from '../src/lib/r2Descriptor';
 export {
   PRECACHE_PREFIX,
+  assertStrictShellCsp,
   isScytalePrecache,
   matchVerifiedManifestAsset,
   matchVerifiedShell,

@@ -159,7 +159,7 @@ const REQUIRED_SHELL_CSP = new Map<string, ReadonlySet<string>>([
  * an edge-rewritten HTML shell. Require one unambiguous, enforced policy whose
  * security-critical directives exactly match the narrow policy the application needs.
  */
-function assertStrictShellCsp(response: Response): void {
+export function assertStrictShellCsp(response: Response): void {
   const raw = response.headers.get('content-security-policy');
   if (!raw) throw new Error('Shell hat keine erzwungene Content-Security-Policy.');
 

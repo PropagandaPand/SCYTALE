@@ -2,6 +2,7 @@
 // These assertions intentionally inspect the production Worker sources and deploy
 // metadata; runtime frame behavior is covered by relay-frame-security.test.mjs.
 import { readFileSync } from 'node:fs';
+import * as S from './.bundle/entry.js';
 
 let pass = 0, fail = 0;
 const ok = (name, condition) => {
@@ -39,6 +40,26 @@ ok('CSP sperrt ungenutzte Base/Form/Frame/Eventhandler-Sinks ohne React-Styleatt
   index.includes(`"script-src-attr 'none'"`) &&
   index.includes(`"style-src-elem 'self'"`) &&
   index.includes(`"style-src-attr 'unsafe-inline'"`));
+// The Worker's served CSP and the service worker's install-time CSP validator (REQUIRED_SHELL_CSP in
+// swPrecache) are two separate constants. If they drift, populateBuildPrecache throws on install → the
+// new SW never activates → every client is stuck with no update (same failure class as a bad shell).
+// Run the EXACT worker CSP through the EXACT SW validator so drift can never ship unnoticed.
+const workerCspBlock = index.match(/const CSP = \[([\s\S]*?)\]\.join\('; '\)/)?.[1] ?? '';
+const workerCsp = [...workerCspBlock.matchAll(/"([^"]+)"/g)].map((m) => m[1]).join('; ');
+const cspAccepted = (policy) => {
+  try {
+    S.assertStrictShellCsp(new Response('', { headers: { 'content-security-policy': policy } }));
+    return true;
+  } catch {
+    return false;
+  }
+};
+ok('die vom Worker gelieferte CSP ist exakt die, die der SW-Install-Validator verlangt (kein Drift)',
+  workerCsp.length > 0 && cspAccepted(workerCsp));
+// NEGATIVE CONTROL: an extra directive the validator does not allow must be rejected — proves the
+// consistency check is live and would actually catch a drift.
+ok('Negativkontrolle: eine unerwartete Zusatz-Direktive würde den SW-Install-Validator brechen',
+  !cspAccepted(`${workerCsp}; child-src 'self'`));
 ok('persistente Invocation Logs sind aus Metadatenschutzgründen deaktiviert',
   /\[observability\.logs\][\s\S]*?invocation_logs\s*=\s*false/.test(wrangler));
 

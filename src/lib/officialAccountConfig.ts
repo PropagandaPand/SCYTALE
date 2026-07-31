@@ -11,7 +11,8 @@
  * unpadded base64url Ed25519 public key before activation.
  */
 export const OFFICIAL_ACCOUNT_ROOT_KEY_ID = 'skytale-admin-root-v1';
-export const OFFICIAL_ACCOUNT_ROOT_PUBLIC_KEY_B64URL = '';
+export const OFFICIAL_ACCOUNT_ROOT_PUBLIC_KEY_B64URL =
+  'sMJfQ1c76FUzLkLDGLZFT_40wGGWW8zzpgoqwF9CR3k';
 
 /** Raise this in a release after an emergency revocation or known stale replay. */
 export const OFFICIAL_ACCOUNT_MIN_SEQUENCE = 1;

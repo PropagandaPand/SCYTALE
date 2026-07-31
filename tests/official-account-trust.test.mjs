@@ -22,8 +22,11 @@ const rejectsKind = async (operation, kind) => {
 
 console.log('\n[Offizieller Admin-Account: Root-Vertrauen und Bootstrap]');
 
-ok('ungefüllter Release-Vertrauensanker hält die Funktion vor der Offline-Aktivierung fail-closed',
-  S.officialAccountConfigured() === false);
+// Aktiviert: der Root-Public-Key ist eingecheckt. officialAccountConfigured() gibt
+// nur dann true zurück, wenn der eingebettete Wert zu genau 32 Byte dekodiert —
+// die Assertion prüft also zugleich, dass der Anker wohlgeformt ist.
+ok('der eingecheckte Release-Vertrauensanker ist nach der Offline-Aktivierung gesetzt und gültig',
+  S.officialAccountConfigured() === true);
 
 const now = Date.now();
 const root = await S.generateIdentity();

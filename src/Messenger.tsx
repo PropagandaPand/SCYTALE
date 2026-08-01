@@ -294,6 +294,7 @@ import {
 } from './icons';
 
 const MAX_ATTACH = 600 * 1024; // inline cap — keeps the WS frame under Cloudflare's ~1 MiB limit
+const COMPOSER_MAX_HEIGHT = 140; // px — composer grows to ~6 lines, then scrolls (mirrors app.css)
 // Chunked attachments. Auto-push path: a file above the inline cap and up to
 // AUTOPUSH_CAP is sent as chunk frames straight to the peer's mailbox (works offline);
 // larger files will use offer+pull (7d). CHUNK_BYTES stays well under the relay's
@@ -944,10 +945,19 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
   // we only track a `hasText` boolean that flips on the empty↔non-empty transition.
   // So typing no longer re-renders the whole message list on every keystroke — the
   // main source of the lag in long/group chats. Read/clear go through the ref.
-  const msgInputRef = useRef<HTMLInputElement>(null);
+  const msgInputRef = useRef<HTMLTextAreaElement>(null);
   const [hasText, setHasText] = useState(false);
+  // Grow the composer with its content (like WhatsApp) up to a few lines, then
+  // scroll inside it — so a long message stays readable instead of running off.
+  function autoGrowComposer(el: HTMLTextAreaElement): void {
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, COMPOSER_MAX_HEIGHT)}px`;
+  }
   const clearComposer = () => {
-    if (msgInputRef.current) msgInputRef.current.value = '';
+    if (msgInputRef.current) {
+      msgInputRef.current.value = '';
+      autoGrowComposer(msgInputRef.current);
+    }
     setHasText(false);
   };
   // Message windowing: render only the most recent MSG_WINDOW messages so opening a
@@ -1730,6 +1740,24 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     };
     document.addEventListener('touchmove', stopScrollWhileDragging, { passive: false });
     return () => document.removeEventListener('touchmove', stopScrollWhileDragging);
+  }, []);
+
+  // Track the visual viewport so the app fills ONLY the space above an open keyboard.
+  // iOS ignores interactive-widget=resizes-content, so without this a large gap opens
+  // between the composer and the keyboard. --app-h falls back to 100dvh before/without
+  // JS, so there is no regression where visualViewport is unavailable.
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const apply = () => {
+      document.documentElement.style.setProperty('--app-h', `${Math.round(vv.height)}px`);
+    };
+    apply();
+    vv.addEventListener('resize', apply);
+    return () => {
+      vv.removeEventListener('resize', apply);
+      document.documentElement.style.removeProperty('--app-h');
+    };
   }, []);
 
   function consumeEarlyDeliveryReceipts(msg: ChatMessage): ChatMessage {
@@ -9211,13 +9239,26 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
         <IconSticker />
       </button>
       <div className="composer-pill">
-        <input
+        <textarea
           ref={msgInputRef}
+          rows={1}
           defaultValue=""
           placeholder={t('Verschlüsselte Nachricht…')}
-          onChange={(e) => setHasText(e.target.value.trim().length > 0)}
+          onInput={(e) => {
+            const el = e.currentTarget;
+            setHasText(el.value.trim().length > 0);
+            autoGrowComposer(el);
+          }}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') {
+            // Desktop: Enter sends, Shift+Enter is a newline. On a touch keyboard
+            // Enter always inserts a newline so a message can span multiple lines;
+            // sending is the button.
+            if (
+              e.key === 'Enter' &&
+              !e.shiftKey &&
+              window.matchMedia('(pointer: fine)').matches
+            ) {
+              e.preventDefault();
               launchRuntimeOperation(() => onSend());
             }
           }}
@@ -9289,9 +9330,10 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
             ) : (
               <img src="/scytale-icon.svg" alt="" />
             )}
-            <div>
+            <div className="brand-txt">
               <div className="t">
-                {myName.trim() || t('Dein Profil')} <span className="ver">v{__APP_VERSION__}</span>
+                <span className="brand-name">{myName.trim() || t('Dein Profil')}</span>
+                <span className="ver">v{__APP_VERSION__}</span>
               </div>
               <div className="fp">{shortFp(fingerprint)}</div>
             </div>

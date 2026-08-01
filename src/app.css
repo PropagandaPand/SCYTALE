@@ -61,7 +61,9 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-sans);
-  height: 100dvh;
+  /* --app-h tracks the visual viewport (set from JS) so an open keyboard doesn't
+     leave a gap above the composer on iOS; falls back to 100dvh before/without JS. */
+  height: var(--app-h, 100dvh);
   overflow: hidden;
   overscroll-behavior: none;
   -webkit-font-smoothing: antialiased;
@@ -82,7 +84,7 @@ select {
 #app {
   max-width: 460px;
   margin: 0 auto;
-  height: 100dvh;
+  height: var(--app-h, 100dvh);
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -415,12 +417,28 @@ html.privacy-curtain-on .privacy-curtain {
 .brand-avatar {
   object-fit: cover;
 }
+/* Let the text column shrink so a long profile name truncates instead of running
+   off to the right behind the header icons. */
+.list-brand .brand-txt {
+  min-width: 0;
+}
 .list-brand .t {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
   font-weight: 600;
   font-size: 20px;
   letter-spacing: 0.06em;
 }
+.list-brand .brand-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .list-brand .ver {
+  flex: none;
   font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 500;
@@ -430,13 +448,15 @@ html.privacy-curtain-on .privacy-curtain {
   border: 1px solid var(--border);
   border-radius: 5px;
   padding: 1px 5px;
-  vertical-align: middle;
 }
 .list-brand .fp {
   font-family: var(--font-mono);
   font-size: 10.5px;
   color: var(--muted);
   margin-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .icon-btns {
   display: flex;
@@ -1056,7 +1076,7 @@ html.privacy-curtain-on .privacy-curtain {
 }
 .composer {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   gap: 9px;
   padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
   border-top: 1px solid var(--border);
@@ -1074,23 +1094,30 @@ html.privacy-curtain-on .privacy-curtain {
   align-items: center;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: 22px;
   padding: 0 15px;
-  height: 44px;
+  min-height: 44px;
   transition: border-color 0.16s ease;
 }
 .composer-pill:focus-within {
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
 }
-.composer-pill input {
+.composer-pill textarea {
   flex: 1;
   min-width: 0; /* same reason as the pill: let it shrink instead of overflowing */
+  resize: none;
+  max-height: 140px; /* == COMPOSER_MAX_HEIGHT; grows to a few lines then scrolls */
+  overflow-y: auto;
   background: transparent;
   border: 0;
   outline: none;
   color: var(--text);
   font-size: 16px;
+  line-height: 1.35;
   font-family: var(--font-sans);
+  padding: 11px 0;
+  margin: 0;
+  display: block;
 }
 .send-btn {
   width: 44px;

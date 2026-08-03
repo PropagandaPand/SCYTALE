@@ -1742,24 +1742,6 @@ export function Messenger({ dek, onLock, populatingDecoy = false, onEnterDecoy, 
     return () => document.removeEventListener('touchmove', stopScrollWhileDragging);
   }, []);
 
-  // Track the visual viewport so the app fills ONLY the space above an open keyboard.
-  // iOS ignores interactive-widget=resizes-content, so without this a large gap opens
-  // between the composer and the keyboard. --app-h falls back to 100dvh before/without
-  // JS, so there is no regression where visualViewport is unavailable.
-  useEffect(() => {
-    const vv = window.visualViewport;
-    if (!vv) return;
-    const apply = () => {
-      document.documentElement.style.setProperty('--app-h', `${Math.round(vv.height)}px`);
-    };
-    apply();
-    vv.addEventListener('resize', apply);
-    return () => {
-      vv.removeEventListener('resize', apply);
-      document.documentElement.style.removeProperty('--app-h');
-    };
-  }, []);
-
   function consumeEarlyDeliveryReceipts(msg: ChatMessage): ChatMessage {
     if (!msg.deliveries?.length) return msg;
     let changed = false;

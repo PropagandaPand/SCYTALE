@@ -61,9 +61,7 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-sans);
-  /* --app-h tracks the visual viewport (set from JS) so an open keyboard doesn't
-     leave a gap above the composer on iOS; falls back to 100dvh before/without JS. */
-  height: var(--app-h, 100dvh);
+  height: 100dvh;
   overflow: hidden;
   overscroll-behavior: none;
   -webkit-font-smoothing: antialiased;
@@ -84,7 +82,7 @@ select {
 #app {
   max-width: 460px;
   margin: 0 auto;
-  height: var(--app-h, 100dvh);
+  height: 100dvh;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -1104,6 +1102,7 @@ html.privacy-curtain-on .privacy-curtain {
 }
 .composer-pill textarea {
   flex: 1;
+  width: 100%; /* fill the pill so the placeholder/one-line text never wraps */
   min-width: 0; /* same reason as the pill: let it shrink instead of overflowing */
   resize: none;
   max-height: 140px; /* == COMPOSER_MAX_HEIGHT; grows to a few lines then scrolls */
